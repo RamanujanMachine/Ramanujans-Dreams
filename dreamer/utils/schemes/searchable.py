@@ -63,7 +63,8 @@ class Searchable(ABC):
         try:
             with Logger.simple_timer('Initial walk and inverse'):
                 walked = traj_m.walk({n: 1}, search_config.DEPTH_FROM_TRAJECTORY_LEN(traj_len, self.dim), {n: 0})
-                walked = walked.inv().T
+                if self.use_inv_t:
+                    walked = walked.inv().T
         except Exception as e:
             Logger(f'Unexpected exception when trying to walk, ignoring trajectory', Logger.Levels.warning).log(msg_prefix='\n')
             Logger(f'{e}', Logger.Levels.warning).log()
