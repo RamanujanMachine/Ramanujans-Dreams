@@ -23,6 +23,7 @@ import math
 import numpy as np
 from .utils import initial_points as init_points
 from functools import partial
+from ramanujantools.cmf import pFq as rt_pFq
 
 
 class ShardExtractorMod(ExtractionModScheme):
@@ -100,8 +101,8 @@ class ShardExtractor(ExtractionScheme):
         hps = set()
         symbols = list(self.cmf_data.cmf.matrices.keys())
         for s in symbols:
-            if isinstance(self.cmf_data.cmf, pFq):
-                det = pFq.determinant(self.cmf_data.cmf.p, self.cmf_data.cmf.q, self.cmf_data.cmf.z, s)
+            if isinstance(self.cmf_data.cmf, rt_pFq):
+                det = rt_pFq.determinant(self.cmf_data.cmf.p, self.cmf_data.cmf.q, self.cmf_data.cmf.z, s)
             else:
                 det = self.cmf_data.cmf.matrices[s].det()
             zeros = sp.solve(det)
@@ -154,7 +155,7 @@ class ShardExtractor(ExtractionScheme):
             prefix_dims = max(min(int(round(math.log(os.cpu_count(), S))), os.cpu_count() - 1), 1)
 
             symmetries_func = None
-            if issubclass(self.cmf_data.cmf.__class__, pFq) and config.extraction.IGNORE_DUPLICATE_SEARCHABLES:
+            if issubclass(self.cmf_data.cmf.__class__, rt_pFq) and config.extraction.IGNORE_DUPLICATE_SEARCHABLES:
                 symmetries_func = partial(init_points.filter_symmetrical_cones,
                                           p=self.cmf_data.cmf.p,
                                           q=self.cmf_data.cmf.q,
