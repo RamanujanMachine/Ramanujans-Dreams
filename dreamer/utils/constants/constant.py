@@ -25,23 +25,24 @@ class Constant:
         self.name = name
         self.value_sympy = value_sympy
 
-        if value_mpmath:
-            self.value_mpmath = value_mpmath
+        # Store explicit mpmath value; if not given, the cached_property below
+        # will compute it lazily from the sympy expression.
+        if value_mpmath is not None:
+            self._explicit_mpmath = value_mpmath
         Constant.registry[self.name] = self
 
     @cached_property
     def value_mpmath(self):
         """
-        :return: The mpmath object representing the constnat
+        :return: The mpmath value of the constant (computed once and cached).
         """
-        if self.value_mpmath:
-            return self.value_mpmath
-        else:
-            try:
-                return sp.lambdify([], self.value_sympy, modules=['mpmath'])()
-            except Exception as e:
-                print(f"Warning: Could not auto-convert {self.name} to mpmath. Error: {e}")
-                return mp.mpf(0)
+        if hasattr(self, '_explicit_mpmath'):
+            return self._explicit_mpmath
+        try:
+            return sp.lambdify([], self.value_sympy, modules=['mpmath'])()
+        except Exception as e:
+            print(f"Warning: Could not auto-convert {self.name} to mpmath. Error: {e}")
+            return mp.mpf(0)
 
     def __mul__(self, other):
         if isinstance(other, Constant):

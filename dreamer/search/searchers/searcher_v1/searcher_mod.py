@@ -64,5 +64,6 @@ class SearcherModV1(SearcherModScheme):
                 else:
                     filename = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in repr(space.cmf)).strip('_')
                 write_chunk(res, filename)
+                dms[space] = res
 
         return dms
