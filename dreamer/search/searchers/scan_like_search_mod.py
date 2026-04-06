@@ -4,8 +4,8 @@ from dreamer.utils.storage.storage_objects import DataManager
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.ui.tqdm_config import SmartTQDM
-from ...methods.serial.serial_searcher import SerialSearcher
-from . import config as search_config_local
+from dreamer.search.methods.serial.serial_searcher import SerialSearcher
+from dreamer.search.searchers.searcher_v1 import config as search_config_local
 from dreamer.configs import config
 from ramanujantools.cmf import CMF
 from typing import Dict, List
@@ -53,9 +53,9 @@ class SearcherModV1(SearcherModScheme):
                 searcher = SerialSearcher(space, space.const, use_LIReC=self.use_LIReC)
                 res = searcher.search(
                     None,
-                    find_limit=search_config_local.FIND_LIMIT,
-                    find_gcd_slope=search_config_local.FIND_GCD_SLOPE,
-                    find_eigen_values=search_config_local.FIND_EIGEN_VALUES,
+                    find_limit=search_config.COMPUTE_LIMIT,
+                    find_gcd_slope=search_config.COMPUTE_GCD_SLOPE,
+                    find_eigen_values=search_config.COMPUTE_EIGEN_VALUES,
                     trajectory_generator=search_config.NUM_TRAJECTORIES_FROM_DIM
                 )
 

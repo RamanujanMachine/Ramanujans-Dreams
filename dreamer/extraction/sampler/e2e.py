@@ -1,4 +1,4 @@
-import numpy as np
+from dreamer.utils.rand import np
 import scipy.special as spc
 from dreamer.extraction.sampler.conditioner import Stage1Conditioner
 from dreamer.extraction.sampler.raycaster import Stage2Raycaster
@@ -87,19 +87,34 @@ class EndToEndSamplingEngine:
 
         success = True
         if median_gap < threshold_degrees:
-            Logger(f"⚠ WARNING: Severe angular clustering detected. Median NN gap: {median_gap:.2f}°", Logger.Levels.debug).log()
+            Logger(
+                f"⚠ WARNING: Severe angular clustering detected. Median NN gap: {median_gap:.2f}°",
+                Logger.Levels.debug
+            ).log()
             success = False
         else:
-            Logger(f"Uniformity Check Passed: Healthy angular separation. Median NN gap: {median_gap:.2f}°", Logger.Levels.debug).log()
+            Logger(
+                f"Uniformity Check Passed: Healthy angular separation. Median NN gap: {median_gap:.2f}°",
+                Logger.Levels.debug
+            ).log()
 
         if mean_gap < threshold_degrees:
-            Logger(f"⚠ WARNING: Severe angular clustering detected. Mean NN gap: {mean_gap:.2f}°", Logger.Levels.debug).log()
+            Logger(
+                f"⚠ WARNING: Severe angular clustering detected. Mean NN gap: {mean_gap:.2f}°",
+                Logger.Levels.debug
+            ).log()
             success = False
         else:
-            Logger(f"Uniformity Check Passed: Healthy angular separation. Mean NN gap: {mean_gap:.2f}°", Logger.Levels.debug).log()
+            Logger(
+                f"Uniformity Check Passed: Healthy angular separation. Mean NN gap: {mean_gap:.2f}°",
+                Logger.Levels.debug
+            ).log()
 
         if not success:
-            Logger(f"Could not preform uniform sampling as expected... (if this repeats many times please report)", Logger.Levels.warning).log()
+            Logger(
+                f"Could not preform uniform sampling as expected... (if this repeats many times please report)",
+                Logger.Levels.warning
+            ).log()
 
     def harvest(self, target_func: Callable[[int], int] | int, guidance_method: str = 'mcmc') -> np.ndarray:
         """
@@ -120,7 +135,10 @@ class EndToEndSamplingEngine:
         self.d_flat = Z_reduced.shape[1]
 
         fraction = self._estimate_cone_fraction(B_reduced, self.d_flat)
-        Logger(f"[Pipeline] Cone Volume Estimate: {fraction*100:.6f}% of total sphere.", Logger.Levels.debug).log()
+        Logger(
+            f"[Pipeline] Cone Volume Estimate: {fraction*100:.6f}% of total sphere.",
+            Logger.Levels.debug
+        ).log()
 
         if type(target_func) == int:
             target_rays = target_func
@@ -128,7 +146,10 @@ class EndToEndSamplingEngine:
             amount_safety = 1.05
             target_rays = max(int(target_func(self.d_flat) * fraction * amount_safety), 5)
         R_max = self._calculate_R_max(target_rays, fraction, self.d_flat)
-        Logger(f"[Pipeline] Mathematical R_max needed for {target_rays} rays: {R_max:.2f}", Logger.Levels.debug).log()
+        Logger(
+            f"[Pipeline] Mathematical R_max needed for {target_rays} rays: {R_max:.2f}",
+            Logger.Levels.debug
+        ).log()
         Logger("[Pipeline] Initializing Stage 2: Universal Raycaster...", Logger.Levels.debug).log()
         sampler = Stage2Raycaster(Z_reduced, B_reduced, self.d_orig, guidance_method)
 
@@ -143,7 +164,10 @@ class EndToEndSamplingEngine:
         else:
             # Microscopic outer shell. Must penetrate deep to fill quota.
             dynamic_max_per_ray = max(1, int(1.5 * (target_rays ** (1.0 / self.d_flat))))
-            Logger(f"[Pipeline] Low-D Space Detected. Allowing depth penetration: max_per_ray = {dynamic_max_per_ray}", Logger.Levels.debug).log()
+            Logger(
+                f"[Pipeline] Low-D Space Detected. Allowing depth penetration: max_per_ray={dynamic_max_per_ray}",
+                Logger.Levels.debug
+            ).log()
 
         while len(final_rays) < target_rays:
             Logger(f"Sweeping lattice up to R_max = {current_R_max:.2f}...", Logger.Levels.debug).log()
@@ -156,7 +180,10 @@ class EndToEndSamplingEngine:
             )
 
             if len(raw_rays) >= target_rays:
-                Logger(f"Quota exceeded ({len(raw_rays)}). Engaging Expanding Ball (Length Sort)...", Logger.Levels.debug).log()
+                Logger(
+                    f"Quota exceeded ({len(raw_rays)}). Engaging Expanding Ball (Length Sort)...",
+                    Logger.Levels.debug
+                ).log()
                 lengths = np.linalg.norm(raw_rays, axis=1)
                 sorted_indices = np.argsort(lengths)
                 best_rays = raw_rays[sorted_indices][:target_rays]
@@ -177,7 +204,10 @@ class EndToEndSamplingEngine:
                     f"Discretization Gap hit: Yielded {len(raw_rays)} bounded rays. Target: {target_rays}.",
                     Logger.Levels.debug
                 ).log()
-                Logger(f"\n   -> Momentum Expansion: Multiplying R_max by {multiplier:.3f}", Logger.Levels.debug).log()
+                Logger(
+                    f"\n   -> Momentum Expansion: Multiplying R_max by {multiplier:.3f}",
+                    Logger.Levels.debug
+                ).log()
                 current_R_max *= multiplier
 
         self._verify_uniformity(final_rays, fraction, self.d_flat)

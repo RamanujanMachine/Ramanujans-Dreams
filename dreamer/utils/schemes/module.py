@@ -3,7 +3,6 @@ from inspect import isclass
 from typing import Optional
 import functools
 import traceback
-
 from dreamer.utils.logger import Logger
 
 

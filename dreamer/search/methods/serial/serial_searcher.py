@@ -1,4 +1,4 @@
-from dreamer.utils.mp_manager import create_pool
+from dreamer.utils.multi_processing import create_pool
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.storage_objects import DataManager, SearchVector
 from dreamer.utils.schemes.searchable import Searchable
@@ -6,7 +6,9 @@ from dreamer.configs import config
 
 import mpmath as mp
 from functools import partial
-from typing import Optional, Position, Callable, List
+from typing import Optional, Callable, List
+from ramanujantools import Position
+
 
 search_config = config.search
 

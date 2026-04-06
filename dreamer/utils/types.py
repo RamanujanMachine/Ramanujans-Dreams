@@ -1,8 +1,8 @@
 import sympy as sp
-from typing import Union, List, Tuple, Dict, Set, Any, Generator, FrozenSet, Optional, Type, TextIO, Callable
-from ramanujantools.cmf import CMF, pFq
+from typing import List, Tuple, Optional
+from ramanujantools.cmf import CMF
 from ramanujantools import Position
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -15,13 +15,3 @@ class ShiftCMF:
 
     def __hash__(self):
         return hash((self.cmf, self.shift))
-
-
-Shift = Union[sp.Rational | int | None]     # a shift in starting point
-CMFtup = Tuple[CMF, Position]               # CMF tuple (CMF, list of shifts)
-CMFlist = List[CMFtup]
-EqTup = Tuple[sp.Expr, sp.Expr]             # Hyperplane equation representation
-
-ShardVec = Tuple[int, ...]
-
-

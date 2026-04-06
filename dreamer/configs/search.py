@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Callable
 from .configurable import Configurable
-from typing import List, Tuple
+from typing import Tuple
 import math
 
 
@@ -28,5 +28,8 @@ class SearchConfig(Configurable):
     CACHE_ACCEPTANCE_THRESHOLD: float = 1e-12       # p,q vector cache acceptance threshold
     IDENTIFY_CHECK_THRESHOLD: float = 1e-10
 
+    COMPUTE_EIGEN_VALUES: bool = False
+    COMPUTE_GCD_SLOPE: bool = False
+    COMPUTE_LIMIT: bool = False
 
 search_config: SearchConfig = SearchConfig()

@@ -10,7 +10,8 @@ try:
     IMPORT_SUCCESS = True
 except ImportError as e:
     Logger(
-        f'[IMPORTANT!] This project works best on Linux/MacOS (current OS: Windows), please see instruction manual',
+        '[IMPORTANT!] This project works only on Linux/MacOS (current OS: Windows), '
+        'please see instruction manual',
         Logger.Levels.warning
     ).log()
 

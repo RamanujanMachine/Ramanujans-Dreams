@@ -4,7 +4,7 @@ from dreamer.utils.caching import cached_property
 
 import sympy as sp
 from typing import Tuple, Optional, List
-import numpy as np
+from dreamer.utils.rand import np
 
 
 @dataclass

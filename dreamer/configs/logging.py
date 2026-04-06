@@ -1,5 +1,4 @@
-from dataclasses import dataclass, fields
-
+from dataclasses import dataclass
 from .configurable import Configurable
 
 
@@ -12,7 +11,6 @@ class LogConfig(Configurable):
     LOG_FILENAME: str = "run.log"
     EXCEPTION_SHOW_TRACE: bool = False
     DEBUG_SHOW_TRACE: bool = False
-
 
 
 logging_config: LogConfig = LogConfig()

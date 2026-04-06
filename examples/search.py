@@ -58,7 +58,9 @@ class MySearchMod(SearcherModScheme):
         # When you are searching per searchable (e.g. Shard) the results are stored in automatically in a pickle file
         # in `dir_path`
         with Exporter.export_stream(dir_path, exists_ok=True, clean_exists=True, fmt=Formats.PICKLE) as write_chunk:
-            for space in SmartTQDM(self.searchables, desc='Searching the searchable spaces: ', **sys_config.TQDM_CONFIG):
+            for space in SmartTQDM(
+                    self.searchables, desc='Searching the searchable spaces: ', **sys_config.TQDM_CONFIG
+            ):
                 searcher = MySearchMethod(
                     space, Constant.get_constant(space.const_name)    # TODO: add your arguments
                 )   # creates an instance of your searcher

@@ -1,6 +1,5 @@
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.utils.schemes.searchable import Searchable
-from dreamer.utils.rand import np
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs import config
 from .sampler.e2e import EndToEndSamplingEngine
@@ -8,6 +7,8 @@ from ramanujantools.cmf import CMF
 from ramanujantools import Position
 from typing import List, Set, Optional, Callable, Tuple, Union
 import sympy as sp
+import numpy as np
+
 
 class Shard(Searchable):
     def __init__(self,
@@ -62,66 +63,9 @@ class Shard(Searchable):
             return Position({s: sp.Integer(0) for s in self.symbols})
         return Position({sym: v for v, sym in zip(self.start_coord.values(), self.symbols)})
 
-    # def sample_trajectories(self, n_samples, *, strict: Optional[bool] = False) -> Set[Position]:
-    #     """
-    #     Sample trajectories from the shard.
-    #     :param n_samples: Number of samples to generate
-    #     :param strict: True -> compute as n_samples, else compute n_samples * fraction.
-    #     (fraction of the cone is taking from the sphere)
-    #     :return: A set of sampled trajectories
-    #     """
-    #     def _estimate_cone_fraction(A, n_trials=5000) -> float:
-    #         """
-    #         Helper to estimate what % of the sphere is covered by the cone.
-    #         """
-    #         d = A.shape[1]
-    #         raw = np.random.normal(size=(n_trials, d))
-    #         norms = np.linalg.norm(raw, axis=1, keepdims=True)
-    #         dirs = raw / norms
-    #         projections = dirs @ A.T
-    #         inside = np.all(projections <= 1e-9, axis=1)
-    #
-    #         frac = np.mean(inside)
-    #
-    #         # Safety for extremely thin cones to avoid division by zero
-    #         if frac == 0:
-    #             return 1.0 / n_trials  # Conservative lower bound
-    #         return frac
-    #
-    #     if self.is_whole_space:
-    #         samples = PrimitiveSphereSampler(len(self.symbols)).sample(n_samples)
-    #         return {
-    #             Position({sym: sp.sympify(v) for v, sym in zip(p, self.symbols)})
-    #             for p in samples
-    #         }
-    #
-    #     fraction = _estimate_cone_fraction(self.A) * 1.05   # always assume undersampling
-    #     if strict:
-    #         # We need n_samples INSIDE the cone.
-    #         n_target_safe = int((n_samples / fraction) * 1.2)   # go on the safe side assuming bad fraction estimation
-    #         R = self.compute_ball_radius(len(self.symbols), n_target_safe)
-    #         target_yield = n_samples
-    #     else:
-    #         # We treat n_samples as the "Density" of the full sphere.
-    #         R = self.compute_ball_radius(len(self.symbols), n_samples)
-    #         target_yield = int(n_samples * fraction)
-    #
-    #         # Edge case: If cone is tiny, ensure we at least look for more than 1
-    #         if target_yield < 1:
-    #             target_yield = 1000
-    #
-    #     sampler = FlatlandSHRRSampler(
-    #         self.A, R=np.ceil(R + 0.5), thinning=5
-    #         # self.A, np.zeros_like(self.b), R=np.ceil(R + 0.5), thinning=5,
-    #         # start=np.array(list(self.get_interior_point().values()), dtype=np.float64)
-    #     )
-    #     samples, t = sampler.sample(target_yield)
-    #     return {
-    #         Position({sym: sp.sympify(v) for v, sym in zip(p, self.symbols)})
-    #         for p in samples
-    #     }
-
-    def sample_trajectories(self, compute_n_samples: Callable[[int], int], *, strict: Optional[bool] = False) -> Set[Position]:
+    def sample_trajectories(
+            self, compute_n_samples: Callable[[int], int], *, strict: Optional[bool] = False
+    ) -> Set[Position]:
         # from dreamer.utils.logger import Logger
         # Logger(f'A:\n{self.A}\nb:{self.b}', Logger.Levels.info).log()
 

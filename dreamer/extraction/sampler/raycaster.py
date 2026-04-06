@@ -1,7 +1,7 @@
 import scipy.optimize as opt
 from numba import njit, prange
 import time
-import numpy as np
+from dreamer.utils.rand import np
 from dreamer.utils.logger import Logger
 
 
@@ -30,7 +30,8 @@ def _raycast_kernel_parallel(d_orig, d_flat, Z_int, B, continuous_rays, R_max, t
             for j in range(d_flat):
                 val = int(np.round(p[j]))
                 z[j] = val
-                if val != 0: is_origin = False
+                if val != 0:
+                    is_origin = False
 
             if is_origin:
                 t += t_step
@@ -39,7 +40,8 @@ def _raycast_kernel_parallel(d_orig, d_flat, Z_int, B, continuous_rays, R_max, t
             valid = True
             for i in range(m):
                 val = 0.0
-                for j in range(d_flat): val += B[i, j] * z[j]
+                for j in range(d_flat):
+                    val += B[i, j] * z[j]
                 if val > 1e-9:
                     valid = False
                     break
@@ -47,7 +49,8 @@ def _raycast_kernel_parallel(d_orig, d_flat, Z_int, B, continuous_rays, R_max, t
             if valid:
                 v_real = np.zeros(d_orig, dtype=np.int64)
                 for i in range(d_orig):
-                    for j in range(d_flat): v_real[i] += Z_int[i, j] * z[j]
+                    for j in range(d_flat):
+                        v_real[i] += Z_int[i, j] * z[j]
 
                 a = abs(v_real[0])
                 for i in range(1, d_orig):
@@ -61,7 +64,8 @@ def _raycast_kernel_parallel(d_orig, d_flat, Z_int, B, continuous_rays, R_max, t
                         match = True
                         for dim in range(d_orig):
                             if prev[dim] != v_real[dim]: match = False; break
-                        if match: is_new = False
+                        if match:
+                            is_new = False
 
                     if is_new:
                         harvest_buffer[base_idx + hits] = v_real
@@ -70,7 +74,7 @@ def _raycast_kernel_parallel(d_orig, d_flat, Z_int, B, continuous_rays, R_max, t
                         if hits >= max_per_ray:
                             break
             t += t_step
-        ray_counts[r_idx] = hits # Lock in this thread's count
+        ray_counts[r_idx] = hits    # Lock in this thread's count
 
     return harvest_buffer, ray_counts
 
@@ -85,12 +89,14 @@ def _generate_guide_rays_mcmc_kernel(d_flat, B, start_pos, target_rays, mix_step
     for chain_idx in prange(num_chains):
         pos = start_pos.copy()
         start_norm = 0.0
-        for k in range(d_flat): start_norm += pos[k]*pos[k]
+        for k in range(d_flat):
+            start_norm += pos[k]*pos[k]
         if start_norm > 0:
             start_norm = np.sqrt(start_norm)
-            for k in range(d_flat): pos[k] /= start_norm
+            for k in range(d_flat):
+                pos[k] /= start_norm
 
-        for _ in range(1000): # Burn-in
+        for _ in range(1000):   # Burn-in
             v = np.random.randn(d_flat)
             norm_v = 0.0
             for j in range(d_flat): norm_v += v[j]*v[j]
@@ -100,76 +106,98 @@ def _generate_guide_rays_mcmc_kernel(d_flat, B, start_pos, target_rays, mix_step
             # Standard Hit-and-Run on Hyperplanes
             t_min, t_max = -1e9, 1e9
             for j in range(m):
-                dot_v = 0.0; dot_p = 0.0
+                dot_v = 0.0
+                dot_p = 0.0
                 for k in range(d_flat):
                     dot_v += B[j, k] * v[k]
                     dot_p += B[j, k] * pos[k]
                 if dot_v > 1e-9:
                     t = -dot_p / dot_v
-                    if t < t_max: t_max = t
+                    if t < t_max:
+                        t_max = t
                 elif dot_v < -1e-9:
                     t = -dot_p / dot_v
-                    if t > t_min: t_min = t
+                    if t > t_min:
+                        t_min = t
 
             # Cap maximum jump to prevent pure infinity drift in fully open cones
-            if t_max > 100.0: t_max = 100.0
-            if t_min < -100.0: t_min = -100.0
+            if t_max > 100.0:
+                t_max = 100.0
+            if t_min < -100.0:
+                t_min = -100.0
 
             if t_max > t_min:
                 t_step = np.random.uniform(t_min, t_max)
-                for k in range(d_flat): pos[k] += t_step * v[k]
+                for k in range(d_flat):
+                    pos[k] += t_step * v[k]
             else:
-                for k in range(d_flat): pos[k] *= 0.99
+                for k in range(d_flat):
+                    pos[k] *= 0.99
 
             # THE FIX: Simply project back to Unit Sphere after jumping
             norm_pos = 0.0
-            for k in range(d_flat): norm_pos += pos[k]*pos[k]
+            for k in range(d_flat):
+                norm_pos += pos[k]*pos[k]
             if norm_pos > 0:
                 norm_pos = np.sqrt(norm_pos)
-                for k in range(d_flat): pos[k] /= norm_pos
+                for k in range(d_flat):
+                    pos[k] /= norm_pos
 
         # Record Breadcrumbs
         for i in range(rays_per_chain):
             global_idx = chain_idx * rays_per_chain + i
-            if global_idx >= target_rays: break
+            if global_idx >= target_rays:
+                break
 
             for _ in range(mix_steps):
                 v = np.random.randn(d_flat)
                 norm_v = 0.0
-                for j in range(d_flat): norm_v += v[j]*v[j]
+                for j in range(d_flat):
+                    norm_v += v[j]*v[j]
                 norm_v = np.sqrt(norm_v)
-                for j in range(d_flat): v[j] /= norm_v
+                for j in range(d_flat):
+                    v[j] /= norm_v
 
                 t_min, t_max = -1e9, 1e9
                 for j in range(m):
-                    dot_v = 0.0; dot_p = 0.0
+                    dot_v = 0.0
+                    dot_p = 0.0
                     for k in range(d_flat):
                         dot_v += B[j, k] * v[k]
                         dot_p += B[j, k] * pos[k]
                     if dot_v > 1e-9:
                         t = -dot_p / dot_v
-                        if t < t_max: t_max = t
+                        if t < t_max:
+                            t_max = t
                     elif dot_v < -1e-9:
                         t = -dot_p / dot_v
-                        if t > t_min: t_min = t
+                        if t > t_min:
+                            t_min = t
 
-                if t_max > 100.0: t_max = 100.0
-                if t_min < -100.0: t_min = -100.0
+                if t_max > 100.0:
+                    t_max = 100.0
+                if t_min < -100.0:
+                    t_min = -100.0
 
                 if t_max > t_min:
                     t_step = np.random.uniform(t_min, t_max)
-                    for k in range(d_flat): pos[k] += t_step * v[k]
+                    for k in range(d_flat):
+                        pos[k] += t_step * v[k]
                 else:
-                    for k in range(d_flat): pos[k] *= 0.99
+                    for k in range(d_flat):
+                        pos[k] *= 0.99
 
                 # Project back to sphere
                 norm_pos = 0.0
-                for k in range(d_flat): norm_pos += pos[k]*pos[k]
+                for k in range(d_flat):
+                    norm_pos += pos[k]*pos[k]
                 if norm_pos > 0:
                     norm_pos = np.sqrt(norm_pos)
-                    for k in range(d_flat): pos[k] /= norm_pos
+                    for k in range(d_flat):
+                        pos[k] /= norm_pos
 
-            for k in range(d_flat): rays[global_idx, k] = pos[k]
+            for k in range(d_flat):
+                rays[global_idx, k] = pos[k]
 
     return rays
 
@@ -187,10 +215,12 @@ def _generate_guide_rays_mhs_kernel(d_flat, B, start_pos, target_rays, mix_steps
         new_pos = np.zeros(d_flat, dtype=np.float64)
 
         start_norm = 0.0
-        for k in range(d_flat): start_norm += pos[k]*pos[k]
+        for k in range(d_flat):
+            start_norm += pos[k]*pos[k]
         if start_norm > 0:
             start_norm = np.sqrt(start_norm)
-            for k in range(d_flat): pos[k] /= start_norm
+            for k in range(d_flat):
+                pos[k] /= start_norm
 
         # Total steps = Burn-in + (Number of rays * Mix steps)
         total_steps = 1000 + rays_per_chain * mix_steps
@@ -199,10 +229,14 @@ def _generate_guide_rays_mhs_kernel(d_flat, B, start_pos, target_rays, mix_steps
         for step_idx in range(total_steps):
             # Adaptive Multi-Scale Jump
             rand_val = np.random.rand()
-            if rand_val < 0.2: sigma = 0.5      # Big jump (Sweeps wide 2D cones)
-            elif rand_val < 0.5: sigma = 0.1    # Medium jump
-            elif rand_val < 0.8: sigma = 0.01   # Small jump (Navigates 15D Needles)
-            else: sigma = 0.001                 # Micro jump (Survives 15D Pancakes)
+            if rand_val < 0.2:
+                sigma = 0.5      # Big jump (Sweeps wide 2D cones)
+            elif rand_val < 0.5:
+                sigma = 0.1    # Medium jump
+            elif rand_val < 0.8:
+                sigma = 0.01   # Small jump (Navigates 15D Needles)
+            else:
+                sigma = 0.001                 # Micro jump (Survives 15D Pancakes)
 
             # Propose a new step on the surface of the sphere
             norm_new = 0.0
@@ -211,13 +245,15 @@ def _generate_guide_rays_mhs_kernel(d_flat, B, start_pos, target_rays, mix_steps
                 norm_new += new_pos[k] * new_pos[k]
 
             norm_new = np.sqrt(norm_new)
-            for k in range(d_flat): new_pos[k] /= norm_new
+            for k in range(d_flat):
+                new_pos[k] /= norm_new
 
             # Check boundaries (Hyperplanes)
             valid = True
             for j in range(m):
                 dot_val = 0.0
-                for k in range(d_flat): dot_val += B[j, k] * new_pos[k]
+                for k in range(d_flat):
+                    dot_val += B[j, k] * new_pos[k]
                 if dot_val > 1e-9:
                     valid = False
                     break
@@ -230,9 +266,9 @@ def _generate_guide_rays_mhs_kernel(d_flat, B, start_pos, target_rays, mix_steps
             if step_idx >= 1000 and (step_idx - 1000) % mix_steps == 0:
                 global_idx = chain_idx * rays_per_chain + ray_count
                 if global_idx < target_rays:
-                    for k in range(d_flat): rays[global_idx, k] = pos[k]
+                    for k in range(d_flat):
+                        rays[global_idx, k] = pos[k]
                     ray_count += 1
-
     return rays
 
 
@@ -313,7 +349,7 @@ class Stage2Raycaster:
             Logger("XXX Closed Cone.", Logger.Levels.debug).log()
             return np.array([])
 
-        Logger(f"Raycaster: Sweeping lattice along Guide Rays...", Logger.Levels.debug).log()
+        Logger("Raycaster: Sweeping lattice along Guide Rays...", Logger.Levels.debug).log()
         start_t = time.time()
 
         raw_buffer, counts = _raycast_kernel_parallel(
@@ -329,5 +365,8 @@ class Stage2Raycaster:
         merged = np.vstack(valid_blocks)
         unique_rays = np.unique(merged, axis=0)
 
-        Logger(f"Raycaster Yielded {len(unique_rays)} unique, shortest trajectories in {time.time()-start_t:.3f}s", Logger.Levels.debug).log()
+        Logger(
+            f"Raycaster Yielded {len(unique_rays)} unique, shortest trajectories in {time.time()-start_t:.3f}s",
+            Logger.Levels.debug
+        ).log()
         return unique_rays

@@ -6,7 +6,8 @@ from dreamer.utils.schemes.db_scheme import DBScheme
 from dreamer.utils.constants.constant import Constant
 from dreamer.loading.funcs.formatter import Formatter
 from ...errors import ConstantAlreadyExists, ConstantDoesNotExist, NoSuchInspirationFunction, FormattingError
-from dreamer.loading.config import COMMAND_ANNOTATE, DATA_ANNOTATE, TYPE_ANNOTATE, CONST_ANNOTATE, DEFAULT_PATH
+from dreamer.loading.config import COMMAND_ANNOTATE, DATA_ANNOTATE, TYPE_ANNOTATE, CONST_ANNOTATE
+from .config import DEFAULT_PATH
 from typing import Optional, List, Dict
 from dreamer.utils.types import ShiftCMF
 

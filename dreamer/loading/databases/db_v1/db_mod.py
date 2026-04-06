@@ -13,6 +13,7 @@ from dreamer.configs import (
 from typing import Optional, List, Dict
 from dreamer.utils.types import ShiftCMF
 
+
 class BasicDBMod(DBModScheme):
     """
     A module for maintaining the inspiration function database.

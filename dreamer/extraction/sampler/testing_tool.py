@@ -1,5 +1,5 @@
 import time
-import numpy as np
+from dreamer.utils.rand import np
 import matplotlib.pyplot as plt
 from dreamer.extraction.sampler.e2e import EndToEndSamplingEngine
 
@@ -243,4 +243,7 @@ if __name__ == "__main__":
     # run_diagnostic_dashboard(10_000, "15D_Needle")
     # run_diagnostic_dashboard(10_000, "10D_Fat_Baseline")
     np.random.seed(42)
-    run_diagnostic_dashboard(1_000, "15D_Realistic_Dense", matrix=np.array([[1, 0, 0], [0, 1, 0], [7, -11, 2], [-7, 11, -2]]))
+    run_diagnostic_dashboard(
+        1_000, "15D_Realistic_Dense",
+        matrix=np.array([[1, 0, 0], [0, 1, 0], [7, -11, 2], [-7, 11, -2]])
+    )

@@ -2,14 +2,12 @@ from dreamer.utils.schemes.analysis_scheme import AnalyzerModScheme
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.logger import Logger
-from dreamer.utils.constants.constant import Constant
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs import sys_config
 from dreamer.analysis.analysis_methods.serial_analyzer import Analyzer
 from .config import PRIORITIZATION_RANKS
 from typing import Dict, List
-
 
 
 class AnalyzerModV1(AnalyzerModScheme):

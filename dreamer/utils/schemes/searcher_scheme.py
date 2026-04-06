@@ -8,6 +8,7 @@ from dreamer.utils.schemes.module import Module
 from ramanujantools import Position
 from typing import Dict, List, Optional
 
+
 class SearchMethod(ABC):
     """
     The SearchMethod represents a general search method. \n

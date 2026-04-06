@@ -66,11 +66,15 @@ class Searchable(ABC):
         # Do walk
         try:
             with Logger.simple_timer('Initial walk and inverse'):
-                walked = trajectory_matrix.walk({n: 1}, search_config.DEPTH_FROM_TRAJECTORY_LEN(traj_len, self.dim), {n: 0})
+                walked = trajectory_matrix.walk(
+                    {n: 1}, search_config.DEPTH_FROM_TRAJECTORY_LEN(traj_len, self.dim), {n: 0}
+                )
                 if self.use_inv_t:
                     walked = walked.inv().T
         except Exception as e:
-            Logger(f'Unexpected exception "{e}" when trying to walk, ignoring trajectory', Logger.Levels.warning).log()
+            Logger(
+                f'Unexpected exception "{e}" when trying to walk, ignoring trajectory', Logger.Levels.warning
+            ).log()
             return None, None, None
 
         valid_col = None
@@ -90,15 +94,16 @@ class Searchable(ABC):
                 walk_col_ind = col_ind
                 if col_ind != 0:
                     Logger(
-                        f'Using column {col_ind} instead of column 0 in walk matrix delta computation [start={start}, trajectory={trajectory}]',
+                        f'Defaults to using {col_ind} instead of 0 in walk matrix of '
+                        f'[start={start}, trajectory={trajectory}]',
                         Logger.Levels.warning
                     ).log()
                 break
 
         if walk_col is None:
             Logger(
-                f'Could not normalize any walk matrix column [start={start}, trajectory={trajectory}]. Skipping trajectory...',
-                Logger.Levels.warning
+                f'Could not normalize any walk matrix column [start={start}, trajectory={trajectory}]. '
+                'Skipping trajectory...', Logger.Levels.warning
             ).log()
             return None, None, None
 
@@ -146,21 +151,6 @@ class Searchable(ABC):
                     res = db.identify([pi_300] + walk_col[1:])
             except Exception as e:
                 Logger(f'LIReC failed with: "{e}"', Logger.Levels.exception).log()
-
-
-                # LIReC might fail for some reason like tolerance or something else.
-                # This is not expected to occur but could happen nonetheless and should be reported to the user.
-                # User should probably change the "depth from trajectory"
-                traj_len_compute = f'{search_config.DEPTH_FROM_TRAJECTORY_LEN=}'.split('=')[0]
-                number_of_trajectories = f'{search_config.NUM_TRAJECTORIES_FROM_DIM=}'.split('=')[0]
-                # Logger(
-                #     f'Note that LIReC failed with error: "{e}"\n'
-                #     f'This could be a result of an issue with the configurations of:'
-                #     f' "{traj_len_compute}" or "{number_of_trajectories}" '
-                #     f'\nNOTE: (if you are confidant, ignore this message as this error could be just a bad trajectory :) )'
-                #     f'\n TCOL: {t1_col[1:]}',
-                #     Logger.Levels.warning
-                # ).log(msg_prefix='\n')
                 return None, None, None
 
             # if LIReC failed to identify the constant
@@ -190,7 +180,9 @@ class Searchable(ABC):
             with Logger.simple_timer('convergence check'):
                 converge, (_, limit, _) = self._does_converge(trajectory_matrix, traj_len, p, q, self.dim, walk_col_ind)
         except Exception as e:
-            Logger(f'convergence exception: {e}', Logger.Levels.exception).log(add_stack_trace=config.logging.EXCEPTION_SHOW_TRACE)
+            Logger(f'convergence exception: {e}', Logger.Levels.exception).log(
+                add_stack_trace=config.logging.EXCEPTION_SHOW_TRACE
+            )
             converge = False
         if not converge:
             return None, None, None
@@ -226,7 +218,10 @@ class Searchable(ABC):
                     Logger(f'delta guardrails failed, got delta={delta} with: denom=0',
                            Logger.Levels.warning).log()
                 if denom != 0 and err != 0:
-                    Logger(f'delta guardrails failed, got delta={delta} with: \nerror={err} \ndenom = {denom}', Logger.Levels.warning).log()
+                    Logger(
+                        f'delta guardrails failed, got delta={delta} with:\nerror={err}\ndenom = {denom}',
+                        Logger.Levels.warning
+                    ).log()
                 return None, None, None
 
         return float(delta.evalf(10)), rt.Matrix([p, q]), float(limit.as_float())
@@ -262,7 +257,7 @@ class Searchable(ABC):
                 traj_m.matrix = traj_m.matrix.applyfunc(sp.cancel)
         except Exception as e:
             Logger(
-                f'error while computing trajectory matrix for start={start}, trajectory={traj}: {e} ',
+                f'In trajectory matrix computation of start={start}, trajectory={traj}: {e} ',
                 Logger.Levels.exception
             ).log()
             return sd
@@ -287,7 +282,8 @@ class Searchable(ABC):
             if not use_LIReC and not find_limit:
                 print('in order to compute delta must find limit - defaulting to using LIReC')
             sd.delta, sd.initial_values, sd.limit = self.calc_delta(
-                traj_m, traj, start, self.const.value_sympy, np.sqrt(np.sum(np.array(list(traj.values()), dtype=np.float64) ** 2)).astype(float)
+                traj_m, traj, start, self.const.value_sympy,
+                np.sqrt(np.sum(np.array(list(traj.values()), dtype=np.float64) ** 2)).astype(float)
             )
             if sd.delta is not None:
                 sd.LIReC_identify = True
@@ -348,13 +344,14 @@ class Searchable(ABC):
 
     # TODO: remove strict option
     @abstractmethod
-    def sample_trajectories(self, compute_n_samples: Callable[[int], int], *, strict: Optional[bool] = False) -> Set[Position]:
+    def sample_trajectories(self, compute_n_samples: Callable[[int], int], *, strict: Optional[bool] = False) \
+            -> Set[Position]:
         """
         Sample trajectories from the searchable.
-        :param compute_n_samples: Number of trajectories in searchable or number of samples to generate as a funciton of the dimension.
+        :param compute_n_samples: Number of trajectories in searchable or number of samples to generate
+            as a function of the dimension.
         :param strict: If true, sample exactly n_samples trajectories from the searchable,
             else sample n_samples * fraction.
         :return: A set of sampled trajectories
         """
         raise NotImplementedError()
-

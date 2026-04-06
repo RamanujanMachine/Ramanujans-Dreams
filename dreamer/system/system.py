@@ -81,10 +81,12 @@ class System:
                     if scmf.cmf.__class__ == CMF:
                         filename = f'generated_cmf_hashed_{hash(scmf.cmf)}'
                     else:
-                        filename = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in repr(scmf.cmf)).strip('_')
+                        filename = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in repr(scmf.cmf))
+                        filename = filename.strip('_')
                     Exporter.export(
                         root=const_path, f_name=filename, exists_ok=True, clean_exists=True,
-                        data=[ShiftCMF(scmf.cmf, scmf.shift, True)], fmt=Formats.PICKLE
+                        data=[ShiftCMF(scmf.cmf, scmf.shift, scmf.selected_points, scmf.only_selected, scmf.use_inv_t)],
+                        fmt=Formats.PICKLE
                     )
                 Logger(
                     f'CMFs for {const.name} exported to {const_path}', Logger.Levels.info
@@ -95,7 +97,10 @@ class System:
             functions = '\n'
             for i, func in enumerate(funcs):
                 if func.cmf.__class__ == CMF:
-                    pretty_mats = '\n\n>>> '.join(f'{sp.pretty(sym, use_unicode=True)}:\n{sp.pretty(mat, use_unicode=True)}' for sym, mat in func.cmf.matrices.items())
+                    pretty_mats = '\n\n>>> '.join(
+                        f'{sp.pretty(sym, use_unicode=True)}:\n{sp.pretty(mat, use_unicode=True)}'
+                        for sym, mat in func.cmf.matrices.items()
+                    )
                     functions += f'{i+1}. CMF: \n>>>{pretty_mats}\n with offset {tuple(func.shift.values())}\n'
                 else:
                     functions += f'{i+1}. CMF: {repr(func.cmf)} with offset {tuple(func.shift.values())}\n'
@@ -357,4 +362,3 @@ class System:
             else:
                 as_obj.append(c)
         return as_obj
-

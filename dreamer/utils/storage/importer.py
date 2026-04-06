@@ -38,8 +38,8 @@ class Importer:
     @classmethod
     def import_stream(cls, path):
         """
-        A generatorr for data (imports data from direcotry in chunks)
-        :param path: Path of direcotry to import from as stream
+        A generator for data (imports data from directory in chunks)
+        :param path: Path of directory to import from as stream
         """
         
         if not os.path.exists(path):
@@ -52,6 +52,3 @@ class Importer:
         for file in path.rglob('*'):
             if file.is_file():
                 yield cls.imprt(str(file))
-
-        # for f in os.listdir(path):
-        #     yield cls.imprt(os.path.join(path, f))

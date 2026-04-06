@@ -12,20 +12,19 @@ from dreamer.utils.storage.exporter import Exporter
 from dreamer.utils.storage.formats import Formats
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.configs import config
-from dreamer.utils.mp_manager import create_pool
+from dreamer.utils.types import ShiftCMF
+from .utils import initial_points as init_points
 
 import os.path
 import sympy as sp
+import numpy as np
+import math
 from collections import defaultdict
 from numba.typed import Dict
-import math
-import numpy as np
-from .utils import initial_points as init_points
 from functools import partial
 from ramanujantools.cmf import pFq as rt_pFq
 from ramanujantools import Position
 from typing import List, Dict, Set
-from dreamer.utils.types import ShiftCMF
 
 
 class ShardExtractorMod(ExtractionModScheme):
@@ -116,7 +115,9 @@ class ShardExtractor(ExtractionScheme):
                 if (den := v.as_numer_denom()[1]) == 1:
                     continue
 
-                solutions = {(sym, sol) for sym in den.free_symbols for sol in sp.solve(sp.simplify(den), sym)}
+                solutions = {
+                    (sym, sol) for sym in den.free_symbols for sol in sp.solve(sp.simplify(den), sym)
+                }
                 for lhs, rhs in solutions:
                     poles.add(Hyperplane(lhs - rhs, symbols))
             hps.update(poles)
@@ -204,7 +205,10 @@ class ShardExtractor(ExtractionScheme):
         shards = []
         for enc in SmartTQDM(shard_encodings.keys(), desc='Creating shard objects', **sys_config.TQDM_CONFIG):
             A, b, syms = Shard.generate_matrices(list(hps), enc)
-            shards.append(Shard(self.cmf_data.cmf, self.const, A, b, self.cmf_data.shift, syms, shard_encodings[enc], self.cmf_data.use_inv_t))
+            shards.append(Shard(
+                self.cmf_data.cmf, self.const, A, b, self.cmf_data.shift, syms, shard_encodings[enc],
+                self.cmf_data.use_inv_t
+            ))
         return shards
 
 

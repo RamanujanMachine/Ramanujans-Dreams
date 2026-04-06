@@ -1,7 +1,6 @@
 import sympy as sp
 import mpmath as mp
 from typing import Union, Dict, Optional
-
 from dreamer.utils.caching import cached_property
 
 
@@ -20,7 +19,8 @@ class Constant:
         """
         :param name: name of the constant
         :param value_sympy: sympy expression representing the constant
-        :param value_mpmath: optional - mpmath expression representing the constant (it must be equivalent to the sympy one)
+        :param value_mpmath: optional - mpmath expression representing the constant
+            (it must be equivalent to the sympy one)
         """
         self.name = name
         self.value_sympy = value_sympy

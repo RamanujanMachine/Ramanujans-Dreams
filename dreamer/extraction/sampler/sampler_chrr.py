@@ -1,10 +1,9 @@
-import time
-
 from dreamer.utils.rand import np
 from dreamer.utils.logger import Logger
 from dreamer.extraction.utils.fast_gcd import get_gcd_of_array
 from typing import Tuple
 from numba import njit
+import time
 
 
 @njit(cache=True)
@@ -226,7 +225,8 @@ class CHRRSampler:
         if retries == 5:
             Logger(
                 f'Tried to acquire {n_samples} trajectories, but only {total_found} were found in {retries}.\n'
-                f'Try increasing radius or number of retries (THIS COULD BE A BUG! - CONTACT DEV)', Logger.Levels.warning
+                'Try increasing radius or number of retries (THIS COULD BE A BUG! - CONTACT DEV)',
+                Logger.Levels.warning
             ).log(msg_prefix='\n')
         unique_set = set(tuple(x) for x in buf)
         final_arr = np.array(list(unique_set))

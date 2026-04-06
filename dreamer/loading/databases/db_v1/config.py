@@ -10,4 +10,3 @@ ALLOWED_USAGES = [                  # allowed usages of the DB
     DBUsages.STORE_THEN_RETRIEVE
 ]
 MULTIPLE_CONSTANTS = False          # allow operations on multiple constants
-# PARALLEL = False                    # Allow parallelism
