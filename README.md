@@ -1,8 +1,6 @@
 # Ramanujan's Dreams
 Ramanujan's Dreams is a modular system for advanced search in CMFs.
 
-<<<Changed something test.>>>
-
 ## Installation
 * This project is supported fully only on Mac-OS and Linux.  
 If you are a Windows user, it is recommended to use [Windows Subsystem for Linux](https://learn.microsoft.com/en-us/windows/wsl/install) (WSL).
