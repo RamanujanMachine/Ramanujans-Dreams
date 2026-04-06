@@ -1,6 +1,6 @@
 import numpy as np
-from ...hyperplanes import Hyperplane
-from ...utils.initial_points import *
+from dreamer.extraction.hyperplanes import Hyperplane
+from dreamer.extraction.utils.initial_points import *
 import pytest
 import sympy as sp
 

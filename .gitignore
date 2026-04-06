@@ -4,15 +4,18 @@
 __pycache__/
 *.py[cod]
 
-# Virtual environments
-.venv/
-venv/
-
-# Other
-local_dev/
+# Other types
 *.db
 *.json
 *.cache
 *.pkl
 experiments/
-/main.py
+
+# Ignore irelevant agent files
+skills/*
+*.md
+!README.md
+!CONTRIBUTING.md
+templates/
+tests/
+!dreamer/tests/

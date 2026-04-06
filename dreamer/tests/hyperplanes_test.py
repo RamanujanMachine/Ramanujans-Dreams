@@ -1,5 +1,5 @@
 import pytest
-from ...hyperplanes import Hyperplane, Position
+from dreamer.extraction.hyperplanes import Hyperplane, Position
 import sympy as sp
 import numpy as np
 

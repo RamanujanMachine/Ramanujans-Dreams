@@ -10,22 +10,39 @@ include = ["dreamer*"]
 name = "ramanujans-dreams"
 version = "0.0.1"
 description = "System for modular automated search in CMFs for irrationality of constants"
-authors = [{ name="Uri K.H." }]
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+
+authors = [
+  { name = "Ramanujan Machine Group", email = "ramanujan.machine@gmail.com" }
+]
+
 dependencies = [
     "peewee",
     "sympy",
-    "ramanujantools @ git+https://github.com/RamanujanMachine/ramanujantools.git",
+    "ramanujantools",
     "matplotlib",
     "numpy",
     "mpmath",
     "networkx",
     "tqdm",
     "numba",
-    "requests",
     "pandas",
     "scipy",
     "pulp",
     "LIReC @ git+https://github.com/RamanujanMachine/LIReC.git@main",
-    "cysignals; sys_platform != 'win32'",
-    "fpylll; sys_platform != 'win32'"
+    "cysignals",
+    "fpylll"
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.2.0"]
+
+[tool.pytest.ini_options]
+python_files = "*_test.py"
+testpaths = ["dreamer/tests"]
+
+[project.urls]
+Homepage = "https://www.ramanujanmachine.com/"
+Repository = "https://github.com/RamanujanMachine/Ramanujans-Dreams"
