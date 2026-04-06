@@ -39,9 +39,11 @@ class ConfigManager:
                 ).log()
                 if not warned:
                     warned = True
-                    Logger(f'Note that these are the builtin attributes: '
-                           f'{system}\n\n{database}\n\n{extraction}\n\n{analysis}\n\n{search}', Logger.Levels.exception
-                           ).log()
+                    Logger(
+                        f'Note that these are the builtin attributes: '
+                        f'system\n\ndatabase\n\nextraction\n\nanalysis\n\nsearch\n\nlogging',
+                        Logger.Levels.exception
+                    ).log()
 
     def get_configurables(self) -> Dict[str, List[str]]:
         return {

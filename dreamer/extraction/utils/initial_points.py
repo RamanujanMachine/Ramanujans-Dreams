@@ -198,8 +198,6 @@ def __worker_wrapper(fixed_prefix: np.ndarray, D: int, S: int, A: np.ndarray, b:
     :param filter_func: Elimination function for filtering shards
     :return: A mapping from shard signature to an initial point
     """
-    global _worker_cache
-
     M = A.shape[0]
     if M not in _worker_cache:
         _worker_cache[M] = __generate_numba_worker(M)
