@@ -4,7 +4,6 @@ from .analysis import analysis_config
 from .search import search_config
 from .extraction import extraction_config
 from .logging import logging_config
-from dreamer.utils.logger import Logger
 from typing import Dict, List, Any
 
 
@@ -26,6 +25,7 @@ class ConfigManager:
         Example:
             Config.configure(system={"CONSTANT": "X"}, database={"DB_NAME": "foo"})
         """
+        from dreamer.utils.logger import Logger
         warned = False
         for section, values in overrides.items():
             cfg = getattr(self, section, None)
