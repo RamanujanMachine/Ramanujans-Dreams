@@ -45,6 +45,8 @@ class MeijerG(Formatter):
             raise ValueError("Meijer G must satisfy p > 0, 0 <= n <= p and q > 0, 0 <= m <= q")
         if not isinstance(self.shifts, list) and not isinstance(self.shifts, Position):
             raise ValueError("Shifts should be a list or Position")
+        if self.p + self.q != len(self.shifts):
+            raise ValueError("Shifts should be of length p + q")
 
     @classmethod
     def _from_json_obj(cls, data: dict | list) -> "MeijerG":
