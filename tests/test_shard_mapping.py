@@ -14,7 +14,7 @@ hps = [
 ]
 
 
-class TestClass:
+class TestShardMaps:
     def test_compute_mapping(self):
         D = 3
         S = 8

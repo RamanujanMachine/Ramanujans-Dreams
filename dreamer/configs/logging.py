@@ -7,7 +7,7 @@ class LogConfig(Configurable):
     SLEEP_TO_PRINT: bool = False
     PROFILE: bool = False
     PROFILE_SUMMARY: bool = False
-    GENERATE_LOGS: bool = True
+    GENERATE_LOGS: bool = False
     LOG_FILENAME: str = "run.log"
     EXCEPTION_SHOW_TRACE: bool = False
     DEBUG_SHOW_TRACE: bool = False

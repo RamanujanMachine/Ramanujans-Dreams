@@ -55,7 +55,7 @@ class TestFormatterRegistry:
 # ---------------------------------------------------------------------------
 # 2. pFq
 # ---------------------------------------------------------------------------
-class TestPFq:
+class TestpFq:
 
     def test_creation_2f1(self, log2):
         fmt = pFq(log2, 2, 1, -1)

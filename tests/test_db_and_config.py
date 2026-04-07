@@ -7,13 +7,9 @@ Covers:
 - delete operations
 - select missing constant
 """
-import os
-import tempfile
 import pytest
-
 from dreamer.loading.databases.db_v1.db import DB
 from dreamer.loading.funcs.pFq_fmt import pFq
-from dreamer.utils.constants.constant import Constant
 
 
 # ---------------------------------------------------------------------------
@@ -61,8 +57,11 @@ class TestDBInsertSelect:
         assert len(results) == 2
 
     def test_select_nonexistent_returns_empty(self, tmp_db, const_pi):
-        results = tmp_db.select(const_pi)
-        assert results == []
+        from dreamer.loading.errors import ConstantDoesNotExist
+
+        with pytest.raises(ConstantDoesNotExist) as exc_info:
+            results = tmp_db.select(const_pi)
+        assert ConstantDoesNotExist.message_prefix in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

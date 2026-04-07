@@ -36,6 +36,9 @@ if __name__ == '__main__':
             # number of trajectories to be auto-generated in search if needed by the module
             'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func,
             'DEFAULT_USES_INV_T': False
+        },
+        logging={
+            'GENERATE_LOGS': True
         }
     )
 

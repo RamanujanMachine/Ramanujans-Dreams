@@ -12,9 +12,7 @@ import pytest
 
 from ramanujantools import Position
 from ramanujantools.cmf import pFq as rt_pFq
-
 from dreamer.extraction.shard import Shard
-from dreamer.utils.constants.constant import Constant
 
 
 # ---------------------------------------------------------------------------

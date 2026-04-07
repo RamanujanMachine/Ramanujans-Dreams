@@ -68,7 +68,7 @@ class SearcherModScheme(Module):
         self.use_LIReC = use_LIReC
 
     @abstractmethod
-    def execute(self) -> Dict[Searchable, DataManager]:
+    def execute(self) -> Optional[Dict[Searchable, DataManager]]:
         """
         Executes the search.
         :return: A mapping from searchables to their search results.

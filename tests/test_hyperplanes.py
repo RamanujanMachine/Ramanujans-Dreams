@@ -7,7 +7,7 @@ import numpy as np
 x, y, z = sp.symbols('x y z')
 
 
-class TestClass:
+class TestHyperplanes:
 
     # ==========================================
     # 1. VALIDATION TESTS (Expected Failures)

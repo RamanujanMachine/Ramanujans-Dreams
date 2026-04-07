@@ -86,6 +86,9 @@ class Formatter(ABC):
     @staticmethod
     def _selected_start_points_from_json(data):
         points = []
+        if not data:
+            return points
+
         for point_list in data:
             points.append(tuple(sp.sympify(v) if isinstance(v, str) else v for v in point_list))
         return points

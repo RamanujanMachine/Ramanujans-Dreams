@@ -52,7 +52,7 @@ class Shard(Searchable):
         """
         if self.is_whole_space:
             return True
-        point = np.array(point.sorted().values())
+        point = np.array(list(point.sorted().values()))
         return np.all(self.A @ point < self.b)
 
     def get_interior_point(self) -> Position:

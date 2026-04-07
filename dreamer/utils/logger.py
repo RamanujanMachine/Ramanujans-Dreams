@@ -180,8 +180,9 @@ sys_logger.addHandler(console_handler)
 
 # log file handler — mode='w' truncates any previous log on startup;
 # subsequent writes append within the same process.
-file_handler = logging.FileHandler(logging_config.LOG_FILENAME, mode='w')
-file_handler.setLevel(logging.DEBUG)
-file_formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(filename)s:%(funcName)s | %(message)s')
-file_handler.setFormatter(file_formatter)
-sys_logger.addHandler(file_handler)
+if logging_config.GENERATE_LOGS:
+    file_handler = logging.FileHandler(logging_config.LOG_FILENAME, mode='w')
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(filename)s:%(funcName)s | %(message)s')
+    file_handler.setFormatter(file_formatter)
+    sys_logger.addHandler(file_handler)
