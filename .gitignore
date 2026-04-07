@@ -10,12 +10,3 @@ __pycache__/
 *.cache
 *.pkl
 experiments/
-
-# Ignore irelevant agent files
-skills/*
-*.md
-!README.md
-!CONTRIBUTING.md
-templates/
-tests/
-!dreamer/tests/

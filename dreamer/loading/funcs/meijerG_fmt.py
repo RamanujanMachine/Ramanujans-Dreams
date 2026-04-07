@@ -29,25 +29,24 @@ class MeijerG(Formatter):
         :param selected_start_points: Optional list of start points to extract shards from.
         :param only_selected: If True, only extract shards from the selected start points.
         """
-        super().__init__(const, use_inv_t)
         self.m = m
         self.n = n
         self.p = p
         self.q = q
         self.z = z
         self.shifts = shifts
+
         if self.shifts is None:
             self.shifts = [0] * (self.p + self.q)
+        
+        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t)
 
-        if self.p <= 0 or self.q <= 0:
-            raise ValueError("Non-positive values")
+        if not (p > 0 and 0 <= n and n <= p) or not (q > 0 and 0 <= m and m <= q):
+            raise ValueError("Meijer G must satisfy p > 0, 0 <= n <= p and q > 0, 0 <= m <= q")
         if not isinstance(self.shifts, list) and not isinstance(self.shifts, Position):
             raise ValueError("Shifts should be a list or Position")
-        if self.p + self.q != len(self.shifts) and len(self.shifts) != 0:
-            raise ValueError("Shifts should be of length p + q or 0")
-        self.selected_start_points = selected_start_points
-        self.only_selected = only_selected
-        self.use_inv_t = use_inv_t
+        if self.p + self.q != len(self.shifts):
+            raise ValueError("Shifts should be of length p + q")
 
     @classmethod
     def _from_json_obj(cls, data: dict | list) -> "MeijerG":
