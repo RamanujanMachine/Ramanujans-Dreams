@@ -3,7 +3,7 @@ from dreamer.utils.storage.exporter import Exporter, Formats
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.ui.tqdm_config import SmartTQDM
-from dreamer.search.methods.serial.serial_searcher import SerialSearcher
+from dreamer.search.methods.hedgehog_scan import SerialSearcher
 from dreamer.configs import config
 from ramanujantools.cmf import CMF
 from typing import List

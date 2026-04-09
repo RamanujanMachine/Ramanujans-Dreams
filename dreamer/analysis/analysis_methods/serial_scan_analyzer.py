@@ -4,7 +4,7 @@ from dreamer.utils.storage.storage_objects import DataManager
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
-from dreamer.search.methods.serial.serial_searcher import SerialSearcher
+from dreamer.search.methods.hedgehog_scan import SerialSearcher
 from dreamer.configs import config
 from typing import Dict, List
 from ramanujantools.cmf import CMF

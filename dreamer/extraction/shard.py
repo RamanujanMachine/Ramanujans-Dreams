@@ -55,6 +55,20 @@ class Shard(Searchable):
         point = np.array(list(point.sorted().values()))
         return np.all(self.A @ point < self.b)
 
+    def is_valid_trajectory(self, trajectory: Position) -> bool:
+        """
+        Checks if a trajectory ray remains inside the shard as it scales to infinity.
+        Mathematically, the vector v must satisfy A @ v <= 0.
+        """
+        if self.is_whole_space:
+            return True
+
+        # Ensure we match the symbol ordering of the Shard's A matrix
+        v = np.array([trajectory[sym] for sym in self.symbols], dtype=np.float64)
+
+        # Check A @ v <= 0 (allowing a tiny float tolerance)
+        return np.all(self.A @ v <= 1e-9)
+
     def get_interior_point(self) -> Position:
         """
         :return: A point inside the shard

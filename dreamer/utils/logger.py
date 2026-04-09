@@ -2,7 +2,6 @@ import functools
 import time
 import inspect
 import logging
-import os
 from enum import Enum, auto
 from contextlib import contextmanager
 from typing import Callable, Dict, Tuple

@@ -5,6 +5,7 @@ from dreamer.utils.constants.constant import Constant
 from dreamer.utils.storage.storage_objects import DataManager
 from dreamer.configs import sys_config
 from dreamer.utils.ui.tqdm_config import SmartTQDM
+from dreamer.utils.logger import Logger
 from typing import List, Dict
 
 
@@ -47,7 +48,7 @@ class MyAnalyzerMod(AnalyzerModScheme):
         super().__init__(
             cmf_data,
             name='A very witty name',
-            description='My super cool and smart module using super smart methods beyond your comprehension',
+            desc='My super cool and smart module using super smart methods beyond your comprehension',
             version='your version here :)'
         )
         # TODO: set arguments
@@ -66,13 +67,17 @@ class MyAnalyzerMod(AnalyzerModScheme):
         for constant, shards in SmartTQDM(
                 self.cmf_data.items(), desc='Analyzing constants and their CMFs', **sys_config.TQDM_CONFIG
         ):
-            # These sleeps are just to make the output look nicer (these could be ignored using the configurations)
+            Logger(
+                Logger.buffer_print(
+                    sys_config.LOGGING_BUFFER_SIZE, f'Analyzing for {constant.name}', '='
+                ), Logger.Levels.message
+            ).log()
+
             analyzer = MyAnalyzer(constant, shards)
             dms = analyzer.search()
             prioritization: Dict[Searchable, Dict[str, int]] = analyzer.prioritize(
                 dms,
                 # all your other arguments...
             )
-
             # TODO: update 'queues[constant]' according to the 'prioritization'
         return queues

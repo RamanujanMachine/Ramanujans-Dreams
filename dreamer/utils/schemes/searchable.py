@@ -45,6 +45,13 @@ class Searchable(ABC):
         """
         raise NotImplementedError()
 
+    @abstractmethod
+    def is_valid_trajectory(self, trajectory: Position) -> bool:
+        """
+        Checks if a trajectory ray remains inside the space as it scales.
+        """
+        raise NotImplementedError()
+
     @property
     def dim(self):
         """

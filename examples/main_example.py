@@ -1,3 +1,5 @@
+from functools import partial
+
 from dreamer import System, config
 from dreamer import analysis, search, extraction
 from dreamer.loading import pFq
@@ -10,11 +12,10 @@ def trajectory_compute_func(d):
 
 
 def trajectory_compute_func_analysis(d):
-    return max(10 ** d * 2, 10)
+    return max(10 ** (d - 1) / 5, 10)
 
 
 if __name__ == '__main__':
-
     config.configure(
         system={
             'EXPORT_CMFS': './mycmfs',                          # export CMF as objects to directory: ./mycmfs
@@ -46,5 +47,5 @@ if __name__ == '__main__':
         if_srcs=[pFq(log(2), 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
-        searcher=search.SearcherModV1
+        searcher=partial(search.SimulatedAnnealingSearchMod, iterations=50)
     ).run(constants=[log(2)])
