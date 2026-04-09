@@ -4,7 +4,7 @@ import inspect
 import logging
 from enum import Enum, auto
 from contextlib import contextmanager
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Tuple, Optional
 from dreamer.configs.logging import logging_config
 
 # ==========================================
@@ -60,6 +60,11 @@ class Logger:
     """
     timer_mapping: Dict[str, Tuple[int, float]] = dict()
     print_func: Callable = print
+    _instance: Optional['Logger'] = None
+    _file_handler: Optional[logging.Handler] = None
+    _generate_logs_at_import: bool = bool(logging_config.GENERATE_LOGS)
+    _last_generate_logs_value: bool = bool(logging_config.GENERATE_LOGS)
+    _generate_logs_toggled_since_import: bool = False
 
     class Levels(Enum):
         debug = auto()
@@ -69,17 +74,89 @@ class Logger:
         exception = auto()
         fatal = auto()
 
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
     def __init__(self, msg, level: Levels = Levels.message, condition=True):
+        self.__class__._ensure_backend_configured()
         calling_frame = inspect.stack()[1]
         self.calling_function_name = calling_frame.function
         self.level = level if isinstance(level, Logger.Levels) else Logger.Levels.info
         self.msg = msg
         self.condition = condition
 
+    @classmethod
+    def _track_generate_logs_toggle(cls):
+        current_value = bool(logging_config.GENERATE_LOGS)
+        if current_value != cls._last_generate_logs_value:
+            cls._generate_logs_toggled_since_import = True
+            cls._last_generate_logs_value = current_value
+
+    @classmethod
+    def _get_or_create_console_handler(cls):
+        for handler in sys_logger.handlers:
+            if getattr(handler, '_rd_console_handler', False):
+                return handler
+
+        console_handler = DynamicPrintHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(ColorConsoleFormatter("%(message)s"))
+        setattr(console_handler, '_rd_console_handler', True)
+        sys_logger.addHandler(console_handler)
+        return console_handler
+
+    @classmethod
+    def _build_file_handler_mode(cls) -> str:
+        # If GENERATE_LOGS changed after import, append to avoid truncating an existing log history.
+        if cls._generate_logs_toggled_since_import:
+            return 'a'
+        return 'w'
+
+    @classmethod
+    def _ensure_file_handler(cls):
+        desired_filename = logging_config.LOG_FILENAME
+
+        if cls._file_handler is not None:
+            current_filename = getattr(cls._file_handler, 'baseFilename', None)
+            if current_filename == desired_filename:
+                return
+            sys_logger.removeHandler(cls._file_handler)
+            cls._file_handler.close()
+            cls._file_handler = None
+
+        file_handler = logging.FileHandler(desired_filename, mode=cls._build_file_handler_mode())
+        file_handler.setLevel(logging.DEBUG)
+        file_formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(filename)s:%(funcName)s | %(message)s')
+        file_handler.setFormatter(file_formatter)
+        setattr(file_handler, '_rd_file_handler', True)
+        sys_logger.addHandler(file_handler)
+        cls._file_handler = file_handler
+
+    @classmethod
+    def _remove_file_handler(cls):
+        if cls._file_handler is None:
+            return
+        sys_logger.removeHandler(cls._file_handler)
+        cls._file_handler.close()
+        cls._file_handler = None
+
+    @classmethod
+    def _ensure_backend_configured(cls):
+        cls._track_generate_logs_toggle()
+        cls._get_or_create_console_handler()
+
+        if logging_config.GENERATE_LOGS:
+            cls._ensure_file_handler()
+        else:
+            cls._remove_file_handler()
+
     def log(self, msg_prefix='', in_function: bool = False, add_stack_trace: bool = False):
         """
         Log a message. Routes to the appropriate standard logger level.
         """
+        self.__class__._ensure_backend_configured()
         if not self.condition:
             return
 
@@ -135,6 +212,7 @@ class Logger:
             yield
         finally:
             end = time.perf_counter()
+            cls._ensure_backend_configured()
             if logging_config.PROFILE:
                 sys_logger.debug(f"TIMER | {label}: {end - start:.6f} seconds")
             if logging_config.PROFILE_SUMMARY:
@@ -143,6 +221,7 @@ class Logger:
 
     @classmethod
     def timer_summary(cls):
+        cls._ensure_backend_configured()
         if not logging_config.PROFILE_SUMMARY:
             return
         cls('\n======= profile summary ======', cls.Levels.debug).log()
@@ -170,18 +249,4 @@ class DynamicPrintHandler(logging.Handler):
 # Handle configurations and definitions
 sys_logger = logging.getLogger("RD-CMF")
 sys_logger.setLevel(logging.DEBUG)
-
-# Terminal handler
-console_handler = DynamicPrintHandler()
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(ColorConsoleFormatter("%(message)s"))
-sys_logger.addHandler(console_handler)
-
-# log file handler — mode='w' truncates any previous log on startup;
-# subsequent writes append within the same process.
-if logging_config.GENERATE_LOGS:
-    file_handler = logging.FileHandler(logging_config.LOG_FILENAME, mode='w')
-    file_handler.setLevel(logging.DEBUG)
-    file_formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(filename)s:%(funcName)s | %(message)s')
-    file_handler.setFormatter(file_formatter)
-    sys_logger.addHandler(file_handler)
+sys_logger.propagate = False

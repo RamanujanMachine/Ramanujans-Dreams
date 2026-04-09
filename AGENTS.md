@@ -12,6 +12,7 @@ Data flows: `Constant` → `Dict[Constant, List[ShiftCMF]]` → `Dict[Constant, 
 
 ## Critical Workflows
 - **Running the system**: Instantiate `System` with stage modules, call `run(constants=[mpmath.log(2)])`. Config via `from dreamer import config; config.configure(analysis={'IDENTIFY_THRESHOLD': -1})`.
+- **Execution environment**: Develop and run Ramanujan's Dreams in a Linux environment. On Windows, switch to WSL before running code. Environment activation might be needed, use the currently configured Conda interpreter/environment (You can check this by trying to import dreamer).
 - **Testing**: `pytest tests/ -v` (requires `mpmath.mp.dps = 150+` for math tests). Every public function needs tests per `COVERAGE_POLICY.md`.
 - **Precision handling**: Always use `mpmath.mpf` for computations; set `mpmath.mp.dps = 2 * desired_digits`. Never use Python `float`.
 - **PR delivery**: Push branches (e.g., `feat/new-searcher`) to remote, create PRs. No local-only commits. See `DEFINITION_OF_DONE.md` §6.
@@ -25,7 +26,7 @@ Data flows: `Constant` → `Dict[Constant, List[ShiftCMF]]` → `Dict[Constant, 
 
 ## Integration Points
 - **ramanujantools**: Primary CMF/PCF library; all math ops via `import ramanujantools as rmt`.
-- **LIReC**: For constant identification; Windows users need WSL due to `cysignals`/`fpylll` dependencies.
+- **LIReC**: For constant identification; run it in Linux/WSL due to `cysignals`/`fpylll` dependencies.
 - **Database**: SQLite via `peewee` models in `dreamer.loading.databases`; pickle files for caching CMFs/shards.
 - **External tools**: Mathematica/RISC for proofs; access via team request.
 

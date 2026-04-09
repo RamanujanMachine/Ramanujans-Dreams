@@ -1,5 +1,3 @@
-from functools import partial
-
 from dreamer import System, config
 from dreamer import analysis, search, extraction
 from dreamer.loading import pFq
@@ -47,5 +45,12 @@ if __name__ == '__main__':
         if_srcs=[pFq(log(2), 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
-        searcher=partial(search.SimulatedAnnealingSearchMod, iterations=50)
+        searcher=search.SearcherModV1
     ).run(constants=[log(2)])
+
+# הישגים מרשמים כלשהם - שימפור חסם וכד(''
+#                                       - תוצאות יפות
+# מציגים כלים רחב ששמים אונליין - יהיו אנשים
+# if שיעריכו:
+#
+# )

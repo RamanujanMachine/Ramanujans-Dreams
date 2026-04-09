@@ -5,7 +5,7 @@ from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs import sys_config
-from dreamer.analysis.analysis_methods.serial_analyzer import Analyzer
+from dreamer.analysis.analysis_methods.serial_scan_analyzer import Analyzer
 from .config import PRIORITIZATION_RANKS
 from typing import Dict, List
 
