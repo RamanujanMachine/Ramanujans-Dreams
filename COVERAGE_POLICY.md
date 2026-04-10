@@ -67,6 +67,11 @@ Score each touched public class/module on a 0/1 basis per row:
 
 Minimum bar for acceptance: **3/5** for ordinary changes, **4/5** for extraction/sampling/search changes.
 
+### Stochastic sampler tests
+- Seed randomness (`np.random.seed(...)` or deterministic RNG objects) for repeatable test behavior.
+- Assert distribution health with robust statistics (e.g., nearest-neighbor angular gap medians, per-axis variance), not exact point sets.
+- Keep thresholds tolerant and physics-based to avoid flaky failures across CPU/OS differences.
+
 ### Example Pattern
 
 ```python
