@@ -54,6 +54,7 @@ A code development task produces new or modified Python code: a function, a modu
   - Consistency check: forward and inverse operations compose to identity.
   - Scale check: if the function is meant to work at $N=10000$, test it at $N=10000$.
 - [ ] **Docstring** for every new public function: one-line summary, parameters, return value, example.
+- [ ] **Code Standards** followed: PEP 8 style, descriptive variable names, modular design.
 
 ### Performance Tasks (additional criteria)
 

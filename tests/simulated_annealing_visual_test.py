@@ -1,11 +1,11 @@
 import matplotlib.pyplot as plt
-import numpy as np
 import copy
 from typing import Optional, List
 
 from ramanujantools import Position
+from dreamer.extraction.samplers import ShardSamplingOrchestator
 from dreamer.search.methods.sa import SimulatedAnnealingSearchMethod
-from dreamer.utils.schemes.searchable import Searchable
+from typing import cast
 
 
 class VisualSimulatedAnnealing(SimulatedAnnealingSearchMethod):
@@ -21,7 +21,10 @@ class VisualSimulatedAnnealing(SimulatedAnnealingSearchMethod):
         self._setup_flatland()
 
         start_point = getattr(self.space, 'get_interior_point', lambda: None)()
-        samples = list(self.space.sample_trajectories(lambda dim: 10))
+        if start_point is None:
+            raise ValueError('Visualization requires a valid start point')
+        start_pos: Position = cast(Position, start_point)
+        samples = list(ShardSamplingOrchestator(self.space).sample_trajectories(lambda dim: 10))
         cur_traj_orig = samples[0] if samples else Position({s: 1 for s in self.symbols})
         cur_traj_flat = self._to_flatland(cur_traj_orig)
 
@@ -29,7 +32,7 @@ class VisualSimulatedAnnealing(SimulatedAnnealingSearchMethod):
         iter_left = self.iterations
 
         # Track initial
-        initial_eval = self._evaluate_trajectory(cur_traj_flat, start_point)
+        initial_eval = self._evaluate_trajectory(cur_traj_flat, start_pos)
         cur_delta = initial_eval["delta"]
         best_res = cur_delta
 
@@ -38,13 +41,13 @@ class VisualSimulatedAnnealing(SimulatedAnnealingSearchMethod):
 
         # Standard Loop with tracking
         while iter_left > 0 and T > self.tmin:
-            neighs_flat = self._get_neighbors_flatland(cur_traj_flat, start_point)
+            neighs_flat = self._get_neighbors_flatland(cur_traj_flat, start_pos)
             if not neighs_flat:
                 break
 
             # For testing, we just use a standard list comprehension instead of parallel mapping
             # to keep the visualizer standalone and simple
-            neighs_results = [self._evaluate_trajectory(n, start_point) for n in neighs_flat]
+            neighs_results = [self._evaluate_trajectory(n, start_pos) for n in neighs_flat]
             neighs_results.sort(key=lambda d: d["delta"], reverse=True)
 
             best_neighbor = neighs_results[0]

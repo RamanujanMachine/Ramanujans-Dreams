@@ -8,7 +8,7 @@ import mpmath as mp
 import ramanujantools as rt
 from ramanujantools import Limit, Position
 from ramanujantools.cmf import CMF
-from typing import Tuple, Optional, Callable, Set, List
+from typing import Tuple, Optional, List
 
 from dreamer.utils.caching import cached_property
 from dreamer.utils.constants.constant import Constant
@@ -20,7 +20,6 @@ from dreamer.utils.storage.frequency_list import FrequencyList
 search_config = config.search
 
 n = sp.symbols('n')
-
 
 class Searchable(ABC):
     """
@@ -357,15 +356,5 @@ class Searchable(ABC):
     def get_interior_point(self) -> Position:
         """
         :return: A point inside the searchable
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
-    def sample_trajectories(self, compute_n_samples: Callable[[int], int]) -> Set[Position]:
-        """
-        Sample trajectories from the searchable.
-        :param compute_n_samples: Number of trajectories in searchable or number of samples to generate
-            as a function of the dimension.
-        :return: A set of sampled trajectories
         """
         raise NotImplementedError()

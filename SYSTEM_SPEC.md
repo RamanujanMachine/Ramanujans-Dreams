@@ -255,3 +255,16 @@ Record important architectural decisions here so future contributors understand
 
 This document is **living**. If something is wrong or missing, fix it in the
 same PR as the related code change.
+
+
+## 12. Architecture Overview
+This is a modular pipeline system for discovering polynomial continued fractions (PCFs) of mathematical constants via Conservative Matrix Fields (CMFs). The four-stage pipeline (Loading → Extraction → Analysis → Search) processes constants through CMF parameter spaces, partitioning into "shards" for parallelizable search. See `SYSTEM_SPEC.md` for full details.
+
+Key components:
+- `dreamer/system/system.py`: Orchestrates the pipeline via `System.run()`.
+- `dreamer/configs/`: Dataclass-based configs for each stage (e.g., `analysis.py` for `IDENTIFY_THRESHOLD`).
+- `dreamer/loading/`, `extraction/`, `analysis/`, `search/`: Modular stages with swappable implementations.
+
+Data flows: `Constant` → `Dict[Constant, List[ShiftCMF]]` → `Dict[Constant, List[Shard]]` → prioritized shards → `Dict[Searchable, DataManager]` with discovered PCFs.
+
+Reference: `SYSTEM_SPEC.md` (canonical), `README.md` (usage), `pyproject.toml` (deps), `DEFINITION_OF_DONE.md` (completion criteria), `COVERAGE_POLICY.md` (testing).

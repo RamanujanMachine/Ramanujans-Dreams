@@ -1,7 +1,7 @@
 import time
 from dreamer.utils.rand import np
 import matplotlib.pyplot as plt
-from dreamer.extraction.sampler.e2e import EndToEndSamplingEngine
+from dreamer.extraction.samplers.raycast_sampler import RaycastPipelineSampler
 
 
 class TestHarness:
@@ -206,7 +206,7 @@ def run_diagnostic_dashboard(target_quota=100_000, scenario_name="15D_Realistic_
     print("="*60)
 
     # 1. Initialize the harness with our new unified pipeline
-    harness = TestHarness(engine_class=EndToEndSamplingEngine)
+    harness = TestHarness(engine_class=RaycastPipelineSampler)
 
     # 2. Generate the specific matrix
     if matrix is not None:

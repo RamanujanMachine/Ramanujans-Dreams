@@ -1,12 +1,13 @@
 from dreamer.utils.rand import np
 import scipy.special as spc
-from dreamer.extraction.sampler.conditioner import Stage1Conditioner
-from dreamer.extraction.sampler.raycaster import Stage2Raycaster
+from dreamer.extraction.samplers.conditioner import HyperSpaceConditioner
+from dreamer.extraction.samplers.raycaster import RayCastingSamplingMethod
 from dreamer.utils.logger import Logger
+from .sampler import Sampler
 from typing import Callable
 
 
-class EndToEndSamplingEngine:
+class RaycastPipelineSampler(Sampler):
     def __init__(self, A_prime):
         self.A_prime = A_prime
         self.d_orig = A_prime.shape[1]
@@ -126,7 +127,7 @@ class EndToEndSamplingEngine:
         :return: The samples
         """
         Logger("[Pipeline] Initializing Stage 1: Conditioning...", Logger.Levels.debug).log()
-        conditioner = Stage1Conditioner(self.A_prime, max_beta=10, defect_tolerance=5.0)
+        conditioner = HyperSpaceConditioner(self.A_prime, max_beta=10, defect_tolerance=5.0)
 
         try:
             Z_reduced, B_reduced, _ = conditioner.process()
@@ -153,7 +154,7 @@ class EndToEndSamplingEngine:
             Logger.Levels.debug
         ).log()
         Logger("[Pipeline] Initializing Stage 2: Universal Raycaster...", Logger.Levels.debug).log()
-        sampler = Stage2Raycaster(Z_reduced, B_reduced, self.d_orig, guidance_method)
+        sampler = RayCastingSamplingMethod(Z_reduced, B_reduced, self.d_orig, guidance_method)
 
         # Oversample by 3x
         guide_rays_to_shoot = int(target_rays * 3)

@@ -16,7 +16,7 @@ except ImportError as e:
     ).log()
 
 
-class Stage1Conditioner:
+class HyperSpaceConditioner:
     """
     Conditions a high-dimensional constrained space by finding the integer
     nullspace and applying LLL and BKZ lattice reduction to minimize basis skewness.
@@ -34,19 +34,19 @@ class Stage1Conditioner:
         Main orchestrator: returns the conditioned basis and transformed bounds.
         :return: Reduced search space basis matrix, reduced bounds matrix, unimodular transformation matrix
         """
-        Logger("[Stage 1] Extracting hyperplanes...", Logger.Levels.debug).log()
+        Logger("[Conditioning] Extracting hyperplanes...", Logger.Levels.debug).log()
         E, B_orig = self._extract_constraints()
 
-        Logger(f"[Stage 1] Computing raw integer nullspace (Equalities: {len(E)})...", Logger.Levels.debug).log()
+        Logger(f"[Conditioning] Computing raw integer nullspace (Equalities: {len(E)})...", Logger.Levels.debug).log()
         Z = self._compute_integer_basis(E)
 
         if Z.shape[1] == 0:
             raise ValueError("The equality constraints result in a 0-dimensional space.")
 
-        Logger(f"[Stage 1] Flatland Dimension: {Z.shape[1]}D. Initiating Reduction Ratchet...", Logger.Levels.debug).log()
+        Logger(f"[Conditioning] Flatland Dimension: {Z.shape[1]}D. Initiating Reduction Ratchet...", Logger.Levels.debug).log()
         Z_reduced, U_transform = self._ratchet_lattice_reduction(Z)
 
-        Logger("[Stage 1] Transforming inequality bounds to new conditioned space...", Logger.Levels.debug).log()
+        Logger("[Conditioning] Transforming inequality bounds to new conditioned space...", Logger.Levels.debug).log()
         B_reduced = self._transform_bounds(B_orig, Z, U_transform)
 
         return Z_reduced, B_reduced, U_transform

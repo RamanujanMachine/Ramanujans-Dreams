@@ -15,7 +15,7 @@ from dreamer.extraction.shard import Shard
 @pytest.fixture
 def simple_cmf():
     """A 1F1(z=1) CMF — 2 symbols."""
-    return rt_pFq(1, 1, 1)
+    return rt_pFq(1, 1, sp.Integer(1))
 
 
 @pytest.fixture

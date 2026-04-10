@@ -1,12 +1,13 @@
 import math
 import random
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, cast
 
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
-from dreamer.utils.storage.storage_objects import DataManager, SearchVector, SearchData
+from dreamer.utils.storage.storage_objects import DataManager, SearchVector
 from dreamer.utils.schemes.searchable import Searchable
-from dreamer.extraction.sampler.conditioner import Stage1Conditioner
+from dreamer.extraction.samplers import ShardSamplingOrchestator
+from dreamer.extraction.samplers.conditioner import HyperSpaceConditioner
 from dreamer.utils.logger import Logger
 from dreamer.utils.multi_processing import create_pool
 from ramanujantools import Position
@@ -45,11 +46,12 @@ class SimulatedAnnealingSearchMethod(SearchMethod):
         self.symbols = list(self.space.symbols)
         dim_orig = len(self.symbols)
 
-        if getattr(self.space, 'is_whole_space', True) or getattr(self.space, 'A', None) is None:
+        a_matrix = getattr(self.space, 'A', None)
+        if getattr(self.space, 'is_whole_space', True) or a_matrix is None:
             self.Z = np.eye(dim_orig, dtype=np.int64)
             Logger("SA Setup: Unconstrained space, using Identity basis.", Logger.Levels.debug).log()
         else:
-            conditioner = Stage1Conditioner(self.space.A)
+            conditioner = HyperSpaceConditioner(a_matrix)
             self.Z, _, _ = conditioner.process()
             Logger(f"SA Setup: Constrained space conditioned. Flatland dim: {self.Z.shape[1]}",
                    Logger.Levels.debug).log()
@@ -152,8 +154,13 @@ class SimulatedAnnealingSearchMethod(SearchMethod):
         else:
             start_point = starts
 
-        # Draw a valid initial trajectory from the space's sampler
-        samples = list(self.space.sample_trajectories(lambda dim: 10))
+        if start_point is None:
+            raise ValueError("SA requires a valid start point")
+        start_point = cast(Position, start_point)
+
+        # Draw a valid initial trajectory directly from the shard sampler.
+        sampler = ShardSamplingOrchestator(self.space)
+        samples = list(sampler.sample_trajectories(lambda dim: 10))
         cur_traj_orig = samples[0] if samples else Position({s: 1 for s in self.symbols})
         cur_traj_flat = self._to_flatland(cur_traj_orig)
 
@@ -202,8 +209,8 @@ class SimulatedAnnealingSearchMethod(SearchMethod):
                     if traj_mul > self.max_res:
                         Logger("SA: Max scaling reached. Resetting to new random ray.", Logger.Levels.warning).log()
                         traj_mul = 1
-                        # Reset to a new random valid trajectory to escape the local minimum trap
-                        fallback_samples = list(self.space.sample_trajectories(lambda dim: 5))
+                        # Reset to a new random valid trajectory to escape the local minimum trap.
+                        fallback_samples = list(sampler.sample_trajectories(lambda dim: 5))
                         if fallback_samples:
                             cur_traj_flat = self._to_flatland(random.choice(fallback_samples))
                     else:

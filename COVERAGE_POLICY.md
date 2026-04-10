@@ -43,6 +43,11 @@ No exceptions. No "I'll add tests later."
 - Use `mpmath` for high-precision reference values.
 - Use `pytest.approx` for floating-point comparisons, or compare `mpmath` values with explicit tolerance.
 
+### Stochastic sampler tests
+- Seed randomness (`np.random.seed(...)` or deterministic RNG objects) for repeatable test behavior.
+- Assert distribution health with robust statistics (e.g., nearest-neighbor angular gap medians, per-axis variance), not exact point sets.
+- Keep thresholds tolerant and physics-based to avoid flaky failures across CPU/OS differences.
+
 ### Example Pattern
 
 ```python
