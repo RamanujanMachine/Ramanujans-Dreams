@@ -9,11 +9,11 @@ from dreamer.utils.rand import np
 from ramanujantools import Position
 
 from dreamer.extraction.samplers.raycast_sampler import RaycastPipelineSampler
-from dreamer.extraction.sampling_orchestrators.sampling_orchestator import SamplingOrchestator
+from dreamer.extraction.sampling_orchestrators.sampling_orchestrator import SamplingOrchestrator
 from dreamer.extraction.samplers.sphere_sampler import PrimitiveSphereSampler
 
 
-class ShardSamplingOrchestator(SamplingOrchestator):
+class ShardSamplingOrchestrator(SamplingOrchestrator):
     """Trajectory sampler for shards using the extraction sampling pipeline."""
     def __init__(self, searchable: "Shard"):
         super().__init__(searchable)

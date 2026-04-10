@@ -3,7 +3,7 @@ import copy
 from typing import Optional, List
 
 from ramanujantools import Position
-from dreamer.extraction.samplers import ShardSamplingOrchestator
+from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.search.methods.sa import SimulatedAnnealingSearchMethod
 from typing import cast
 
@@ -24,7 +24,7 @@ class VisualSimulatedAnnealing(SimulatedAnnealingSearchMethod):
         if start_point is None:
             raise ValueError('Visualization requires a valid start point')
         start_pos: Position = cast(Position, start_point)
-        samples = list(ShardSamplingOrchestator(self.space).sample_trajectories(lambda dim: 10))
+        samples = list(ShardSamplingOrchestrator(self.space).sample_trajectories(lambda dim: 10))
         cur_traj_orig = samples[0] if samples else Position({s: 1 for s in self.symbols})
         cur_traj_flat = self._to_flatland(cur_traj_orig)
 

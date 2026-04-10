@@ -1,9 +1,10 @@
 from dreamer.utils.multi_processing import create_pool
-from dreamer.extraction.samplers import ShardSamplingOrchestator
+from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.storage_objects import DataManager, SearchVector, SearchData
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.configs import config
+from dreamer.extraction.shard import Shard
 
 import mpmath as mp
 from functools import partial
@@ -21,7 +22,7 @@ class SerialSearcher(SearchMethod):
     """
 
     def __init__(self,
-                 space: Searchable,
+                 space: Shard,
                  constant,  # sympy constant or mp.mpf
                  data_manager: DataManager = None,
                  share_data: bool = True,
@@ -68,7 +69,7 @@ class SerialSearcher(SearchMethod):
         else:
             starts_list = [cast(Position, starts)]
 
-        trajectories = ShardSamplingOrchestator(self.space).sample_trajectories(trajectory_generator)
+        trajectories = ShardSamplingOrchestrator(self.space).sample_trajectories(trajectory_generator)
 
         pairs = [(t, start) for start in starts_list for t in trajectories if
                  SearchVector(start, t) not in self.data_manager]

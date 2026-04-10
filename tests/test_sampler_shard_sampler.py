@@ -8,7 +8,7 @@ from ramanujantools.cmf import pFq as rt_pFq
 from dreamer import e
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.extraction.shard import Shard
-from dreamer.extraction.sampling_orchestrators.shard_sampler_orchestrator import ShardSamplingOrchestator
+from dreamer.extraction.sampling_orchestrators.shard_sampler_orchestrator import ShardSamplingOrchestrator
 
 
 @pytest.fixture
@@ -42,7 +42,7 @@ def test_shard_sampler_translates_pipeline_output(monkeypatch, cmf_2d, symbols):
     s0 = symbols[0]
     hps = [Hyperplane(s0, symbols)]
     shard = Shard(cmf_2d, e, hps, [1], _position(symbols, [0, 0]), _position(symbols, [1, 0]))
-    sampler = ShardSamplingOrchestator(shard)
+    sampler = ShardSamplingOrchestrator(shard)
 
     sampled = sampler.sample_trajectories(lambda d: d * 4)
 
@@ -64,7 +64,7 @@ def test_whole_space_shard_uses_zero_constraint_matrix(monkeypatch, cmf_2d, symb
     monkeypatch.setattr("dreamer.extraction.samplers.sphere_sampler.PrimitiveSphereSampler.harvest", _fake_harvest)
 
     shard = Shard(cmf_2d, e, [], [], _position(symbols, [0, 0]))
-    trajectories = ShardSamplingOrchestator(shard).sample_trajectories(lambda _d: 1)
+    trajectories = ShardSamplingOrchestrator(shard).sample_trajectories(lambda _d: 1)
 
     assert "d" in observed, "Patched sphere harvest was not called"
     assert observed["d"] == 2

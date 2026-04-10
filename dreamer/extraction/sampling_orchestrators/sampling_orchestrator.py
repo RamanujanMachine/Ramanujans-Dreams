@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from dreamer.utils.schemes.searchable import Searchable
 
 
-class SamplingOrchestator(ABC):
+class SamplingOrchestrator(ABC):
     """Abstract trajectory sampler bound to a searchable space."""
 
     def __init__(self, searchable: "Searchable"):

@@ -4,6 +4,7 @@ from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.search.methods.hedgehog_scan import SerialSearcher
+from dreamer.extraction.shard import Shard
 from dreamer.configs import config
 from ramanujantools.cmf import CMF
 from typing import List
@@ -18,13 +19,13 @@ class SearcherModV1(SearcherModScheme):
     A searcher module that performs a serial search over a list of searchable spaces.
     """
 
-    def __init__(self, searchables: List[Searchable], use_LIReC: bool):
+    def __init__(self, shards: List[Shard], use_LIReC: bool):
         """
-        :param searchables: A list of searchable spaces to search in.
+        :param shards: A list of searchable spaces to search in.
         :param use_LIReC: If true, LIReC will be used to identify constants within the searchable spaces.
         """
         super().__init__(
-            searchables,
+            shards,
             use_LIReC,
             description='Searcher module - orchestrating a deep search within a prioritized list of spaces',
             version='0.0.1'
@@ -34,7 +35,7 @@ class SearcherModV1(SearcherModScheme):
     def execute(self) -> None:
         """
         Executes the search. Computes the results per searchable space and exports them into a file while running.
-        :return: A mapping from searchables to their search results.
+        :return: A mapping from shards to their search results.
         """
         if not self.searchables:
             return
@@ -45,10 +46,10 @@ class SearcherModV1(SearcherModScheme):
         )
 
         with Exporter.export_stream(dir_path, exists_ok=True, clean_exists=True, fmt=Formats.PICKLE) as write_chunk:
-            for space in SmartTQDM(
+            for shard in SmartTQDM(
                     self.searchables, desc='Searching the searchable spaces: ', **sys_config.TQDM_CONFIG
             ):
-                searcher = SerialSearcher(space, space.const, use_LIReC=self.use_LIReC)
+                searcher = SerialSearcher(shard, shard.const, use_LIReC=self.use_LIReC)
                 res = searcher.search(
                     None,
                     find_limit=search_config.COMPUTE_LIMIT,
@@ -57,9 +58,9 @@ class SearcherModV1(SearcherModScheme):
                     trajectory_generator=search_config.NUM_TRAJECTORIES_FROM_DIM
                 )
 
-                space: Searchable
-                if space.cmf.__class__ == CMF:
-                    filename = f'generated_cmf_hashed_{hash(space.cmf)}'
+                shard: Searchable
+                if shard.cmf.__class__ == CMF:
+                    filename = f'generated_cmf_hashed_{hash(shard.cmf)}'
                 else:
-                    filename = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in repr(space.cmf)).strip('_')
+                    filename = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in repr(shard.cmf)).strip('_')
                 write_chunk(res, filename)

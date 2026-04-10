@@ -6,7 +6,7 @@ from typing import List, Optional, cast
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.storage_objects import DataManager, SearchVector
 from dreamer.utils.schemes.searchable import Searchable
-from dreamer.extraction.samplers import ShardSamplingOrchestator
+from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.samplers.conditioner import HyperSpaceConditioner
 from dreamer.utils.logger import Logger
 from dreamer.utils.multi_processing import create_pool
@@ -159,7 +159,7 @@ class SimulatedAnnealingSearchMethod(SearchMethod):
         start_point = cast(Position, start_point)
 
         # Draw a valid initial trajectory directly from the shard sampler.
-        sampler = ShardSamplingOrchestator(self.space)
+        sampler = ShardSamplingOrchestrator(self.space)
         samples = list(sampler.sample_trajectories(lambda dim: 10))
         cur_traj_orig = samples[0] if samples else Position({s: 1 for s in self.symbols})
         cur_traj_flat = self._to_flatland(cur_traj_orig)

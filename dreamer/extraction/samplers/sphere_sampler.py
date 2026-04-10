@@ -1,6 +1,7 @@
 from dreamer.extraction.utils.fast_gcd import get_gcd_of_array
 from dreamer.utils.rand import np
 from .sampler import Sampler
+from dreamer.utils.logger import Logger
 
 from scipy.special import gamma, zeta
 from numba import njit
@@ -60,7 +61,9 @@ class PrimitiveSphereSampler(Sampler):
         R = self.compute_radius(n_samples)
         R_sq = R * R
 
-        print(f"Sampling {n_samples} primitive points in {self.d}D Sphere (R={R:.2f})...")
+        Logger(
+            f"Sampling {n_samples} primitive points in {self.d}D Sphere (R={R:.2f})...", Logger.Levels.debug
+        ).log()
 
         collected = set()
 
