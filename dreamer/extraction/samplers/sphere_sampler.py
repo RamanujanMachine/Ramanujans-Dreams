@@ -1,6 +1,7 @@
 from dreamer.extraction.utils.fast_gcd import get_gcd_of_array
 from dreamer.utils.rand import np
 from .sampler import Sampler
+from dreamer.utils.logger import Logger
 
 from scipy.special import gamma, zeta
 from numba import njit
@@ -55,12 +56,16 @@ class PrimitiveSphereSampler(Sampler):
         R = (n_samples / (vol_unit_ball * density)) ** (1.0 / self.d)
         return np.ceil(R * 1.2)   # make sure to take a big enough buffer
 
-    def harvest(self, compute_n_samples: Callable[[int], int]):
+    def harvest(self, compute_n_samples: Callable[[int], int], exact: bool = False):
         n_samples = compute_n_samples(self.d)
+        if n_samples <= 0:
+            return np.empty((0, self.d), dtype=np.int64)
         R = self.compute_radius(n_samples)
         R_sq = R * R
 
-        print(f"Sampling {n_samples} primitive points in {self.d}D Sphere (R={R:.2f})...")
+        Logger(
+            f"Sampling {n_samples} primitive points in {self.d}D Sphere (R={R:.2f})...", Logger.Levels.debug
+        ).log()
 
         collected = set()
 
@@ -84,4 +89,7 @@ class PrimitiveSphereSampler(Sampler):
                 collected.add(tuple(p))
                 if len(collected) >= n_samples:
                     break
-        return np.array(list(collected))
+        result = np.array(list(collected))
+        if exact and len(result) > n_samples:
+            result = result[:n_samples]
+        return result

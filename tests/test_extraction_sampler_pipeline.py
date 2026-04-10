@@ -5,6 +5,9 @@ from dreamer.extraction.samplers.raycast_sampler import RaycastPipelineSampler
 from dreamer.extraction.samplers.raycaster import _guide_rays_mcmc, _guide_rays_mhs, RayCastingSamplingMethod
 
 
+pytestmark = pytest.mark.timeout(60)
+
+
 def _assert_directional_exploration(rays: np.ndarray) -> None:
     norms = np.linalg.norm(rays, axis=1)
     assert np.allclose(norms, 1.0, atol=1e-6)
@@ -86,3 +89,79 @@ def test_stage2_harvest_deduplicates_hits(monkeypatch):
 
     assert result.shape == (1, 2)
     assert np.array_equal(result[0], np.array([1, 0]))
+
+
+def test_pipeline_harvest_returns_target_quota_when_first_sweep_exceeds(monkeypatch):
+    a_prime = np.eye(3, dtype=np.float64)
+    sampler = RaycastPipelineSampler(a_prime)
+
+    monkeypatch.setattr(
+        "dreamer.extraction.samplers.raycast_sampler.HyperSpaceConditioner.process",
+        lambda self: (np.eye(3, dtype=np.int64), np.empty((0, 3), dtype=np.float64), np.eye(3, dtype=np.int64)),
+    )
+    monkeypatch.setattr("dreamer.extraction.samplers.raycast_sampler.RaycastPipelineSampler._verify_uniformity", lambda *args, **kwargs: None)
+
+    captured = {"max_per_ray": 0}
+
+    def _fake_harvest(self, target_rays, R_max, max_per_ray=1):
+        captured["max_per_ray"] = max_per_ray
+        rays = np.arange(0, target_rays * 3 * self.d_orig, dtype=np.int64).reshape(target_rays * 3, self.d_orig)
+        return rays
+
+    monkeypatch.setattr("dreamer.extraction.samplers.raycast_sampler.RayCastingSamplingMethod.harvest", _fake_harvest)
+
+    rays = sampler.harvest(lambda d: 9)
+
+    assert sampler.d_flat == 3
+    assert rays.shape == (9, 3)
+    assert captured["max_per_ray"] >= 1
+
+
+def test_pipeline_harvest_expands_radius_when_yield_too_low(monkeypatch):
+    a_prime = np.ones((2, 5), dtype=np.float64)
+    sampler = RaycastPipelineSampler(a_prime)
+
+    monkeypatch.setattr(
+        "dreamer.extraction.samplers.raycast_sampler.HyperSpaceConditioner.process",
+        lambda self: (np.eye(5, 4, dtype=np.int64), np.ones((1, 4), dtype=np.float64), np.eye(4, dtype=np.int64)),
+    )
+    monkeypatch.setattr("dreamer.extraction.samplers.raycast_sampler.RaycastPipelineSampler._estimate_cone_fraction", lambda *args, **kwargs: 0.5)
+    monkeypatch.setattr("dreamer.extraction.samplers.raycast_sampler.RaycastPipelineSampler._verify_uniformity", lambda *args, **kwargs: None)
+
+    rmax_calls = []
+
+    def _fake_harvest(self, target_rays, R_max, max_per_ray=1):
+        rmax_calls.append(R_max)
+        if len(rmax_calls) == 1:
+            return np.arange(0, 6 * self.d_orig, dtype=np.int64).reshape(6, self.d_orig)
+        return np.arange(0, (target_rays + 8) * self.d_orig, dtype=np.int64).reshape(target_rays + 8, self.d_orig)
+
+    monkeypatch.setattr("dreamer.extraction.samplers.raycast_sampler.RayCastingSamplingMethod.harvest", _fake_harvest)
+
+    rays = sampler.harvest(lambda d: 20, exact=True)
+
+    assert sampler.d_flat == 4
+    assert len(rmax_calls) >= 2
+    assert rmax_calls[1] > rmax_calls[0]
+    assert rays.shape[0] == 20
+
+
+def test_pipeline_harvest_exact_mode_uses_callable_quota(monkeypatch):
+    a_prime = np.eye(3, dtype=np.float64)
+    sampler = RaycastPipelineSampler(a_prime)
+
+    monkeypatch.setattr(
+        "dreamer.extraction.samplers.raycast_sampler.HyperSpaceConditioner.process",
+        lambda self: (np.eye(3, dtype=np.int64), np.empty((0, 3), dtype=np.float64), np.eye(3, dtype=np.int64)),
+    )
+    monkeypatch.setattr("dreamer.extraction.samplers.raycast_sampler.RaycastPipelineSampler._verify_uniformity", lambda *args, **kwargs: None)
+
+
+    def _fake_harvest(self, target_rays, R_max, max_per_ray=1):
+        rays = np.arange(0, (target_rays + 6) * self.d_orig, dtype=np.int64).reshape(target_rays + 6, self.d_orig)
+        return rays
+
+    monkeypatch.setattr("dreamer.extraction.samplers.raycast_sampler.RayCastingSamplingMethod.harvest", _fake_harvest)
+
+    rays = sampler.harvest(lambda d: 11, exact=True)
+    assert rays.shape == (11, 3)

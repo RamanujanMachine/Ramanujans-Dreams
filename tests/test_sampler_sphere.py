@@ -1,6 +1,10 @@
 import numpy as np
+import pytest
 
 from dreamer.extraction.samplers.sphere_sampler import PrimitiveSphereSampler, check_points
+
+
+pytestmark = pytest.mark.timeout(60)
 
 
 def test_check_points_filters_radius_origin_and_primitivity():
@@ -51,3 +55,21 @@ def test_sample_returns_primitive_points_with_directional_spread():
     nearest = np.max(cos_sim, axis=1)
     # If nearest-neighbor cosine is strictly below 1.0, rays are not duplicates.
     assert np.median(nearest) < 0.98
+
+
+@pytest.mark.parametrize("seed", [0, 7, 21])
+def test_sample_directional_spread_is_stable_across_seeds(seed):
+    sampler = PrimitiveSphereSampler(d=3, batch_size=192)
+    sampler.rng = np.random.default_rng(seed)
+
+    samples = sampler.harvest(lambda d: 24)
+    norms = np.linalg.norm(samples, axis=1, keepdims=True)
+    unit = samples / norms
+
+    mean_abs = np.abs(np.mean(unit, axis=0))
+    assert np.max(mean_abs) < 0.7
+
+    cos_sim = np.clip(unit @ unit.T, -1.0, 1.0)
+    np.fill_diagonal(cos_sim, -1.0)
+    nearest = np.max(cos_sim, axis=1)
+    assert np.median(nearest) < 0.995

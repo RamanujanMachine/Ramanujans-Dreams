@@ -45,6 +45,12 @@ A code development task produces new or modified Python code: a function, a modu
   - Every new public function has at least one test.
   - Tests cover: normal operation, edge cases, and at least one known-answer verification.
   - Tests are runnable via `pytest`.
+- [ ] **Coverage evidence** attached:
+  - `pytest tests/ -v --cov=dreamer --cov-branch --cov-report=term-missing` is run.
+  - PR includes line + branch coverage for touched modules/files.
+  - If changed-file coverage is below policy targets, PR includes rationale and follow-up plan.
+- [ ] **Challenge quality evidence** attached for non-trivial changes:
+  - PR reports the challenge rubric score from `COVERAGE_POLICY.md` (failure path, boundary, invariant, stochastic robustness, regression trap).
 - [ ] **Guardrails** built into the code:
   - Input validation at public API boundaries (type checks, range checks, dimension checks).
   - Precision guards: `mpmath.mp.dps` set appropriately, no silent use of `float`.
@@ -68,6 +74,8 @@ A code development task produces new or modified Python code: a function, a modu
 - New public functions lack tests.
 - Code uses Python `float` for mathematical computations.
 - No guardrails on public API inputs.
+- Coverage/branch report is missing for code changes.
+- Challenge rubric disclosure is missing for non-trivial changes.
 
 ---
 
@@ -149,6 +157,8 @@ commits alone are never sufficient.
   - A summary of what changed and why.
   - A list of files modified.
   - Testing instructions or confirmation that tests pass.
+  - Coverage command output (or CI link) and changed-file line/branch coverage.
+  - Challenge rubric score for touched non-trivial modules.
 - [ ] **All CI checks pass** (once CI is configured).
 
 ### Not Done If

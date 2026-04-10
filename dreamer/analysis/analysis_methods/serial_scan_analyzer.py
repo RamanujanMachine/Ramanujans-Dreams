@@ -1,3 +1,4 @@
+from dreamer.extraction import shard
 from dreamer.utils.schemes.analysis_scheme import AnalyzerScheme
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.storage.storage_objects import DataManager
@@ -6,6 +7,7 @@ from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.search.methods.hedgehog_scan import SerialSearcher
 from dreamer.configs import config
+from dreamer.extraction.shard import Shard
 from typing import Dict, List
 from ramanujantools.cmf import CMF
 
@@ -16,18 +18,18 @@ analysis_config = config.analysis
 class Analyzer(AnalyzerScheme):
     """
     The analyzer is an implementation of a method to perform a small search of sorts and
-    prioritize the searchables according to relevance.
+    prioritize the Shards according to relevance.
     """
 
-    def __init__(self, const: Constant, spaces: List[Searchable]):
+    def __init__(self, const: Constant, shards: List[Shard]):
         """
         :param const: Constant to analyze for
-        :param spaces: Searchables to analyze
+        :param shards: Shards to analyze
         """
         self.const = const
-        self.spaces = spaces
+        self.shards = shards
 
-    def search(self) -> Dict[Searchable, DataManager]:
+    def search(self) -> Dict[Shard, DataManager]:
         """
         Preforms a small search inside the shards
         :return: The results per shard
@@ -35,7 +37,7 @@ class Analyzer(AnalyzerScheme):
         managers = {}
 
         # Notice we used the naming of the subspaces as "shards" but this might change in the future
-        for i, space in enumerate(SmartTQDM(self.spaces, desc='Analyzing shards', **config.system.TQDM_CONFIG)):
+        for i, space in enumerate(SmartTQDM(self.shards, desc='Analyzing shards', **config.system.TQDM_CONFIG)):
             start = space.get_interior_point()
             Logger(f'{"=" * 10} SHARD NO. {i + 1} {"=" * 10}', Logger.Levels.message).log(msg_prefix='\n')
             if analysis_config.SHOW_START_POINT:

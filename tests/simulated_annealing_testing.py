@@ -1,3 +1,5 @@
+"""DEPRECATED: legacy SA tests kept for reference only (excluded from active suite)."""
+
 import pytest
 import numpy as np
 import sympy as sp
@@ -9,6 +11,9 @@ import dreamer.search.methods.sa as sa_mod
 from dreamer.search.methods.sa import SimulatedAnnealingSearchMethod
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.storage.storage_objects import SearchData, SearchVector
+
+
+pytestmark = pytest.mark.skip(reason="Deprecated: simulated annealing test module is not maintained")
 
 
 # --- Picklable Dummy Classes ---

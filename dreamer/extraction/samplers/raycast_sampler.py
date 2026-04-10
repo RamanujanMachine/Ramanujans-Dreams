@@ -4,14 +4,14 @@ from dreamer.extraction.samplers.conditioner import HyperSpaceConditioner
 from dreamer.extraction.samplers.raycaster import RayCastingSamplingMethod
 from dreamer.utils.logger import Logger
 from .sampler import Sampler
-from typing import Callable
+from typing import Callable, cast
 
 
 class RaycastPipelineSampler(Sampler):
     def __init__(self, A_prime):
         self.A_prime = A_prime
-        self.d_orig = A_prime.shape[1]
-        self.d_flat = None
+        self.d_orig: int = int(A_prime.shape[1])
+        self.d_flat: int = 0
 
     @staticmethod
     def _estimate_cone_fraction(B: np.ndarray, d_flat: int, samples: int = 100_000) -> float:
@@ -77,10 +77,11 @@ class RaycastPipelineSampler(Sampler):
         # Normalize and compute cosine similarity matrix
         norms = np.linalg.norm(sample, axis=1, keepdims=True)
         normalized = sample / np.clip(norms, 1e-9, None)
-        cos_sim = np.clip(normalized @ normalized.T, -1.0, 1.0)
+        cos_sim = np.asarray(np.clip(normalized @ normalized.T, -1.0, 1.0), dtype=np.float64)
 
         # Ignore self-similarity (diagonal)
-        np.fill_diagonal(cos_sim, -1.0)
+        diag = np.arange(cos_sim.shape[0])
+        cos_sim[diag, diag] = -1.0
         max_sim = np.max(cos_sim, axis=1)
 
         # Convert to degrees
@@ -119,11 +120,17 @@ class RaycastPipelineSampler(Sampler):
                 Logger.Levels.warning
             ).log()
 
-    def harvest(self, target_func: Callable[[int], int] | int, guidance_method: str = 'mcmc') -> np.ndarray:
+    def harvest(
+        self,
+        target_func: Callable[[int], int] | int,
+        guidance_method: str = 'mcmc',
+        exact: bool = False,
+    ) -> np.ndarray:
         """
         Harvest samples
         :param target_func: Target function to compute total expected quota
         :param guidance_method: Ray sampling guidance method - MCMC or MHS
+        :param exact: If true and target_func is callable, enforce exactly target_func(d_flat) rays.
         :return: The samples
         """
         Logger("[Pipeline] Initializing Stage 1: Conditioning...", Logger.Levels.debug).log()
@@ -133,22 +140,33 @@ class RaycastPipelineSampler(Sampler):
             Z_reduced, B_reduced, _ = conditioner.process()
         except ValueError as e:
             raise Exception(f"[Pipeline] Stage 1 Failed: {e}")
-            return np.array([])
 
-        self.d_flat = Z_reduced.shape[1]
+        d_flat = int(Z_reduced.shape[1])
+        self.d_flat = d_flat
 
-        fraction = self._estimate_cone_fraction(B_reduced, self.d_flat)
+        fraction = float(self._estimate_cone_fraction(B_reduced, d_flat))
         Logger(
             f"[Pipeline] Cone Volume Estimate: {fraction*100:.6f}% of total sphere.",
             Logger.Levels.debug
         ).log()
 
-        if type(target_func) is int:
-            target_rays = target_func
+        requested_rays: int
+        if isinstance(target_func, int):
+            requested_rays = target_func
+            target_rays = requested_rays
         else:
-            amount_safety = 1.05
-            target_rays = max(int(target_func(self.d_flat) * fraction * amount_safety), 5)
-        R_max = self._calculate_R_max(target_rays, fraction, self.d_flat)
+            compute_quota = cast(Callable[[int], int], target_func)
+            requested_rays = int(compute_quota(d_flat))
+            if exact:
+                target_rays = requested_rays
+            else:
+                amount_safety = 1.05
+                target_rays = max(int(requested_rays * fraction * amount_safety), 5)
+
+        if target_rays <= 0:
+            return np.empty((0, self.d_orig), dtype=np.int64)
+
+        R_max = self._calculate_R_max(target_rays, fraction, d_flat)
         Logger(
             f"[Pipeline] Mathematical R_max needed for {target_rays} rays: {R_max:.2f}",
             Logger.Levels.debug
@@ -156,17 +174,17 @@ class RaycastPipelineSampler(Sampler):
         Logger("[Pipeline] Initializing Stage 2: Universal Raycaster...", Logger.Levels.debug).log()
         sampler = RayCastingSamplingMethod(Z_reduced, B_reduced, self.d_orig, guidance_method)
 
-        # Oversample by 3x
+        # In exact mode we keep the internal shoot quota strict.
         guide_rays_to_shoot = int(target_rays * 3)
         current_R_max = R_max * 1.05
-        final_rays = np.empty((0, self.d_orig))
+        final_rays = np.empty((0, self.d_orig), dtype=np.int64)
 
-        if self.d_flat >= 4:
+        if d_flat >= 4:
             # Massive outer shell. strictly enforce Fair Slice (1 point per ray)
             dynamic_max_per_ray = 1
         else:
             # Microscopic outer shell. Must penetrate deep to fill quota.
-            dynamic_max_per_ray = max(1, int(1.5 * (target_rays ** (1.0 / self.d_flat))))
+            dynamic_max_per_ray = max(1, int(1.5 * (target_rays ** (1.0 / d_flat))))
             Logger(
                 f"[Pipeline] Low-D Space Detected. Allowing depth penetration: max_per_ray={dynamic_max_per_ray}",
                 Logger.Levels.debug
@@ -199,7 +217,7 @@ class RaycastPipelineSampler(Sampler):
                 else:
                     # Dimensional scaling law: V_new / V_old = R_multiplier ^ d_flat
                     ratio_needed = target_rays / len(raw_rays)
-                    momentum_multiplier = ratio_needed ** (1.0 / self.d_flat)
+                    momentum_multiplier = ratio_needed ** (1.0 / d_flat)
 
                 # Cap the multiplier between 1.10 (minimum safety step) and 3.0 (max jump)
                 multiplier = np.clip(momentum_multiplier, 1.10, 3.0)
@@ -213,5 +231,8 @@ class RaycastPipelineSampler(Sampler):
                 ).log()
                 current_R_max *= multiplier
 
-        self._verify_uniformity(final_rays, fraction, self.d_flat)
+        if exact and len(final_rays) > target_rays:
+            final_rays = final_rays[:target_rays]
+
+        self._verify_uniformity(final_rays, fraction, d_flat)
         return final_rays
