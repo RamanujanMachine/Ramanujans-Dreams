@@ -60,10 +60,7 @@ class SerialSearcher(SearchMethod):
         if isinstance(starts, Position):
             starts = [starts]
 
-        trajectories = self.space.sample_trajectories(
-            trajectory_generator,
-            strict=False
-        )
+        trajectories = self.space.sample_trajectories(trajectory_generator)
 
         pairs = [(t, start) for start in starts for t in trajectories if
                  SearchVector(start, t) not in self.data_manager]

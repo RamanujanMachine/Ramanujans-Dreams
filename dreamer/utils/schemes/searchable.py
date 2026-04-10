@@ -1,4 +1,6 @@
 from abc import ABC, abstractmethod
+from functools import partial
+
 import numpy as np
 import sympy as sp
 from LIReC.db.access import db
@@ -6,8 +8,9 @@ import mpmath as mp
 import ramanujantools as rt
 from ramanujantools import Limit, Position
 from ramanujantools.cmf import CMF
-from typing import Tuple, Optional, Callable, Set
+from typing import Tuple, Optional, Callable, Set, List
 
+from dreamer.utils.caching import cached_property
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.storage.storage_objects import SearchData, SearchVector
@@ -29,12 +32,20 @@ class Searchable(ABC):
         :param cmf: The CMF to search in.
         :param constant: A constant to search for.
         :param shift: The shift in the starting point of the CMF.
+        :param use_inv_t: If true, use inverse of the walk matrix to compute the limit.
         """
         self.cache = FrequencyList(max_size=100)
         self.cmf = cmf
         self.const = constant
         self.shift = shift
         self.use_inv_t = use_inv_t
+        self.symbols = list(self.shift.keys())
+
+    def is_unconstrained(self) -> bool:
+        """
+        Returns true if the searchable is unconstrained, i.e., it is the whole space.
+        """
+        raise NotImplementedError()
 
     @abstractmethod
     def in_space(self, point: Position) -> bool:
@@ -42,6 +53,13 @@ class Searchable(ABC):
         Checks if a point is inside the searchable object.
         :param point: A point to check if it is inside the searchable object
         :return: True if the point is inside the searchable object, false otherwise.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def is_valid_trajectory(self, trajectory: Position) -> bool:
+        """
+        Checks if a trajectory ray remains inside the space as it scales.
         """
         raise NotImplementedError()
 
@@ -342,16 +360,12 @@ class Searchable(ABC):
         """
         raise NotImplementedError()
 
-    # TODO: remove strict option
     @abstractmethod
-    def sample_trajectories(self, compute_n_samples: Callable[[int], int], *, strict: Optional[bool] = False) \
-            -> Set[Position]:
+    def sample_trajectories(self, compute_n_samples: Callable[[int], int]) -> Set[Position]:
         """
         Sample trajectories from the searchable.
         :param compute_n_samples: Number of trajectories in searchable or number of samples to generate
             as a function of the dimension.
-        :param strict: If true, sample exactly n_samples trajectories from the searchable,
-            else sample n_samples * fraction.
         :return: A set of sampled trajectories
         """
         raise NotImplementedError()

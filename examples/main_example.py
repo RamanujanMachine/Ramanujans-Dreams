@@ -10,11 +10,10 @@ def trajectory_compute_func(d):
 
 
 def trajectory_compute_func_analysis(d):
-    return max(10 ** d * 2, 10)
+    return max(10 ** (d - 1) / 5, 10)
 
 
 if __name__ == '__main__':
-
     config.configure(
         system={
             'EXPORT_CMFS': './mycmfs',                          # export CMF as objects to directory: ./mycmfs

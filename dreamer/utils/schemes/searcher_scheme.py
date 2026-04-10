@@ -52,7 +52,7 @@ class SearcherModScheme(Module):
     A Scheme for all search modules.
     """
     def __init__(self, searchables: List[Searchable],
-                 use_LIReC: Optional[bool] = True,
+                 use_LIReC: bool = True,
                  name: Optional[str] = None,
                  description: Optional[str] = None,
                  version: Optional[str] = None):

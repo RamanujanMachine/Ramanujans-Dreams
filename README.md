@@ -4,12 +4,16 @@ Ramanujan's Dreams is a modular system for advanced search in CMFs.
 ## Installation
 * This project is supported fully only on Mac-OS and Linux.  
 If you are a Windows user, it is recommended to use [Windows Subsystem for Linux](https://learn.microsoft.com/en-us/windows/wsl/install) (WSL).
-* Install via: `pip install git+https://github.com/UriKH/RamanujansDreams.git`
+* Install via:
+    ```bash
+    pip install git+https://github.com/UriKH/RamanujansDreams.git
+    ```
 
 ## Usage
 Interaction with the system is via the System class (`from dreamer import System`) and using the config files.
-Common usage example with detailed instructions in [colab](https://colab.research.google.com/drive/1t6qo0LBBHTHTQyojXH566cNJRBhziN_3?usp=sharing).  
-**Note**: The Colab might be slow and unstable as it's running online. For stable run download the colab as a Jupyter notebook.
+
+[//]: # (Common usage example with detailed instructions in [colab]&#40;https://colab.research.google.com/drive/1t6qo0LBBHTHTQyojXH566cNJRBhziN_3?usp=sharing&#41;.  )
+[//]: # (**Note**: The Colab might be slow and unstable as it's running online. For stable run download the colab as a Jupyter notebook.)
 
 ### Structure:
 The system is composed of 4 stages:

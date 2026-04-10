@@ -138,7 +138,7 @@ class ShardExtractor(ExtractionScheme):
 
         if not hps:
             return [
-                Shard(self.cmf_data.cmf, self.const, None, None, self.cmf_data.shift, self.symbols,
+                Shard(self.cmf_data.cmf, self.const, [], [], self.cmf_data.shift,
                       use_inv_t=self.cmf_data.use_inv_t)
             ]
 
@@ -203,24 +203,8 @@ class ShardExtractor(ExtractionScheme):
         # create shard objects
         shards = []
         for enc in SmartTQDM(shard_encodings.keys(), desc='Creating shard objects', **sys_config.TQDM_CONFIG):
-            A, b, syms = Shard.generate_matrices(list(hps), enc)
             shards.append(Shard(
-                self.cmf_data.cmf, self.const, A, b, self.cmf_data.shift, syms, shard_encodings[enc],
+                self.cmf_data.cmf, self.const, list(hps), enc, self.cmf_data.shift, shard_encodings[enc],
                 self.cmf_data.use_inv_t
             ))
         return shards
-
-
-if __name__ == '__main__':
-    x0, x1, y0, n = sp.symbols('x0 x1 y0 n')
-    from ramanujantools.cmf import pFq
-    # This is pi 2F1 CMF
-    pi = pFq(2, 1, sp.Rational(1, 2))
-
-    shift = Position({x0: sp.Rational(1, 2), x1: sp.Rational(1, 2), y0: sp.Rational(1, 2)})
-    # pprint(ShardExtractor('pi', pi, shift).extract_cmf_hps())
-    # ppt = ShardExtractor('pi', pi, shift).extract_shards()
-    # pprint(len(ppt))
-    shifted = Hyperplane(x0+1, [x0, x1, y0]).apply_shift(shift)
-    print(shifted.expr)
-    print(shifted.is_in_integer_shift())
