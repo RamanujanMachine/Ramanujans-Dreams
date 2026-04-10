@@ -278,7 +278,7 @@ def _guide_rays_mhs(d_flat, B, start_pos, target_rays, mix_steps=200):
     return rays
 
 
-class Stage2Raycaster:
+class RayCastingSamplingMethod:
     def __init__(self, Z_reduced: np.ndarray, B_reduced: np.ndarray, d_orig: int, guidance_method: str = 'mcmc'):
         """
         :param Z_reduced: The sample space basis matrix

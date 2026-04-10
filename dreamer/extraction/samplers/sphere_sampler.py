@@ -1,8 +1,10 @@
 from dreamer.extraction.utils.fast_gcd import get_gcd_of_array
 from dreamer.utils.rand import np
+from .sampler import Sampler
 
 from scipy.special import gamma, zeta
 from numba import njit
+from typing import Callable
 
 
 @njit(cache=True)
@@ -27,7 +29,7 @@ def check_points(points, R_sq):
     return mask
 
 
-class PrimitiveSphereSampler:
+class PrimitiveSphereSampler(Sampler):
     """
     Utility class for sampling primitive points in a hypersphere.
     """
@@ -53,11 +55,8 @@ class PrimitiveSphereSampler:
         R = (n_samples / (vol_unit_ball * density)) ** (1.0 / self.d)
         return np.ceil(R * 1.2)   # make sure to take a big enough buffer
 
-    def sample(self, n_samples):
-        """
-        :param n_samples: Number of points to sample (divided to batches).
-        :return: The sampled points
-        """
+    def harvest(self, compute_n_samples: Callable[[int], int]):
+        n_samples = compute_n_samples(self.d)
         R = self.compute_radius(n_samples)
         R_sq = R * R
 

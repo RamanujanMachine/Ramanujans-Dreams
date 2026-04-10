@@ -2,10 +2,9 @@ from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs import config
-from .sampler.e2e import EndToEndSamplingEngine
 from ramanujantools.cmf import CMF
 from ramanujantools import Position
-from typing import List, Set, Optional, Callable, Tuple, Union
+from typing import List, Optional, Tuple, Union
 import sympy as sp
 import numpy as np
 
@@ -33,9 +32,9 @@ class Shard(Searchable):
 
         super().__init__(cmf, constant, shift, use_inv_t_value)
         self.symbols = list(cmf.matrices.keys())
-        if not hyperplanes:
-            self.A, self.b = None, None
-        else:
+        self.A, self.b = None, None
+
+        if hyperplanes:
             # Work in shifted coordinates, then translate tested points back by `shift`.
             shifted_hyperplanes = [hp.apply_shift(shift) for hp in hyperplanes]
             self.A, self.b, self.symbols = self.generate_matrices(shifted_hyperplanes, encoding)
@@ -80,14 +79,6 @@ class Shard(Searchable):
             return Position({s: sp.Integer(0) for s in self.symbols})
         return Position({sym: self.start_coord[sym] for sym in self.symbols})
 
-    def sample_trajectories(self, compute_n_samples: Callable[[int], int]) -> Set[Position]:
-        sampler = EndToEndSamplingEngine(self.A)
-        samples = sampler.harvest(compute_n_samples)
-
-        return {
-            Position({sym: sp.sympify(int(v)) for v, sym in zip(p, self.symbols)})
-            for p in samples
-        }
 
     @staticmethod
     def generate_matrices(

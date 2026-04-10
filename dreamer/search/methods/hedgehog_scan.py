@@ -1,12 +1,13 @@
 from dreamer.utils.multi_processing import create_pool
+from dreamer.extraction.samplers import ShardSamplingOrchestator
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
-from dreamer.utils.storage.storage_objects import DataManager, SearchVector
+from dreamer.utils.storage.storage_objects import DataManager, SearchVector, SearchData
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.configs import config
 
 import mpmath as mp
 from functools import partial
-from typing import Optional, Callable, List
+from typing import Optional, Callable, List, cast
 from ramanujantools import Position
 
 
@@ -39,7 +40,7 @@ class SerialSearcher(SearchMethod):
         self.pool = create_pool() if self.parallel else None
 
     def search(self,
-               starts: Optional[Position | List[Position]] = None,
+               starts: Optional[object] = None,
                find_limit: bool = True,
                find_eigen_values: bool = True,
                find_gcd_slope: bool = True,
@@ -57,12 +58,19 @@ class SerialSearcher(SearchMethod):
         """
         if not starts:
             starts = self.space.get_interior_point()
-        if isinstance(starts, Position):
-            starts = [starts]
+        if starts is None:
+            raise ValueError('Search requires at least one valid start point')
+        starts_list: List[Position]
+        if isinstance(starts, list):
+            starts_list = []
+            for s in starts:
+                starts_list.append(cast(Position, s))
+        else:
+            starts_list = [cast(Position, starts)]
 
-        trajectories = self.space.sample_trajectories(trajectory_generator)
+        trajectories = ShardSamplingOrchestator(self.space).sample_trajectories(trajectory_generator)
 
-        pairs = [(t, start) for start in starts for t in trajectories if
+        pairs = [(t, start) for start in starts_list for t in trajectories if
                  SearchVector(start, t) not in self.data_manager]
         traj_lst = [p[0] for p in pairs]
         start_lst = [p[1] for p in pairs]
@@ -78,10 +86,12 @@ class SerialSearcher(SearchMethod):
                 ),
                 traj_lst, start_lst, chunksize=search_config.SEARCH_VECTOR_CHUNK)
             for res in results:
-                if res:
-                    res.gcd_slope = mp.mpf(res.gcd_slope) if res.gcd_slope else None
-                    res.delta = mp.mpf(res.delta) if isinstance(res.delta, str) else res.delta
-                    self.data_manager[res.sv] = res
+                if res is not None:
+                    res_data = cast(SearchData, res)
+                    res_data.gcd_slope = mp.mpf(res_data.gcd_slope) if res_data.gcd_slope else None
+                    if isinstance(res_data.delta, str):
+                        res_data.delta = mp.mpf(res_data.delta)
+                    self.data_manager[res_data.sv] = res_data
         else:
             for t, start in pairs:
                 sd = self.space.compute_trajectory_data(

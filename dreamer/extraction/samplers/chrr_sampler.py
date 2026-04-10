@@ -1,9 +1,16 @@
 from dreamer.utils.rand import np
 from dreamer.utils.logger import Logger
 from dreamer.extraction.utils.fast_gcd import get_gcd_of_array
+from .sampler import Sampler
 from typing import Tuple
 from numba import njit
 import time
+
+
+# ---------------------------------------------------------------------------------------
+#                                      IMPORTANT!
+# This sampler is obsolete! This is here only for pure windows users and legacy reasons
+# ---------------------------------------------------------------------------------------
 
 
 @njit(cache=True)
