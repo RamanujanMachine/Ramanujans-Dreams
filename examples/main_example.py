@@ -47,10 +47,3 @@ if __name__ == '__main__':
         analyzers=[analysis.AnalyzerModV1],
         searcher=search.SearcherModV1
     ).run(constants=[log(2)])
-
-# הישגים מרשמים כלשהם - שימפור חסם וכד(''
-#                                       - תוצאות יפות
-# מציגים כלים רחב ששמים אונליין - יהיו אנשים
-# if שיעריכו:
-#
-# )

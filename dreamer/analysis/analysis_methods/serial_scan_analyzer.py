@@ -19,13 +19,13 @@ class Analyzer(AnalyzerScheme):
     prioritize the searchables according to relevance.
     """
 
-    def __init__(self, const: Constant, shards: List[Searchable]):
+    def __init__(self, const: Constant, spaces: List[Searchable]):
         """
         :param const: Constant to analyze for
-        :param shards: Searchables to analyze
+        :param spaces: Searchables to analyze
         """
         self.const = const
-        self.shards = shards
+        self.spaces = spaces
 
     def search(self) -> Dict[Searchable, DataManager]:
         """
@@ -34,17 +34,18 @@ class Analyzer(AnalyzerScheme):
         """
         managers = {}
 
-        for i, shard in enumerate(SmartTQDM(self.shards, desc='Analyzing shards', **config.system.TQDM_CONFIG)):
-            start = shard.get_interior_point()
+        # Notice we used the naming of the subspaces as "shards" but this might change in the future
+        for i, space in enumerate(SmartTQDM(self.spaces, desc='Analyzing shards', **config.system.TQDM_CONFIG)):
+            start = space.get_interior_point()
             Logger(f'{"=" * 10} SHARD NO. {i + 1} {"=" * 10}', Logger.Levels.message).log(msg_prefix='\n')
             if analysis_config.SHOW_START_POINT:
                 Logger(f'Chosen shard start point: {start}', Logger.Levels.info).log()
             if analysis_config.SHOW_SEARCHABLE:
-                Logger(f'Shard: \n{shard}', Logger.Levels.info).log()
+                Logger(f'Shard: \n{space}', Logger.Levels.info).log()
 
-            Logger(f'Shard description (Ax < b) \nA:\n{shard.A}\nb:\n{shard.b}\n', Logger.Levels.debug).log()
+            Logger(f'Shard description (Ax < b):\n{str(space)}', Logger.Levels.debug).log()
 
-            searcher = SerialSearcher(shard, self.const, use_LIReC=analysis_config.USE_LIReC)
+            searcher = SerialSearcher(space, self.const, use_LIReC=analysis_config.USE_LIReC)
             dm = searcher.search(
                 start,
                 find_limit=analysis_config.ANALYZE_LIMIT,
@@ -63,8 +64,8 @@ class Analyzer(AnalyzerScheme):
                         Logger.Levels.info
                     ).log()
                 else:
-                    cmf_msg = f'{repr(shard.cmf)}'\
-                        if type(shard.cmf) is not CMF else '<raw cmf>'
+                    cmf_msg = f'{repr(space.cmf)}'\
+                        if type(space.cmf) is not CMF else '<raw cmf>'
                     Logger(
                         f'Identified {identified * 100:.2f}% of trajectories as containing "{self.const.name}"'
                         f'\n    > Best delta:\t {best_delta:.4f}'
@@ -74,7 +75,7 @@ class Analyzer(AnalyzerScheme):
                         Logger.Levels.info
                     ).log()
             if identified > analysis_config.IDENTIFY_THRESHOLD and best_delta is not None:
-                managers[shard] = dm
+                managers[space] = dm
             else:
                 if best_delta is not None:
                     Logger(

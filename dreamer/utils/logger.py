@@ -2,6 +2,7 @@ import functools
 import time
 import inspect
 import logging
+import os
 from enum import Enum, auto
 from contextlib import contextmanager
 from typing import Callable, Dict, Tuple, Optional
@@ -116,10 +117,12 @@ class Logger:
 
     @classmethod
     def _ensure_file_handler(cls):
-        desired_filename = logging_config.LOG_FILENAME
+        desired_filename = os.path.abspath(logging_config.LOG_FILENAME)
 
         if cls._file_handler is not None:
             current_filename = getattr(cls._file_handler, 'baseFilename', None)
+            if current_filename is not None:
+                current_filename = os.path.abspath(str(current_filename))
             if current_filename == desired_filename:
                 return
             sys_logger.removeHandler(cls._file_handler)
