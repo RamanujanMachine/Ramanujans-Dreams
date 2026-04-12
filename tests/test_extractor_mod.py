@@ -27,8 +27,8 @@ def test_extractor_mod_execute_aggregates_shards_and_exports(monkeypatch, tmp_pa
     def _fake_export_stream(root, **_kwargs):
         assert str(tmp_path) in root
 
-        def _writer(chunk):
-            exported.append(chunk)
+        def _writer(chunk, filename):
+            exported.append((chunk, filename))
 
         yield _writer
 
@@ -43,5 +43,5 @@ def test_extractor_mod_execute_aggregates_shards_and_exports(monkeypatch, tmp_pa
     result = ShardExtractorMod(cmf_data).execute()
 
     assert result[e] == ["shard-1", "shard-2"]
-    assert exported == [["shard-1"], ["shard-2"]]
+    assert exported == [(["shard-1"], "UnknownCMF"), (["shard-2"], "UnknownCMF")]
 

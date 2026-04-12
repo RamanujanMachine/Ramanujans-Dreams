@@ -1,91 +1,94 @@
-# Test Audit Report (2026-04-10)
+# Test Audit Report (2026-04-12)
 
-Bottom line: the suite has strong coverage for core geometry classes (`Shard`, `Hyperplane`) and decent stochastic checks for samplers, but there are still meaningful blind spots (non-discovered test files, untested extraction classes, and missing end-to-end branch coverage evidence).
+Bottom line: recent bug-fix work is covered by targeted regression tests and test documentation updates, but the repository is **not fully DoD-complete yet** because full-suite and full `--cov` evidence are still blocked by the SA import path issue.
 
-## Scope and Method
+## Definition-of-Done Compliance Snapshot (Code Development)
 
-- Reviewed all files in `tests/` and mapped them to target classes/modules.
-- Reviewed extraction-related implementation files under `dreamer/extraction/**`.
-- Evaluated challenge quality with the rubric in `COVERAGE_POLICY.md`:
-  - failure-path coverage
-  - boundary stress
-  - invariant/known-answer
-  - stochastic robustness
-  - regression trap
-- Coverage percentages below are **traceability coverage** (test presence per class), not runtime line/branch percentages.
+| Requirement (from `DEFINITION_OF_DONE.md`) | Status | Evidence / Notes |
+|---|---|---|
+| Working code passes tests | Partial | Touched-path suites pass (see commands below), full `pytest tests/` currently blocked by `tests/test_search_sa.py` import error. |
+| Tests for new/changed behavior | Done for touched fixes | Added/updated regression tests in `tests/test_logger.py`, `tests/test_system_logger_integration.py`, `tests/test_search_genetic.py`, `tests/test_extractor_mod.py`. |
+| Test docs include assumptions + failure mode rationale | Partial | Completed for `tests/test_search_genetic.py`; still not uniformly applied across all test files in repo. |
+| Coverage evidence (`pytest tests/ -v --cov=dreamer --cov-branch --cov-report=term-missing`) | Blocked | Command cannot complete due SA import issue; targeted test evidence is attached below. |
+| Challenge rubric scores for touched non-trivial modules | Done (for touched scope) | Scorecards listed below for logger/genetic/extractor changes. |
 
-## Discovery Coverage (pytest collection)
+## Executed Test Evidence
 
-- `pytest` discovers only `test_*.py` per `pyproject.toml`.
-- In `tests/`, files matching `test_*.py`: **14**
-- Non-discovered files: **4** (`db_v1_test.py`, `simulated_annealing_testing.py`, `simulated_annealing_visual_test.py`, `testing_tool.py`)
-- Discovery coverage by file count: **14/18 = 77.8%**
+Commands actually executed during this update cycle:
 
-Impact:
-- Simulated annealing tests currently do not run in default CI invocation.
-- Coverage reports can overstate confidence for `dreamer/search`.
+```bash
+python -m pytest -q tests/test_extractor_mod.py
+python -m pytest -q tests/test_search_genetic.py
+python -m pytest -q tests/test_search_genetic.py tests/test_logger.py tests/test_system_logger_integration.py
+python -m pytest -q
+```
 
-## Extraction Class Coverage and Challenge Quality
+Observed outcomes:
+- `tests/test_extractor_mod.py` -> **1 passed**.
+- `tests/test_search_genetic.py` -> **9 passed**.
+- Combined touched suites -> **20 passed**.
+- Full suite (`python -m pytest -q`) -> **blocked** at collection:
+  - `tests/test_search_sa.py` imports `SimulatedAnnealingSearchMethod` from `deprecate`, symbol not found.
 
-| Class | Main tests | Test presence | Challenge score (/5) | Notes |
-|---|---|---:|---:|---|
-| `Hyperplane` | `tests/test_hyperplanes.py` | High | 4 | Strong normalization/equality/shift checks; add randomized linear-form fuzz tests. |
-| `Shard` | `tests/test_shard.py` | High | 4 | Good boundary + rational-shift checks; add higher-dimensional cone stress tests. |
-| `ShardExtractor` | `tests/test_extractor.py` | Medium | 3 | Good branch checks for no-hyperplane/selected-points; limited assertions on `_extract_cmf_hps` internals. |
-| `ShardExtractorMod` | none direct | Low | 1 | No focused tests for `execute()` orchestration/export flow. |
-| `HyperSpaceConditioner` | `tests/test_extraction_conditioner.py` | Medium | 3 | Private-method tests exist; missing realistic high-dim integration and failure cases for reduction stack. |
-| `RaycastPipelineSampler` | `tests/test_extraction_sampler_pipeline.py` | Medium | 3 | Formula and directional spread checks are good; missing `harvest()` end-to-end and adaptive expansion tests. |
-| `RayCastingSamplingMethod` | `tests/test_extraction_sampler_pipeline.py` | Medium | 3 | Dedup logic tested via monkeypatch; add chebyshev-center failure and constrained-cone regressions. |
-| `PrimitiveSphereSampler` | `tests/test_sampler_sphere.py` | Medium-High | 4 | Good primitive/non-zero/directional tests; add multi-seed stability checks. |
-| `ShardSamplingOrchestrator` | `tests/test_sampler_shard_sampler.py` | Medium | 3 | Good constrained/unconstrained routing checks; add malformed sample-shape guard tests. |
-| `Sampler` (abstract) | indirect only | Low | 1 | Abstract API exists but no contract test. |
-| `SamplingOrchestrator` (abstract) | indirect only | Low | 1 | Abstract contract not tested explicitly. |
-| `CHRRSampler` | none | None | 0 | No tests. If legacy-only, move under diagnostics/deprecated and document exclusion. |
+## Coverage Evidence Status
 
-Extraction non-abstract class traceability coverage:
-- Covered non-abstract extraction classes: **8/10 = 80%**
-- Uncovered non-abstract extraction classes: `ShardExtractorMod`, `CHRRSampler`
-
-## Other Core Classes
-
-| Class | Main tests | Test presence | Challenge score (/5) | Notes |
-|---|---|---:|---:|---|
-| `Constant` | `tests/test_constant.py` | High | 4 | Strong registry/value/arithmetic coverage; could add threading/concurrency registry checks. |
-| `DB` (v1) | `tests/test_db_and_config.py` | Medium | 3 | Basic CRUD and errors covered; transactional and malformed-payload paths are light. |
-| `Formatter` / `pFq` / `MeijerG` / `BaseCMF` | `tests/test_formatters.py` | Medium-High | 3 | Good API validation; add stricter round-trip invariants and malformed JSON inputs. |
-| `Logger` | `tests/test_logger.py` | High | 4 | Good runtime toggle and singleton behavior coverage. |
-| `SimulatedAnnealingSearchMethod` | `tests/simulated_annealing_testing.py` | Medium (not discovered) | 4 | Tests are decent but currently excluded from default `pytest` collection. |
-
-## Highest-Priority Gaps
-
-1. Rename or relocate non-discovered test files so they run in CI (`simulated_annealing_testing.py` is most critical).
-2. Add direct tests for `ShardExtractorMod.execute()` and either test or explicitly deprecate `CHRRSampler`.
-3. Add end-to-end `RaycastPipelineSampler.harvest()` tests with constrained and unconstrained cones.
-4. Add multi-seed sampler robustness checks (2-3 seeds minimum) to reduce overfitting to one RNG seed.
-5. Add changed-file line/branch coverage reporting to every PR (not just global coverage).
-
-## Upgrade Status (Implemented)
-
-- Added discovered SA coverage in `tests/test_search_sa.py` (core initialization, flatland projection, early-exit search behavior, schedule checks).
-- Added direct orchestration coverage for `ShardExtractorMod.execute()` in `tests/test_extractor_mod.py`.
-- Added deterministic end-to-end `RaycastPipelineSampler.harvest()` tests (quota path + radius expansion path) in `tests/test_extraction_sampler_pipeline.py`.
-- Added multi-seed sampler robustness checks in `tests/test_sampler_sphere.py`.
-- Fixed brittle monkeypatch capture pattern in `tests/test_sampler_shard_sampler.py` to avoid key-access failures.
-
-## Deprecation Note (Current)
-
-- `SimulatedAnnealingSearchMethod` tests are currently treated as deprecated (module kept but skipped in `tests/test_search_sa.py`).
-- Legacy SA files are deprecated diagnostics-only references: `tests/simulated_annealing_testing.py`, `tests/simulated_annealing_visual_test.py`.
-- `tests/db_v1_test.py` is treated as deprecated diagnostic/WIP and intentionally excluded from pytest discovery.
-
-## Runtime Coverage Commands
+Required command:
 
 ```bash
 pytest tests/ -v --cov=dreamer --cov-branch --cov-report=term-missing
-pytest tests/test_extraction_*.py tests/test_sampler_*.py -v --cov=dreamer.extraction --cov-branch --cov-report=term-missing
 ```
 
-## Notes
+Current status:
+- Not complete in this environment because full test collection is blocked by `tests/test_search_sa.py`.
+- A targeted `--cov` run was attempted for genetic modules, but collection became unstable in this environment (`numpy` re-import error) after plugin/tooling changes.
+- Action required before PR merge: fix SA import path and re-run full repository coverage command.
 
-- This audit is code-and-test traceability based. Execute the commands above in your local Linux/WSL environment to attach measured line/branch percentages.
+## Challenge Rubric Scores for Touched Modules
+
+Scored on rubric axes: failure path, boundary, invariant/known-answer, stochastic robustness, regression trap.
+
+| Touched module | Score (/5) | Rationale |
+|---|---:|---|
+| `dreamer/utils/logger.py` | 4 | Strong regression coverage for missing file recreation, run rotation, same-run append, and integration hook in `System.run`. |
+| `dreamer/search/methods/genetic.py` | 4 | Added batch-resampling regression tests (including retry exhaustion), plus constrained-space trajectory invariants. |
+| `dreamer/search/searchers/genetic_mod.py` | 3 | Module orchestration/export path tested with monkeypatch; still mostly integration-by-mock, limited real end-to-end filesystem assertions. |
+| `dreamer/extraction/extractor.py` (`ShardExtractorMod.execute`) | 3 | Direct orchestration/export regression exists (`tests/test_extractor_mod.py`) and mock signature bug fixed; limited branch-depth assertions beyond happy path. |
+
+## Test Documentation Status (Touched Test Files)
+
+| Test file | Documentation status | Notes |
+|---|---|---|
+| `tests/test_search_genetic.py` | Updated | Added per-test intent with assumptions and failure-mode rationale. |
+| `tests/test_logger.py` | Good | Behavior-oriented naming; currently light on explicit assumption/failure-mode docstrings. |
+| `tests/test_system_logger_integration.py` | Minimal | Focused integration intent is clear; could add explicit assumption/failure-mode docstring. |
+| `tests/test_extractor_mod.py` | Minimal | Test is concise and clear; explicit assumption/failure-mode docstring still recommended. |
+
+## Repository-Wide Review (Non-Touched Modules)
+
+This section is intentionally separate from touched-module deep review and provides a concise status scan for modules not changed in this cycle.
+
+| Area (non-touched in this cycle) | Current status snapshot | Risk / Follow-up |
+|---|---|---|
+| `dreamer/search` (SA path) | Full-suite collection currently blocked by `tests/test_search_sa.py` import path mismatch. | High; fix import/source-of-truth for SA test target before merge gate. |
+| `dreamer/extraction` (other than `ShardExtractorMod` orchestration path) | Previous traceability audit exists; no new regressions observed in this cycle-specific runs. | Medium; still re-run full extraction subset once SA blocker is resolved. |
+| `dreamer/loading` / `dreamer/analysis` | Not modified and not directly exercised by cycle-specific focused runs. | Medium; include in full-suite verification step. |
+| `dreamer/system` (beyond logger integration test path) | Basic run-start logging integration covered; broader system behavior unchanged this cycle. | Low-Medium; keep covered by full suite. |
+
+Non-touched modules were not rescored with the challenge rubric in this cycle; rubric scores in this report apply to touched non-trivial modules per DoD requirements.
+
+## New/Updated Regression Traps Added
+
+- Logger lifecycle trap: deleted log file must be recreated within same run.
+- Logger run-boundary trap: `System.run()` triggers log rotation via `Logger.start_run()`.
+- Genetic search trap: invalid deltas are resampled **in batch** and retried in batch.
+- Extractor module trap: export writer callback requires two args (`chunk`, `filename`).
+
+## Open Items to Reach Full DoD Completion
+
+1. Fix SA import path in `tests/test_search_sa.py` (or explicitly gate/deprecate with rationale).
+2. Re-run full suite:
+   - `python -m pytest -q`
+3. Re-run required coverage command and attach line+branch results for touched files:
+   - `pytest tests/ -v --cov=dreamer --cov-branch --cov-report=term-missing`
+4. If changed-file coverage misses policy targets, include rationale + follow-up plan in PR body.
 
