@@ -74,6 +74,10 @@ A code development task produces new or modified Python code: a function, a modu
   """
   ```
 - [ ] **Code Standards** followed: PEP 8 style, descriptive variable names, modular design.
+- [ ] **Update files** like:
+  - `SYSTEM_SPEC.md` if needed to match current state of the code and features. 
+  - `README.md` if needed to reflect the new code usage.
+  - `generate_system_overview_notebook.py` and create the corresponding notebook if relevant changes to the system overview are made. This is likely to be a rare occurrence and happen if the `SYSTEM_SPEC.md` file is updated too. 
 
 ### Performance Tasks (additional criteria)
 
