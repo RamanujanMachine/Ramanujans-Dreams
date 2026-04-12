@@ -49,7 +49,9 @@ cells.append(code_cell("""
 # If running on Colab, install the local package first
 # (uncomment the two lines below and update the path / wheel as needed)
 # !pip install -e /content/RamanujanDream-AI-Support
-# !pip install ramanujantools mpmath sympy
+# !pip install ramanujantools mpmath sympy 
+!pip install plotly
+!pip install "nbformat>=4.2.0"
 
 import sympy as sp
 import mpmath as mp
@@ -129,8 +131,8 @@ cells.append(md_cell(f"""
 |:------|:-----------|:------------------|
 | **Constant** | A mathematical constant to discover formulas for | π, e, ζ(3), ln 2, Catalan, γ, √2, π² |
 | **CMF** | A Conservative Matrix Field encoding a family of identities | `pFq(log(2), 2, 1, -1)`, `MeijerG(e, 1,1,1,2, 1)` |
-| **Shard** | A bounded region of the CMF space defined by hyperplane inequalities Ax < b | One interior point per region; ~18–200 shards per 2D CMF |
-| **Trajectory** | A direction vector sampled inside a shard, used as a walk direction | 10^d samples per shard via `EndToEndSamplingEngine` |
+| **Shard** | A bounded region of the CMF space defined by hyperplane inequalities Ax < b | One interior point per region; ~18–200 shards depending on `z` |
+| **Trajectory** | A direction vector sampled inside a shard, used as a walk direction | 10<sup>d</sup> samples per shard via `EndToEndSamplingEngine` |
 | **Evaluation** | Walk along trajectory, check convergence to the constant | δ computation, depth ≤ 1500, LIReC / RIES identification |
 """))
 
@@ -205,8 +207,10 @@ offsets the starting lattice point for that symbol.
 cells.append(code_cell("""
 # Demonstrate creating CMF objects (requires ramanujantools)
 try:
+    from IPython.display import Markdown, Math, display
     from ramanujantools.cmf import pFq as rt_pFq
     from ramanujantools.cmf.meijer_g import MeijerG as rt_mg
+    import sympy as sp
 
     cmf_2f1 = rt_pFq(2, 1, -1)
     print("=== 2F1(z=-1) for ln(2) ===")
@@ -214,14 +218,20 @@ try:
     print(f"  Symbols   : {list(cmf_2f1.matrices.keys())}")
     print(f"  # matrices: {len(cmf_2f1.matrices)}")
     for sym, mat in cmf_2f1.matrices.items():
-        print(f"  M_{sym} =")
-        import sympy; sympy.pprint(mat, use_unicode=True)
+        display(Markdown(f"$M_{{{sp.latex(sym)}}}: $"))
+        display(Math(sp.latex(mat)))
+        print()
 
     print()
     cmf_mg = rt_mg(1, 1, 1, 2, 1)
     print("=== MeijerG(1,1,1,2,z=1) ===")
     print(f"  Dimension : {cmf_mg.dim()}")
     print(f"  Symbols   : {list(cmf_mg.matrices.keys())}")
+    print(f"  # matrices: {len(cmf_mg.matrices)}")
+    for sym, mat in cmf_mg.matrices.items():
+        display(Markdown(f"$M_{{{sp.latex(sym)}}}: $"))
+        display(Math(sp.latex(mat)))
+        print()
 
 except ImportError:
     print("ramanujantools not installed — skipping live CMF demo.")
@@ -259,44 +269,74 @@ defined by a system of linear inequalities $Ax < b$.
 """))
 
 cells.append(code_cell("""
-# Demonstrate shard geometry with a synthetic example
+# Demonstrate 3D shard geometry interactively using Plotly
 import numpy as np
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 
-# Synthetic 2D shard: 4 hyperplanes forming a quadrilateral
-A = np.array([
-    [ 1,  0],   # x < 5
-    [-1,  0],   # -x < -1  ⟹  x > 1
-    [ 0,  1],   # y < 4
-    [ 0, -1],   # -y < -1  ⟹  y > 1
-])
-b = np.array([5, -1, 4, -1])
+# Define grid range for the planes
+grid_range = np.linspace(-5, 5, 10)
+xx, yy = np.meshgrid(grid_range, grid_range)
+yy_yz, zz_yz = np.meshgrid(grid_range, grid_range)
+xx_xz, zz_xz = np.meshgrid(grid_range, grid_range)
 
-# Visualize the feasible region
-fig, ax = plt.subplots(1, 1, figsize=(5, 5))
-from matplotlib.patches import Polygon
-verts = np.array([[1,1],[5,1],[5,4],[1,4]])
-poly = Polygon(verts, closed=True, alpha=0.25, fc='orange', ec='darkorange', lw=2)
-ax.add_patch(poly)
+fig = go.Figure()
 
-# Interior point
-ax.plot(3, 2.5, 'ro', ms=10, label='interior point (3, 2.5)')
+# Helper function to add planes
+def add_plane(x, y, z, name, colorscale):
+    fig.add_trace(go.Surface(
+        x=x, y=y, z=z, 
+        name=name, 
+        opacity=0.7, 
+        colorscale=colorscale, 
+        showscale=False,
+        showlegend=True
+    ))
 
-# A few trajectory directions (rays from the interior)
-for angle, lbl in [(30, 'traj 1'), (110, 'traj 2'), (220, 'traj 3')]:
-    dx = np.cos(np.radians(angle))
-    dy = np.sin(np.radians(angle))
-    ax.annotate('', xy=(3+dx*1.8, 2.5+dy*1.8), xytext=(3, 2.5),
-                arrowprops=dict(arrowstyle='->', color='purple', lw=1.5))
+# 1. z + y = 0  =>  z = -y
+add_plane(xx, yy, -yy, 'z + y = 0', 'Blues')
 
-ax.set_xlim(-0.5, 7); ax.set_ylim(-0.5, 6)
-ax.set_xlabel('symbol x₀'); ax.set_ylabel('symbol x₁')
-ax.set_title('Example 2D Shard (Ax < b)')
-ax.legend(); ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
+# 2. z + y = 1  =>  z = 1 - y
+add_plane(xx, yy, 1 - yy, 'z + y = 1', 'Reds')
+
+# 3. x - z = -1 =>  z = x + 1
+add_plane(xx, yy, xx + 1, 'x - z = -1', 'Greens')
+
+# 4. x - z = 0  =>  z = x
+add_plane(xx, yy, xx, 'x - z = 0', 'Purples')
+
+# 5. z = 0
+add_plane(xx, yy, np.zeros_like(xx), 'z = 0', 'Oranges')
+
+# 6. x = 0
+add_plane(np.zeros_like(yy_yz), yy_yz, zz_yz, 'x = 0', 'Greys')
+
+# 7. y = 0
+add_plane(xx_xz, np.zeros_like(xx_xz), zz_xz, 'y = 0', 'YlOrBr')
+
+# Highlight a synthetic interior point
+fig.add_trace(go.Scatter3d(
+    x=[-4], y=[-4], z=[2],
+    mode='markers',
+    marker=dict(size=6, color='black'),
+    name='Interior Point'
+))
+
+fig.update_layout(
+    title='Interactive 3D Shard Geometry (Ax < b)',
+    scene=dict(
+        xaxis_title='Symbol x',
+        yaxis_title='Symbol y',
+        zaxis_title='Symbol z',
+        xaxis=dict(range=[-5, 5]),
+        yaxis=dict(range=[-5, 5]),
+        zaxis=dict(range=[-5, 5])
+    ),
+    margin=dict(l=0, r=0, b=0, t=40),
+    legend=dict(x=0.8, y=0.9)
+)
+
+fig.show()
 """))
-
 # =====================================================================
 # 6. Trajectory & sampling policy
 # =====================================================================
@@ -449,7 +489,7 @@ except ImportError:
 
 # Test 4: pFq round-trip JSON
 cells.append(code_cell("""
-# Test 4: pFq JSON round-trip
+# Test 4: pFq JSON serialization round-trip
 print("Test 4: pFq JSON serialization round-trip")
 try:
     from dreamer.loading.funcs.pFq_fmt import pFq
