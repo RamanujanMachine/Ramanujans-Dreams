@@ -5,7 +5,7 @@ from typing import DefaultDict
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.schemes.module import Module, CatchErrorInModule
-from dreamer.utils.types import ShiftCMF
+from dreamer.utils.types import CMFData
 from dreamer.loading.funcs.formatter import Formatter
 from dreamer.loading.config import DATA_ANNOTATE, COMMAND_ANNOTATE
 from dreamer.configs import sys_config
@@ -18,7 +18,7 @@ class DBModScheme(Module):
     @CatchErrorInModule(with_trace=sys_config.MODULE_ERROR_SHOW_TRACE, fatal=True)
     def aggregate(cls, dbs: List["DBModScheme"],
                   constants: Optional[List[Constant] | Constant] = None,
-                  close_after_exec: bool = False) -> DefaultDict[Constant, Set[ShiftCMF]]:
+                  close_after_exec: bool = False) -> DefaultDict[Constant, Set[CMFData]]:
         """
         Aggregate results from multiple DBModConnector instances.
         i.e., combine data from multiple databases
@@ -39,7 +39,7 @@ class DBModScheme(Module):
         return results
 
     @abstractmethod
-    def execute(self, constants: Optional[List[Constant] | Constant] = None) -> Dict[Constant, List[ShiftCMF]] | None:
+    def execute(self, constants: Optional[List[Constant] | Constant] = None) -> Dict[Constant, List[CMFData]] | None:
         """
         Executes the module and returns the results, if any.
         :param constants: Constants to relate to when executing the module.
@@ -80,7 +80,7 @@ class DBModScheme(Module):
 
 class DBScheme(ABC):
     @abstractmethod
-    def select(self, constant: Constant) -> List[ShiftCMF]:
+    def select(self, constant: Constant) -> List[CMFData]:
         """
         Retrieve the CMFs of the inspiration funcs corresponding to the given constant.
         :param constant: The constant for which to retrieve the CMFs.

@@ -9,7 +9,7 @@ from ...errors import ConstantAlreadyExists, ConstantDoesNotExist, NoSuchInspira
 from dreamer.loading.config import COMMAND_ANNOTATE, DATA_ANNOTATE, TYPE_ANNOTATE, CONST_ANNOTATE
 from .config import DEFAULT_PATH
 from typing import Optional, List, Dict
-from dreamer.utils.types import ShiftCMF
+from dreamer.utils.types import CMFData
 
 
 class DB(DBScheme):
@@ -45,7 +45,7 @@ class DB(DBScheme):
         """
         self.db.close()
 
-    def select(self, constant: Constant) -> List[ShiftCMF]:
+    def select(self, constant: Constant) -> List[CMFData]:
         """
         Retrieve the CMFs of the inspiration funcs corresponding to the given constant.
         :param constant: The constant for which to retrieve the CMFs.

@@ -19,7 +19,7 @@ class SearchConfig(Configurable):
     SEARCH_VECTOR_CHUNK: int = 4                # number of search vectors per chunk for parallel search
     NUM_TRAJECTORIES_FROM_DIM: Callable = traj_from_dim
     DEPTH_FROM_TRAJECTORY_LEN: Callable = depth_from_len
-    DEPTH_CONVERGENCE_THRESHOLD: Tuple[float] = (0.9, 0.95, 1.0)
+    DEPTH_CONVERGENCE_THRESHOLD: Tuple[float, ...] = (0.9, 0.95, 1.0)
     DEFAULT_USES_INV_T: bool = True
 
     # ============================== Delta calculation and validation settings ==============================

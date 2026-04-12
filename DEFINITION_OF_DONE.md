@@ -45,6 +45,7 @@ A code development task produces new or modified Python code: a function, a modu
   - Every new public function has at least one test.
   - Tests cover: normal operation, edge cases, and at least one known-answer verification.
   - Tests are runnable via `pytest`.
+  - All test functions and classes are well-documented, including assumptions and failure mode rationale per test.
 - [ ] **Coverage evidence** attached:
   - `pytest tests/ -v --cov=dreamer --cov-branch --cov-report=term-missing` is run.
   - PR includes line + branch coverage for touched modules/files.
@@ -59,7 +60,16 @@ A code development task produces new or modified Python code: a function, a modu
   - Known-answer test: compute a well-known constant and verify to expected precision.
   - Consistency check: forward and inverse operations compose to identity.
   - Scale check: if the function is meant to work at $N=10000$, test it at $N=10000$.
-- [ ] **Docstring** for every new public function: one-line summary, parameters, return value, example.
+- [ ] **Documentation** for every new class or function: a description placed after the function/class definition with the following format:
+  ```python
+  """
+  Description of what this function/class does, and why, if it does something very irregular the user might not expect.
+  :param x: Description of the parameter x (if this is a function).
+  :param y: Description of the parameter y (if this is a function).
+  :raises SomeError: Description of the conditions under which a SomeError is raised (if applicable).
+  :return: Description of the return value (if it returns something).
+  """
+  ```
 - [ ] **Code Standards** followed: PEP 8 style, descriptive variable names, modular design.
 
 ### Performance Tasks (additional criteria)

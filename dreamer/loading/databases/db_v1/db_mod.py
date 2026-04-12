@@ -11,7 +11,7 @@ from dreamer.configs import (
     DBUsages
 )
 from typing import Optional, List, Dict
-from dreamer.utils.types import ShiftCMF
+from dreamer.utils.types import CMFData
 
 
 class BasicDBMod(DBModScheme):
@@ -32,7 +32,7 @@ class BasicDBMod(DBModScheme):
         self.json_path = json_path
 
     @CatchErrorInModule(with_trace=sys_config.MODULE_ERROR_SHOW_TRACE, fatal=True)
-    def execute(self, constants: Optional[List[Constant] | Constant] = None) -> Dict[Constant, List[ShiftCMF]] | None:
+    def execute(self, constants: Optional[List[Constant] | Constant] = None) -> Dict[Constant, List[CMFData]] | None:
         def classify_usage(usage: DBUsages) -> Optional[dict]:
             match usage:
                 case DBUsages.RETRIEVE_DATA:

@@ -237,11 +237,11 @@ class Logger:
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            Logger(f'Entered: {func.__name__}', Logger.Levels.debug).log()
+            Logger(f'-> Entered: {func.__name__}', Logger.Levels.debug).log()
             start = time.time()
             res = func(*args, **kwargs)
             end = time.time()
-            Logger(f'Exited: {func.__name__} [in {end - start:.6f} seconds]', Logger.Levels.debug).log()
+            Logger(f'<- Exited: {func.__name__} [in {end - start:.6f} seconds]', Logger.Levels.debug).log()
             return res
 
         return wrapper

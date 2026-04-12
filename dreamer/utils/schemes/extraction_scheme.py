@@ -1,6 +1,6 @@
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.schemes.module import Module
-from dreamer.utils.types import ShiftCMF
+from dreamer.utils.types import CMFData
 from dreamer.utils.constants.constant import Constant
 
 from abc import abstractmethod, ABC
@@ -13,7 +13,7 @@ class ExtractionModScheme(Module):
     """
 
     def __init__(self,
-                 cmf_data: Dict[Constant, List[ShiftCMF]],
+                 cmf_data: Dict[Constant, List[CMFData]],
                  name: Optional[str] = None, desc: Optional[str] = None, version: Optional[str] = None,
                  ):
         """
@@ -39,13 +39,13 @@ class ExtractionScheme(ABC):
     A template for a general extraction method.
     """
 
-    def __init__(self, const: Constant, cmf_data: ShiftCMF):
+    def __init__(self, const: Constant, cmf_data: CMFData):
         """
         :param const: A constant to extract searchables for.
         :param cmf_data: The CMF to extract searchables from and extra data about the CMF required for extraction.
         """
         self.const = const
-        self.cmf_data: ShiftCMF = cmf_data
+        self.cmf_data: CMFData = cmf_data
 
     @abstractmethod
     def extract(self, *args) -> List[Searchable]:

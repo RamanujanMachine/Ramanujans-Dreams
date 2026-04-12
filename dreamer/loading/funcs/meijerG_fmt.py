@@ -3,7 +3,7 @@ from ramanujantools.cmf.meijer_g import MeijerG as rt_mg
 from dreamer.utils.constants.constant import Constant
 from dreamer.loading.funcs.formatter import Formatter
 from dreamer.configs import config
-from dreamer.utils.types import ShiftCMF
+from dreamer.utils.types import CMFData
 from ramanujantools import Position
 from typing import Optional, List, Tuple, Union
 import sympy as sp
@@ -38,10 +38,11 @@ class MeijerG(Formatter):
 
         if self.shifts is None:
             self.shifts = [0] * (self.p + self.q)
-        
-        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t)
 
-        if not (p > 0 and 0 <= n and n <= p) or not (q > 0 and 0 <= m and m <= q):
+        cmf_name = self.__class__.__name__ + f"_{self.m}_{self.n}_{self.p}_{self.q}_{self.z}"
+        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t, cmf_name)
+
+        if not (p > 0 and 0 <= n <= p) or not (q > 0 and 0 <= m <= q):
             raise ValueError("Meijer G must satisfy p > 0, 0 <= n <= p and q > 0, 0 <= m <= q")
         if not isinstance(self.shifts, list) and not isinstance(self.shifts, Position):
             raise ValueError("Shifts should be a list or Position")
@@ -74,14 +75,14 @@ class MeijerG(Formatter):
             "shifts": [str(shift) if isinstance(shift, sp.Expr) else shift for shift in self.shifts]
         }
 
-    def to_cmf(self) -> ShiftCMF:
+    def to_cmf(self) -> CMFData:
         """
         Converts the MeijerG to a CMF.
         :return: A tuple (CMF, shifts)
         """
         cmf = rt_mg(self.m, self.n, self.p, self.q, self.z)
         self.shifts = Position({k: v for k, v in zip(cmf.matrices.keys(), self.shifts)})
-        return ShiftCMF(cmf, self.shifts, self.selected_start_points, self.only_selected, self.use_inv_t)
+        return CMFData(cmf, self.shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
 
     def __repr__(self):
         return json.dumps(self._to_json_obj())
@@ -90,4 +91,4 @@ class MeijerG(Formatter):
         return f'<{self.__class__.__name__}: {self.__repr__()}>'
 
     def __hash__(self):
-        return hash((self.m, self.n, self.p, self.q, self.z, self.shifts))
+        return hash((self.m, self.n, self.p, self.q, self.z, super().__hash__()))

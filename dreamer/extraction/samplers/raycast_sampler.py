@@ -226,7 +226,7 @@ class RaycastPipelineSampler(Sampler):
                     Logger.Levels.debug
                 ).log()
                 Logger(
-                    f"\n   -> Momentum Expansion: Multiplying R_max by {multiplier:.3f}",
+                    f"\n   Momentum Expansion: Multiplying R_max by {multiplier:.3f}",
                     Logger.Levels.debug
                 ).log()
                 current_R_max *= multiplier

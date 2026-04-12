@@ -129,7 +129,7 @@ class HyperSpaceConditioner:
         Z_current = np.array([list(row) for row in M_fpylll]).T
         U_current = np.array([list(row) for row in U_fpylll])
         defect = self._calculate_defect(Z_current)
-        Logger(f"  -> LLL applied. Orthogonality Defect: {defect:.2f}", Logger.Levels.debug).log()
+        Logger(f"  LLL applied. Orthogonality Defect: {defect:.2f}", Logger.Levels.debug).log()
 
         # Escalation Ratchet: BKZ
         beta = 4
@@ -138,20 +138,20 @@ class HyperSpaceConditioner:
         best_defect = defect
 
         while defect > self.defect_tolerance and beta <= self.max_beta:
-            Logger(f"  -> Defect too high. Escalating to BKZ (Block Size: {beta})...", Logger.Levels.debug).log()
+            Logger(f"  Defect too high. Escalating to BKZ (Block Size: {beta})...", Logger.Levels.debug).log()
             param = BKZ.Param(block_size=beta, strategies=BKZ.DEFAULT_STRATEGY, auto_abort=True)
             BKZ.reduction(M_fpylll, param, U=U_fpylll)
             Z_current = np.array([list(row) for row in M_fpylll]).T
             U_current = np.array([list(row) for row in U_fpylll])
             defect = self._calculate_defect(Z_current)
-            Logger(f"  -> BKZ-{beta} applied. New Defect: {defect:.2f}", Logger.Levels.debug).log()
+            Logger(f"  BKZ-{beta} applied. New Defect: {defect:.2f}", Logger.Levels.debug).log()
             beta += 2
 
             if defect < best_defect:
                 best_defect = defect
                 best_Z = Z_current.copy()
                 best_U = U_current.copy()
-        Logger(f"  -> Final defect is {best_defect}", Logger.Levels.debug).log()
+        Logger(f"  Final defect is {best_defect}", Logger.Levels.debug).log()
         return best_Z, best_U
 
     @Logger.log_exec

@@ -2,7 +2,7 @@ import json
 
 from ramanujantools import Matrix
 from dreamer.utils.constants.constant import Constant
-from dreamer.utils.types import ShiftCMF
+from dreamer.utils.types import CMFData
 from dreamer.loading.funcs.formatter import Formatter
 from typing import Optional, List, Tuple, Union
 from ramanujantools.cmf import CMF
@@ -12,21 +12,22 @@ import sympy as sp
 
 class BaseCMF(Formatter):
     def __init__(self,
-                 const: str | Constant, cmf: CMF, shifts: Optional[list] = None,
+                 const: str | Constant, cmf_name: str, cmf: CMF, shifts: Optional[list] = None,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
                  use_inv_t: bool = None
                  ):
         """
         Represents a general CMF and allows conversion to and from JSON.
-        :var const: The constant related to this CMF
+        :var const: The constant related to this CMF.
+        :var cmf_name: The name of the CMF.
         :var cmf: The CMF.
         :var shifts: The shifts in starting point in the CMF where a sp.Rational indicates a shift.
         While 0 indicates no shift (None if not doesn't matter).
         :param selected_start_points: Optional list of start points to extract shards from.
         :param only_selected: If True, only extract shards from the selected start points.
         """
-        super().__init__(const, shifts, selected_start_points, only_selected, use_inv_t)
+        super().__init__(const, shifts, selected_start_points, only_selected, use_inv_t, cmf_name)
 
         self.cmf = cmf
         if self.shifts is None:
@@ -60,13 +61,13 @@ class BaseCMF(Formatter):
             **{sp.srepr(sym): sp.srepr(matrix) for sym, matrix in self.cmf.matrices.items()},
         }
 
-    def to_cmf(self) -> ShiftCMF:
+    def to_cmf(self) -> CMFData:
         """
         Converts the CMF to a Shift CMF.
         :return: A Shift CMF object
         """
         self.shifts = Position({k: v for k, v in zip(self.cmf.matrices.keys(), self.shifts)})
-        return ShiftCMF(self.cmf, self.shifts, self.selected_start_points, self.only_selected, self.use_inv_t)
+        return CMFData(self.cmf, self.shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
 
     def __repr__(self):
         return json.dumps(self._to_json_obj())

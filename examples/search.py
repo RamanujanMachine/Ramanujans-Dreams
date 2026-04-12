@@ -78,9 +78,4 @@ class MySearchMod(SearcherModScheme):
                 res = searcher.search(
                     # TODO: all you searcher's arguments here
                 )
-                space: Searchable
-                if space.cmf.__class__ == CMF:
-                    filename = f'generated_cmf_hashed_{hash(space.cmf)}'
-                else:
-                    filename = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in repr(space.cmf)).strip('_')
-                write_chunk(res, filename)    # Writes the search results into a file
+                write_chunk(res, space.cmf_name)    # Writes the search results into a file

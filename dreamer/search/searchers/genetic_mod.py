@@ -1,19 +1,20 @@
 import os
 from typing import List, Optional
 
-from ramanujantools.cmf import CMF
-
 from dreamer.configs.system import sys_config
 from dreamer.search.methods.genetic import GeneticSearchMethod
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.extraction.shard import Shard
+from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.storage import Exporter, Formats
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 
 
 class GeneticSearchMod(SearcherModScheme):
-    """Searcher module that runs a GA-based trajectory search per searchable."""
+    """
+    Searcher module that executes GA trajectory optimization per searchable shard.
+    """
 
     def __init__(
         self,
@@ -31,6 +32,23 @@ class GeneticSearchMod(SearcherModScheme):
         refine_coord_prob: float = 0.5,
         parallel_eval: bool = True,
     ):
+        """
+        Initialize GA module-level hyperparameters used for each searchable.
+        :param searchables: Shards/searchables to optimize.
+        :param use_LIReC: Optional backend flag forwarded to trajectory evaluation.
+        :param generations: Number of GA generations.
+        :param pop_size: Population size per generation.
+        :param max_coord_init: Reserved initialization bound forwarded to search method.
+        :param elite_fraction: Fraction of elites retained each generation.
+        :param mutation_prob: Probability to mutate each child.
+        :param mutation_step: Max coordinate mutation step.
+        :param crossover_prob: Probability to perform crossover.
+        :param max_retries: Retry rounds for invalid evaluations.
+        :param refine_prob: Probability to use refine mutation mode.
+        :param refine_coord_prob: Per-coordinate refine perturbation probability.
+        :param parallel_eval: Whether trajectory evaluation uses multiprocessing.
+        :return: None.
+        """
         use_lirec_flag = bool(use_LIReC)
         super().__init__(
             searchables,
@@ -53,6 +71,10 @@ class GeneticSearchMod(SearcherModScheme):
 
     @CatchErrorInModule(with_trace=sys_config.MODULE_ERROR_SHOW_TRACE, fatal=True)
     def execute(self) -> None:
+        """
+        Run GA search for each searchable and export results as pickled DataManager chunks.
+        :return: None.
+        """
         if not self.searchables:
             return
 
@@ -85,9 +107,5 @@ class GeneticSearchMod(SearcherModScheme):
                     use_LIReC=self.use_LIReC,
                 )
                 res = searcher.search()
-
-                if space.cmf.__class__ == CMF:
-                    filename = f"generated_cmf_hashed_{hash(space.cmf)}"
-                else:
-                    filename = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in repr(space.cmf)).strip("_")
-                write_chunk(res, filename)
+                space: Searchable
+                write_chunk(res, space.cmf_name)

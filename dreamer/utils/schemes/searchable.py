@@ -1,5 +1,4 @@
 from abc import ABC, abstractmethod
-from functools import partial
 
 import numpy as np
 import sympy as sp
@@ -10,12 +9,12 @@ from ramanujantools import Limit, Position
 from ramanujantools.cmf import CMF
 from typing import Tuple, Optional, List
 
-from dreamer.utils.caching import cached_property
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.storage.storage_objects import SearchData, SearchVector
 from dreamer.configs import config
 from dreamer.utils.storage.frequency_list import FrequencyList
+from dreamer.utils.types import CMFData
 
 search_config = config.search
 
@@ -26,12 +25,13 @@ class Searchable(ABC):
     A template for a general searchable object (e.g., shards)
     """
 
-    def __init__(self, cmf: CMF, constant: Constant, shift: Position, use_inv_t: bool):
+    def __init__(self, cmf: CMF, constant: Constant, shift: Position, use_inv_t: bool, cmf_name: str):
         """
         :param cmf: The CMF to search in.
         :param constant: A constant to search for.
         :param shift: The shift in the starting point of the CMF.
         :param use_inv_t: If true, use inverse of the walk matrix to compute the limit.
+        :param cmf_name: The name of the CMF.
         """
         self.cache = FrequencyList(max_size=100)
         self.cmf = cmf
@@ -39,6 +39,12 @@ class Searchable(ABC):
         self.shift = shift
         self.use_inv_t = use_inv_t
         self.symbols = list(self.shift.keys())
+        self.cmf_name = cmf_name
+
+    @classmethod
+    @abstractmethod
+    def from_cmf_data(cls, cmf_data: CMFData, constant: Constant, *args, **kwargs):
+        return cls(cmf_data.cmf, constant, cmf_data.shift, cmf_data.use_inv_t, cmf_data.cmf_name)
 
     def is_unconstrained(self) -> bool:
         """

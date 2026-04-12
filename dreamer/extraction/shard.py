@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.constants.constant import Constant
@@ -8,6 +11,8 @@ from typing import List, Optional, Tuple, Union
 import sympy as sp
 import numpy as np
 
+from dreamer.utils.types import CMFData
+
 
 class Shard(Searchable):
     def __init__(self,
@@ -17,7 +22,8 @@ class Shard(Searchable):
                  encoding: List[int],
                  shift: Position,
                  interior_point: Optional[Position] = None,
-                 use_inv_t: Optional[bool] = None
+                 use_inv_t: Optional[bool] = None,
+                 cmf_name: str = 'UnknownCMF'
                  ):
         """
         :param cmf: The CMF this shard is a part of
@@ -27,10 +33,11 @@ class Shard(Searchable):
         :param shift: The shift in start points required
         :param interior_point: A point within the shard
         :param use_inv_t: Whether to use inverse transpose when preforming walk or not
+        :param cmf_name: The name of the CMF
         """
         use_inv_t_value: bool = bool(config.search.DEFAULT_USES_INV_T if use_inv_t is None else use_inv_t)
 
-        super().__init__(cmf, constant, shift, use_inv_t_value)
+        super().__init__(cmf, constant, shift, use_inv_t_value, cmf_name)
         self.symbols = list(cmf.matrices.keys())
         self.A, self.b = None, None
 
@@ -40,6 +47,16 @@ class Shard(Searchable):
             self.A, self.b, self.symbols = self.generate_matrices(shifted_hyperplanes, encoding)
         self.start_coord = interior_point
         self.is_whole_space = self.A is None or self.b is None
+
+    @classmethod
+    def from_cmf_data(cls, cmf_data: CMFData, constant: Constant,
+                      hyperplanes: List[Hyperplane], encoding: List[int],
+                      interior_point: Optional[Position] = None, *args, **kwargs) -> Shard:
+        return cls(
+            cmf_data.cmf, constant, hyperplanes, encoding, cmf_data.shift,
+            interior_point, cmf_data.use_inv_t, cmf_data.cmf_name
+        )
+
 
     def in_space(self, point: Position) -> bool:
         """

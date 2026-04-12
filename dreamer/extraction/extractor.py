@@ -12,7 +12,7 @@ from dreamer.utils.storage.exporter import Exporter
 from dreamer.utils.storage.formats import Formats
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.configs import config
-from dreamer.utils.types import ShiftCMF
+from dreamer.utils.types import CMFData
 from .utils import initial_points as init_points
 
 import os.path
@@ -31,7 +31,7 @@ class ShardExtractorMod(ExtractionModScheme):
     Module for shard extraction
     """
 
-    def __init__(self, cmf_data: Dict[Constant, List[ShiftCMF]]):
+    def __init__(self, cmf_data: Dict[Constant, List[CMFData]]):
         """
         Creates a shard extraction module
         :param cmf_data: A mapping from constants to a list of CMFs
@@ -51,7 +51,7 @@ class ShardExtractorMod(ExtractionModScheme):
         all_shards = defaultdict(list)
 
         consts_itr = iter(list(self.cmf_data.keys()))
-        for const, cmf_list in SmartTQDM(
+        for const, cmf_data_list in SmartTQDM(
                 self.cmf_data.items(), desc=f'Extracting shards for "{next(consts_itr).name}"',
                 **sys_config.TQDM_CONFIG
         ):
@@ -59,15 +59,15 @@ class ShardExtractorMod(ExtractionModScheme):
                     os.path.join(extraction_config.PATH_TO_SEARCHABLES, const.name),
                     exists_ok=True, clean_exists=True, fmt=Formats.PICKLE
             ) as export_stream:
-                for i, cmf_shift in enumerate(SmartTQDM(
-                        cmf_list, desc=f'Computing shards',
+                for i, cmd_data in enumerate(SmartTQDM(
+                        cmf_data_list, desc=f'Computing shards',
                         **sys_config.TQDM_CONFIG)):
                     extractor = ShardExtractor(
-                        const, cmf_shift
+                        const, cmd_data
                     )
                     shards = extractor.extract(call_number=i + 1)
                     all_shards[const] += shards
-                    export_stream(shards)
+                    export_stream(shards, cmd_data.cmf_name)
         return all_shards
 
 
@@ -76,7 +76,7 @@ class ShardExtractor(ExtractionScheme):
     Shard extractor is a representation of a shard finding method.
     """
 
-    def __init__(self, const: Constant, cmf_data: ShiftCMF):
+    def __init__(self, const: Constant, cmf_data: CMFData):
         """
         Extracts the shards of a CMF
         :param const: Constant searched in this CMF
@@ -137,10 +137,7 @@ class ShardExtractor(ExtractionScheme):
         hps = self._extract_cmf_hps()
 
         if not hps:
-            return [
-                Shard(self.cmf_data.cmf, self.const, [], [], self.cmf_data.shift,
-                      use_inv_t=self.cmf_data.use_inv_t)
-            ]
+            return [Shard.from_cmf_data(self.cmf_data, self.const, [], [])]
 
         symbols = list(hps)[0].symbols
         shard_encodings = dict()
@@ -154,7 +151,8 @@ class ShardExtractor(ExtractionScheme):
             A = np.array([hp.vectors[0] for hp in shifted_hps], dtype=np.int64)
             b = np.array([hp.vectors[1] for hp in shifted_hps], dtype=np.int64)
             S = config.extraction.INIT_POINT_MAX_COORD * 2 + 1
-            prefix_dims = max(min(int(round(math.log(os.cpu_count(), S))), os.cpu_count() - 1), 1)
+            cpus = cpus if (cpus := os.cpu_count()) else 1
+            prefix_dims = max(min(int(round(math.log(cpus, S))), cpus - 1), 1)
 
             symmetries_func = None
             if issubclass(self.cmf_data.cmf.__class__, rt_pFq) and config.extraction.IGNORE_DUPLICATE_SEARCHABLES:
@@ -203,8 +201,5 @@ class ShardExtractor(ExtractionScheme):
         # create shard objects
         shards = []
         for enc in SmartTQDM(shard_encodings.keys(), desc='Creating shard objects', **sys_config.TQDM_CONFIG):
-            shards.append(Shard(
-                self.cmf_data.cmf, self.const, list(hps), enc, self.cmf_data.shift, shard_encodings[enc],
-                self.cmf_data.use_inv_t
-            ))
+            shards.append(Shard.from_cmf_data(self.cmf_data, self.const, list(hps), enc, shard_encodings[enc]))
         return shards

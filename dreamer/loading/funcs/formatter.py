@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from dreamer.loading.config import DATA_ANNOTATE, TYPE_ANNOTATE
 from dreamer.utils.constants.constant import Constant
-from dreamer.utils.types import ShiftCMF
+from dreamer.utils.types import CMFData
 from dreamer.configs import config
 import json
 from typing import Dict, Any, Type, Optional, List, Tuple, Union
@@ -15,10 +15,11 @@ class Formatter(ABC):
     """
     registry: Dict[str, Type['Formatter']] = dict()
 
-    def __init__(self, const: str | Constant, shifts: Optional[list] = None,
+    def __init__(self, const: str | Constant, shifts: list,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
-                 use_inv_t: bool = None):
+                 use_inv_t: bool = None,
+                 cmf_name: Optional[str] = None):
         if use_inv_t is None:
             use_inv_t = config.search.DEFAULT_USES_INV_T
 
@@ -27,6 +28,13 @@ class Formatter(ABC):
         self.selected_start_points = selected_start_points
         self.only_selected = only_selected
         self.use_inv_t = use_inv_t
+
+
+        self.cmf_name = cmf_name if cmf_name else self.__class__.__name__
+        self.cmf_name += '_'
+        for s in shifts:
+            self.cmf_name += f'_{s}'
+
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -43,12 +51,15 @@ class Formatter(ABC):
     @abstractmethod
     def __hash__(self):
         return hash((
-            self.const, tuple(self.shifts), frozenset(self.selected_start_points),
-            self.only_selected, self.use_inv_t
+            self.const,
+            tuple(self.shifts if self.shifts else []),
+            frozenset(self.selected_start_points if self.selected_start_points else []),
+            self.only_selected,
+            self.use_inv_t
         ))
 
     @abstractmethod
-    def to_cmf(self) -> ShiftCMF:
+    def to_cmf(self) -> CMFData:
         """
         Converts the Formatter to a CMF.
         :return: The CMF with shift as ShiftCMF object

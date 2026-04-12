@@ -14,7 +14,7 @@ from dreamer.loading.funcs.formatter import Formatter
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.schemes.extraction_scheme import ExtractionModScheme
 from dreamer.utils.storage import Exporter, Importer, Formats
-from dreamer.utils.types import ShiftCMF
+from dreamer.utils.types import CMFData
 from dreamer.utils.logger import Logger
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs import config
@@ -60,7 +60,7 @@ class System:
         """
         Logger.start_run()
 
-        constants = self.__validate_constants(constants)
+        constants: List[Constant] = self.__validate_constants(constants)
 
         # ======================================================
         # LOAD STAGE - loading constants (and optional storage)
@@ -74,15 +74,10 @@ class System:
                 safe_key = "".join(c for c in const.name if c.isalnum() or c in ('-', '_'))
                 const_path = os.path.join(path, safe_key)
 
-                for scmf in l:
-                    if scmf.cmf.__class__ == CMF:
-                        filename = f'generated_cmf_hashed_{hash(scmf.cmf)}'
-                    else:
-                        filename = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in repr(scmf.cmf))
-                        filename = filename.strip('_')
+                for data in l:
                     Exporter.export(
-                        root=const_path, f_name=filename, exists_ok=True, clean_exists=True,
-                        data=[ShiftCMF(scmf.cmf, scmf.shift, scmf.selected_points, scmf.only_selected, scmf.use_inv_t)],
+                        root=const_path, f_name=data.cmf_name, exists_ok=True, clean_exists=True,
+                        data=[data],
                         fmt=Formats.PICKLE
                     )
                 Logger(
@@ -111,7 +106,7 @@ class System:
         shard_dict = dict()
         if self.extractor:
             shard_dict = self.extractor(cmf_data).execute()
-        else:
+        elif extraction_config.PATH_TO_SEARCHABLES:
             # Load saved shards from the default directory if data not provided
             for const_name in os.listdir(extraction_config.PATH_TO_SEARCHABLES):
                 import_stream = Importer.import_stream(f'{extraction_config.PATH_TO_SEARCHABLES}\\{const_name}')
@@ -164,7 +159,7 @@ class System:
             filtered_priorities = priorities
         self.__search_stage(filtered_priorities)
 
-    def __loading_stage(self, constants: List[Constant]) -> Dict[Constant, List[ShiftCMF]]:
+    def __loading_stage(self, constants: List[Constant]) -> Dict[Constant, List[CMFData]]:
         """
         Preforms the loading of the inspiration functions from various sources
         :param constants: A list of all constants relevant to this run

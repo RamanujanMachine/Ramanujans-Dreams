@@ -58,9 +58,4 @@ class SearcherModV1(SearcherModScheme):
                     trajectory_generator=search_config.NUM_TRAJECTORIES_FROM_DIM
                 )
 
-                shard: Searchable
-                if shard.cmf.__class__ == CMF:
-                    filename = f'generated_cmf_hashed_{hash(shard.cmf)}'
-                else:
-                    filename = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in repr(shard.cmf)).strip('_')
-                write_chunk(res, filename)
+                write_chunk(res, shard.cmf_name)

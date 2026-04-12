@@ -2,7 +2,7 @@ import json
 from ramanujantools.cmf import pFq as rt_pFq
 from dreamer.utils.constants.constant import Constant
 from dreamer.loading.funcs.formatter import Formatter
-from dreamer.utils.types import ShiftCMF
+from dreamer.utils.types import CMFData
 from typing import Optional, List, Tuple, Union
 import sympy as sp
 from ramanujantools import Position
@@ -33,7 +33,8 @@ class pFq(Formatter):
         if self.shifts is None:
             self.shifts = [0] * (self.p + self.q)
 
-        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t)
+        cmf_name = self.__class__.__name__ + f"_{self.p}_{self.q}_{self.z}"
+        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t, cmf_name)
 
         if self.p <= 0 or self.q <= 0:
             raise ValueError("p and q should be positive integers")
@@ -66,14 +67,14 @@ class pFq(Formatter):
             "z": str(self.z) if isinstance(self.z, sp.Expr) else self.z
         }
 
-    def to_cmf(self) -> ShiftCMF:
+    def to_cmf(self) -> CMFData:
         """
         Converts the pFq to a CMF.
         :return: A tuple (CMF, shifts)
         """
         cmf = rt_pFq(self.p, self.q, self.z)
         self.shifts = Position({k: v for k, v in zip(cmf.matrices.keys(), self.shifts)})
-        return ShiftCMF(cmf, self.shifts, self.selected_start_points, self.only_selected, self.use_inv_t)
+        return CMFData(cmf, self.shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
 
     def __repr__(self):
         return json.dumps(self._to_json_obj())
