@@ -21,7 +21,7 @@ authors = [
 dependencies = [
     "peewee",
     "sympy",
-    "ramanujantools",
+    "ramanujantools @ git+https://github.com/RamanujanMachine/ramanujantools.git",
     "matplotlib",
     "numpy",
     "mpmath",
