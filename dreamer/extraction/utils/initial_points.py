@@ -18,6 +18,14 @@ FILTER_FUNC_DTYPE = Callable[[MAPPING_DICT], MAPPING_DICT]
 # ------------------------------------------------------------
 
 def __same_shift_indices(shift, p, q):
+    """
+    Build index groups of equal fractional shifts for numerator and denominator blocks.
+    :param shift: Shift vector used for pFq symmetry grouping.
+    :param p: Number of numerator parameters.
+    :param q: Number of denominator parameters.
+    :raises ValueError: If ``p + q`` does not match ``len(shift)``.
+    :return: A pair ``(p_groups, q_groups)`` of index arrays grouped by equal shift fraction.
+    """
     if p + q != len(shift):
         raise ValueError(f'p + q must be the dimension of the space: {len(shift)} != {p} + {q}')
     reduced = np.array([v - int(v) for v in shift])
@@ -38,8 +46,13 @@ def __same_shift_indices(shift, p, q):
 
 def filter_symmetrical_cones(mapping, p, q, shift):
     """
-    Filters a dictionary of {encoding: point} to remove symmetrical cones
-    using fast NumPy vectorization.
+    Remove pFq-symmetric duplicates from a shard-to-point mapping.
+    :param mapping: Dictionary mapping shard signatures to representative points.
+    :param p: Number of numerator dimensions.
+    :param q: Number of denominator dimensions.
+    :param shift: Shift vector of length ``p + q`` used to define symmetry classes.
+    :raises ValueError: If ``p + q`` does not match ``len(shift)``.
+    :return: Filtered mapping with one representative per symmetric cone.
     """
     if not mapping:
         return {}
@@ -65,18 +78,32 @@ def filter_symmetrical_cones(mapping, p, q, shift):
         canonical_points[:, p + group_indices] = sorted_subgroup
 
     _, unique_indices = np.unique(canonical_points, axis=0, return_index=True)
-    return {encodings[i]: points[i] for i in unique_indices}
+    return {encodings[int(i)]: points[int(i)] for i in unique_indices}
 
 
 # ------------------------------------------------------------
 #   Compute shard encoding and initial point pairs
 # ------------------------------------------------------------
-# TODO: add prange??
+def __is_candidate_closer(candidate: np.ndarray, current: np.ndarray) -> bool:
+    """
+    Compare two points and decide whether ``candidate`` is preferred.
+    :param candidate: Candidate point for a shard representative.
+    :param current: Current selected representative point.
+    :return: ``True`` when ``candidate`` has smaller squared norm, or ties and is lexicographically smaller.
+    """
+    candidate_norm = int(np.dot(candidate, candidate))
+    current_norm = int(np.dot(current, current))
+
+    if candidate_norm != current_norm:
+        return candidate_norm < current_norm
+    return tuple(candidate.tolist()) < tuple(current.tolist())
+
+
 def __generate_numba_worker(M):
     """
     Creates the appropriate numba worker for initial point generation
     :param M: Length of the shard signature
-    :return: Unique mapping between signature and initial point
+    :return: Compiled worker that maps each signature to the closest sampled point.
     """
     num_chunks = (M + 63) // 64  # each chunk may use up to 64 bits for signature
     chunk_size = 512  # make sure size fits in L1 cache for fast computing
@@ -98,6 +125,10 @@ def dynamic_compute_block(fixed_prefix, D, S, A, b):
     unique_mapping = Dict.empty(
         key_type=tuple_type,
         value_type=int_array_type  # Ensure we save int arrays
+    )
+    unique_norms = Dict.empty(
+        key_type=tuple_type,
+        value_type=norm_type
     )
 
     BLOCK_SIZE = {chunk_size}
@@ -142,17 +173,40 @@ def dynamic_compute_block(fixed_prefix, D, S, A, b):
             if is_on_hyperplane:
                 continue
 
+            point_norm = np.int64(0)
+            for d in range(D):
+                point_norm += block[i, d] * block[i, d]
+
             sig_tuple = {tuple_str}
             if sig_tuple not in unique_mapping:
-                # Add chunk signature if not initialized
+                # First point for this shard signature.
                 unique_mapping[sig_tuple] = block[i, :].copy()
+                unique_norms[sig_tuple] = point_norm
+            else:
+                current_norm = unique_norms[sig_tuple]
+                should_replace = point_norm < current_norm
+
+                if (not should_replace) and (point_norm == current_norm):
+                    # Deterministic tie-break: keep lexicographically smallest point.
+                    current_point = unique_mapping[sig_tuple]
+                    for d in range(D):
+                        if block[i, d] < current_point[d]:
+                            should_replace = True
+                            break
+                        if block[i, d] > current_point[d]:
+                            break
+
+                if should_replace:
+                    unique_mapping[sig_tuple] = block[i, :].copy()
+                    unique_norms[sig_tuple] = point_norm
     return unique_mapping
     """
     local_env = {
         'np': np,
         'Dict': Dict,
         'tuple_type': types.UniTuple(types.int64, num_chunks),
-        'int_array_type': types.int64[:]  # Use strictly int64 for the saved points
+        'int_array_type': types.int64[:],  # Use strictly int64 for the saved points
+        'norm_type': types.int64,
     }
     exec(code, local_env)
     return njit(local_env['dynamic_compute_block'])
@@ -160,11 +214,15 @@ def dynamic_compute_block(fixed_prefix, D, S, A, b):
 
 def decode_signatures(unique_tuples, M):
     """
-    Decode numerical signatures into +1/-1
-    :param unique_tuples: A list of (encoding, point)
+    Decode packed shard signatures into a ``{+1, -1}`` sign matrix.
+    :param unique_tuples: Iterable of encoded signature tuples.
     :param M: Number of hyperplanes
+    :raises ValueError: If ``M`` is negative.
     :return: The decoded signatures
     """
+    if M < 0:
+        raise ValueError(f'M must be non-negative, got {M}')
+
     N = len(unique_tuples)
     if N == 0:
         return np.empty((0, M), dtype=np.int8)
@@ -188,14 +246,14 @@ def decode_signatures(unique_tuples, M):
 def __worker_wrapper(fixed_prefix: np.ndarray, D: int, S: int, A: np.ndarray, b: np.ndarray,
                      filter_func: Optional[FILTER_FUNC_DTYPE] = None) -> MAPPING_DICT:
     """
-    Compiles and runs the relevant numba generator
+    Compile/cache and execute the numba worker for a single fixed prefix.
     :param fixed_prefix: Dimension reduction prefix
     :param D: Hypercube total dimensions
     :param S: Hypercube side length
     :param A: Linear equations expression matrix
     :param b: Linear equations free variables vector
     :param filter_func: Elimination function for filtering shards
-    :return: A mapping from shard signature to an initial point
+    :return: A mapping from shard signature to the closest sampled point in this prefix slice.
     """
     M = A.shape[0]
     if M not in _worker_cache:
@@ -213,15 +271,29 @@ def __worker_wrapper(fixed_prefix: np.ndarray, D: int, S: int, A: np.ndarray, b:
 def compute_mapping(D: int, S: int, A: np.ndarray, b: np.ndarray, prefix_dims: int = 2,
                     filter_func: Optional[FILTER_FUNC_DTYPE] = None) -> MAPPING_DICT:
     """
-    Computes a mapping from shard signature to an initial point.
+    Compute a shard-signature mapping using nearest-to-origin representative points.
     :param D: Dimension of the hypercube
     :param S: Side length of the hypercube
     :param A: Linear equations expression matrix
     :param b: Linear equations free variables vector
     :param prefix_dims: Manually compute prefix_dims out of the D of the points
     :param filter_func: Elimination function for filtering shards
-    :return: A mapping from shard signature to an initial point
+    :raises ValueError: If dimensions are invalid or matrix/vector shapes are inconsistent.
+    :return: A mapping from shard signature to its closest sampled point.
     """
+    if D <= 0:
+        raise ValueError(f'D must be positive, got {D}')
+    if S <= 0:
+        raise ValueError(f'S must be positive, got {S}')
+    if A.ndim != 2:
+        raise ValueError(f'A must be a 2D array, got ndim={A.ndim}')
+    if A.shape[1] != D:
+        raise ValueError(f'A second dimension must equal D: {A.shape[1]} != {D}')
+    if b.ndim != 1:
+        raise ValueError(f'b must be a 1D array, got ndim={b.ndim}')
+    if A.shape[0] != b.shape[0]:
+        raise ValueError(f'A row count must match len(b): {A.shape[0]} != {b.shape[0]}')
+
     prefix_dims = min(prefix_dims, D)
     coords = range(S)
     prefixes = list(itertools.product(coords, repeat=prefix_dims))
@@ -243,7 +315,7 @@ def compute_mapping(D: int, S: int, A: np.ndarray, b: np.ndarray, prefix_dims: i
         # Merge dictionaries from all workers
         for local_mapping in results:
             for sig, point in local_mapping.items():
-                if sig not in global_mapping:
+                if sig not in global_mapping or __is_candidate_closer(point, global_mapping[sig]):
                     global_mapping[sig] = point
 
     if filter_func:

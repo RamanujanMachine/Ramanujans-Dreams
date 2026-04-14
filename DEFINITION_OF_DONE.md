@@ -46,7 +46,7 @@ A code development task produces new or modified Python code: a function, a modu
   - Tests cover: normal operation, edge cases, and at least one known-answer verification.
   - Tests are runnable via `pytest`.
   - All test functions and classes are well-documented, including assumptions and failure mode rationale per test.
-  - After running tests, update `tests/TEST_AUDIT_REPORT.md` with two explicit sections:
+  - After running tests, update `tests/TEST_AUDIT_REPORT.md` with three explicit sections:
     1. **Touched Modules (Detailed Review):** coverage status, challenge rubric scores, and regression evidence for modules changed in this task.
     2. **Non-Touched Modules (Repository-Wide Summary):** concise status/risk scan for modules not changed in this task, with follow-up actions if applicable.
 - [ ] **Coverage evidence** attached:
