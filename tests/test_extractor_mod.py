@@ -36,7 +36,7 @@ def test_extractor_mod_execute_aggregates_shards_and_exports(monkeypatch, tmp_pa
         return [f"shard-{call_number}"]
 
     monkeypatch.setattr("dreamer.extraction.extractor.SmartTQDM", _identity_tqdm)
-    monkeypatch.setattr("dreamer.extraction.extractor.extraction_config.PATH_TO_SEARCHABLES", str(tmp_path))
+    monkeypatch.setattr("dreamer.extraction.extractor.sys_config.PATH_TO_SEARCHABLES", str(tmp_path))
     monkeypatch.setattr("dreamer.extraction.extractor.Exporter.export_stream", _fake_export_stream)
     monkeypatch.setattr("dreamer.extraction.extractor.ShardExtractor.extract", _fake_extract)
 

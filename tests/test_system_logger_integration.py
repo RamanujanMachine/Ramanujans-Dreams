@@ -19,7 +19,7 @@ def test_system_run_calls_logger_start_run_once_per_run(monkeypatch, tmp_path):
     logging_config.GENERATE_LOGS = False
     searchables_dir = tmp_path / "searchables"
     searchables_dir.mkdir()
-    monkeypatch.setattr(system_mod.extraction_config, "PATH_TO_SEARCHABLES", str(searchables_dir))
+    monkeypatch.setattr(system_mod.sys_config, "PATH_TO_SEARCHABLES", str(searchables_dir))
 
     system = System(
         function_sources=[],

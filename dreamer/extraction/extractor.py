@@ -56,7 +56,7 @@ class ShardExtractorMod(ExtractionModScheme):
                 **sys_config.TQDM_CONFIG
         ):
             with Exporter.export_stream(
-                    os.path.join(extraction_config.PATH_TO_SEARCHABLES, const.name),
+                    os.path.join(sys_config.PATH_TO_SEARCHABLES, const.name),
                     exists_ok=True, clean_exists=True, fmt=Formats.PICKLE
             ) as export_stream:
                 for i, cmd_data in enumerate(SmartTQDM(

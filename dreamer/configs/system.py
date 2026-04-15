@@ -25,7 +25,8 @@ class SystemConfig(Configurable):
     DEFAULT_DIR_SUFFIX: str = 'tempdir'
     EXPORT_CMFS: Optional[str] = None
     EXPORT_ANALYSIS_PRIORITIES: Optional[str] = None
-    EXPORT_SEARCH_RESULTS: Optional[str] = f'search_results.{DEFAULT_DIR_SUFFIX}'
+    EXPORT_SEARCH_RESULTS: str = f'search_results.{DEFAULT_DIR_SUFFIX}'
+    PATH_TO_SEARCHABLES: str = f'searchables.{DEFAULT_DIR_SUFFIX}'
 
 
 sys_config: SystemConfig = SystemConfig()

@@ -6,6 +6,7 @@ import sympy as sp
 import networkx as nx
 from itertools import combinations
 import os
+import sys
 
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.schemes.analysis_scheme import AnalyzerModScheme
@@ -107,10 +108,12 @@ class System:
         shard_dict = dict()
         if self.extractor:
             shard_dict = self.extractor(cmf_data).execute()
-        elif extraction_config.PATH_TO_SEARCHABLES:
+        elif sys_config.PATH_TO_SEARCHABLES:
             # Load saved shards from the default directory if data not provided
-            for const_name in os.listdir(extraction_config.PATH_TO_SEARCHABLES):
-                import_stream = Importer.import_stream(f'{extraction_config.PATH_TO_SEARCHABLES}\\{const_name}')
+            for const_name in os.listdir(sys_config.PATH_TO_SEARCHABLES):
+                import_stream = Importer.import_stream(
+                    os.path.join(sys_config.PATH_TO_SEARCHABLES, const_name)
+                )
                 const_shards = []
                 for shards in import_stream:
                     const_shards += shards
@@ -231,8 +234,8 @@ class System:
         # Load saved shards from the default directory if data not provided
         # if not cmf_data:
         #     cmf_data = {}
-        #     for const_name in os.listdir(extraction_config.PATH_TO_SEARCHABLES):
-        #         import_stream = Importer.import_stream(f'{extraction_config.PATH_TO_SEARCHABLES}\\{const_name}')
+        #     for const_name in os.listdir(sys_config.PATH_TO_SEARCHABLES):
+        #         import_stream = Importer.import_stream(f'{sys_config.PATH_TO_SEARCHABLES}\\{const_name}')
         #         const_shards = []
         #         for shards in import_stream:
         #             const_shards += shards
