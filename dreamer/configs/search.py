@@ -50,8 +50,9 @@ class SearchConfig(Configurable):
     GA_MAX_RETRIES: int = 3         # Retry rounds for invalid/failed trajectory evaluations.
     GA_REFINE_PROB: float = 0.5     # Probability of entering refine mutation mode.
     GA_REFINE_COORD_PROB: float = 0.5   # Per-coordinate refine perturbation probability.
+    GA_MAX_NO_IMPROVEMENT_COUNT_RETRY: int = 5  # Max retries when no improvement is observed before giving up.
 
-    MAX_TRAJECTORY_COORD: int = 50
+    MAX_TRAJECTORY_COORD: int = 50  # Max coordinate value for a trajectory.
 
 
 search_config: SearchConfig = SearchConfig()

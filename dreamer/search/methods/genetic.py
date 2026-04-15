@@ -296,7 +296,8 @@ class GeneticSearchMethod(SearchMethod):
                 count=self._buffer_chunk_size,
                 template_pos=template_pos
             )
-            random.shuffle(self._valid_trajectory_buffer)
+            if self._valid_trajectory_buffer:
+                random.shuffle(self._valid_trajectory_buffer)
         return self._valid_trajectory_buffer.pop()
 
     def _repair_trajectory(self, trajectory: Position, template_pos: Position) -> Position:
@@ -409,11 +410,28 @@ class GeneticSearchMethod(SearchMethod):
                 population[i]["sd"] = sd
 
         unresolved = invalid_indices
+        unchanged_count = 0
+        last_found_amount = -1
+
         for _ in range(self.max_retries):
             if not unresolved:
                 break
 
+            if unchanged_count >= search_config.GA_MAX_NO_IMPROVEMENT_COUNT_RETRY:
+                Logger(
+                    "Genetic algorithm solving unresolved trajectories - giving up resampling.", Logger.Levels.debug
+                ).log()
+                break
+
             retry_trajectories = self._sample_valid_trajectories(count=len(unresolved), template_pos=template_pos)
+            if len(retry_trajectories) == 0:
+                Logger("No valid trajectories could be sampled")
+
+            if last_found_amount == -1:
+                last_found_amount = len(retry_trajectories)
+            elif last_found_amount == len(retry_trajectories):
+                unchanged_count += 1
+
             retry_pairs = [(traj, start) for traj in retry_trajectories]
             self._compute_missing_search_data(retry_pairs)
 
@@ -434,7 +452,6 @@ class GeneticSearchMethod(SearchMethod):
                     next_unresolved.append(i)
 
             unresolved = next_unresolved
-
         return population
 
     def search(
@@ -453,6 +470,10 @@ class GeneticSearchMethod(SearchMethod):
         template = self._resolve_template(template_trajectory)
 
         initial_trajectories = self._sample_valid_trajectories(count=self.pop_size, template_pos=template)
+        if len(initial_trajectories) == 0:
+            Logger("No valid trajectories could be sampled. Continue...", Logger.Levels.warning).log()
+            return DataManager(self.use_LIReC)
+
         population: List[Dict[str, Any]] = [
             {"trajectory": traj, "delta": None, "sd": None} for traj in initial_trajectories
         ]
