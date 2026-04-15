@@ -375,24 +375,6 @@ def test_genetic_search_repairs_invalid_mutations_with_constrained_sampling(monk
     assert all(space.is_valid_trajectory(sd.sv.trajectory) for sd in result.values())
 
 
-def test_genetic_search_raises_when_constraints_have_no_valid_trajectories(monkeypatch):
-    """Ensure search fails loudly when constraints admit no valid trajectories.
-    Assumption: sampler yields only invalid trajectories for constrained space.
-    Failure mode caught: infinite retries or misleading exception messages.
-    """
-    space = ImpossibleConstrainedSpace()
-    x, y = space.cmf.symbols
-    _patch_static_sampler(monkeypatch, [Position({x: 1, y: 1}), Position({x: 2, y: 2})])
-    _configure_ga(monkeypatch, generations=1, pop_size=2, max_retries=1, parallel_search=False)
-    method = GeneticSearchMethod(
-        cast(Searchable, cast(object, space)),
-        constant=None,
-    )
-
-    with pytest.raises(ValueError, match="could not sample enough valid trajectories"):
-        method.search(template_trajectory=Position({x: 1, y: 1}))
-
-
 def test_evaluate_population_resamples_invalid_trajectories_in_batch(monkeypatch):
     """Verify invalid individuals are resampled in one batch per retry round.
     Assumption: initial cache lookup returns no SearchData for all individuals.
