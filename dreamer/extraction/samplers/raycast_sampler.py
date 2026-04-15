@@ -3,8 +3,11 @@ import scipy.special as spc
 from dreamer.extraction.samplers.conditioner import HyperSpaceConditioner
 from dreamer.extraction.samplers.raycaster import RayCastingSamplingMethod
 from dreamer.utils.logger import Logger
+from dreamer.configs.search import search_config
 from .sampler import Sampler
 from typing import Callable, cast
+import math
+
 
 
 class RaycastPipelineSampler(Sampler):
@@ -197,7 +200,7 @@ class RaycastPipelineSampler(Sampler):
             final_rays = best_rays
             return final_rays
 
-        max_radius = 100
+        max_radius = math.sqrt(pow(search_config.MAX_TRAJECTORY_COORD, 2) * d_flat) + 1
         raw_rays = np.array([])
 
         raddai = []
@@ -212,9 +215,6 @@ class RaycastPipelineSampler(Sampler):
                 ).log()
                 break
 
-            # Logger(f"Sweeping lattice up to R_max = {current_R_max:.2f}...", Logger.Levels.debug).log()
-
-            # Enforce max_per_ray=1 for the "Fair Slice"
             raw_rays = sampler.harvest(
                 target_rays=guide_rays_to_shoot,
                 R_max=current_R_max,
