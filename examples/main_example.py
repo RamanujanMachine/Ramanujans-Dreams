@@ -46,5 +46,5 @@ if __name__ == '__main__':
         if_srcs=[pFq(log(2), 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
-        searcher=search.GeneticSearchMod
+        searcher=search.SearcherModV1
     ).run(constants=[log(2)])
