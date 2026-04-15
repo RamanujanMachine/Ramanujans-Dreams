@@ -17,10 +17,10 @@ from dreamer.utils.storage import Exporter, Importer, Formats
 from dreamer.utils.types import CMFData
 from dreamer.utils.logger import Logger
 from dreamer.utils.constants.constant import Constant
-from dreamer.configs import config
+from dreamer.configs.system import sys_config
+from dreamer.configs.extraction import extraction_config
 
-sys_config = config.system
-extraction_config = config.extraction
+
 constant_type = Union[Constant, str]
 
 
