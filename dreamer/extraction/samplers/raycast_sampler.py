@@ -205,11 +205,11 @@ class RaycastPipelineSampler(Sampler):
 
         while len(final_rays) < target_rays:
             if current_R_max >= max_radius:
+                final_rays = finalize_rays(raw_rays, len(raw_rays))
                 Logger(
                     f"[Pipeline] Could not achieve quota, found {len(final_rays)}/{target_rays}",
                     Logger.Levels.debug
                 ).log()
-                final_rays = finalize_rays(raw_rays, target_rays)
                 break
 
             # Logger(f"Sweeping lattice up to R_max = {current_R_max:.2f}...", Logger.Levels.debug).log()

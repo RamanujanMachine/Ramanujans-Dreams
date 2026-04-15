@@ -347,15 +347,12 @@ class RayCastingSamplingMethod:
         if self.d_flat == 0:
             return np.array([])
 
-        Logger(f"\tRaycaster: Generating {target_rays} Continuous Guide Rays...", Logger.Levels.debug).log()
         guide_rays = self._generate_continuous_guide_rays(target_rays)
         if guide_rays is None:
             Logger("XXX Closed Cone.", Logger.Levels.debug).log()
             return np.array([])
 
-        Logger("\tRaycaster: Sweeping lattice along Guide Rays...", Logger.Levels.debug).log()
         start_t = time.time()
-
         raw_buffer, counts = _raycast(
             self.d_orig, self.d_flat, self.Z, self.B, guide_rays, R_max, max_per_ray=max_per_ray
         )
@@ -368,9 +365,4 @@ class RayCastingSamplingMethod:
 
         merged = np.vstack(valid_blocks)
         unique_rays = np.unique(merged, axis=0)
-
-        Logger(
-            f"\tRaycaster Yielded {len(unique_rays)} unique, shortest trajectories in {time.time()-start_t:.3f}s",
-            Logger.Levels.debug
-        ).log()
         return unique_rays
