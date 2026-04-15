@@ -189,7 +189,10 @@ class RaycastPipelineSampler(Sampler):
                 Logger.Levels.debug
             ).log()
 
-        while len(final_rays) < target_rays:
+        max_multipliers = 100
+        multiplied = 0
+
+        while len(final_rays) < target_rays and multiplied >= max_multipliers:
             Logger(f"Sweeping lattice up to R_max = {current_R_max:.2f}...", Logger.Levels.debug).log()
 
             # Enforce max_per_ray=1 for the "Fair Slice"
@@ -229,6 +232,7 @@ class RaycastPipelineSampler(Sampler):
                     Logger.Levels.debug
                 ).log()
                 current_R_max *= multiplier
+                multiplied += 1
 
         self._verify_uniformity(final_rays, fraction, d_flat)
         return final_rays
