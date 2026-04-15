@@ -43,8 +43,8 @@ if __name__ == '__main__':
     )
 
     System(
-        if_srcs=[pFq(log(2), 2, 1, -1)],
+        function_sources=[pFq(log(2), 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
-        searcher=search.SearcherModV1
+        searcher=search.GeneticSearchMod
     ).run(constants=[log(2)])

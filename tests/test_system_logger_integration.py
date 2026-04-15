@@ -22,7 +22,7 @@ def test_system_run_calls_logger_start_run_once_per_run(monkeypatch, tmp_path):
     monkeypatch.setattr(system_mod.extraction_config, "PATH_TO_SEARCHABLES", str(searchables_dir))
 
     system = System(
-        if_srcs=[],
+        function_sources=[],
         extractor=None,
         analyzers=[],
         searcher=cast(type[SearcherModScheme], _DummySearcher),

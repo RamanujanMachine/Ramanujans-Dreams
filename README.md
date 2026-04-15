@@ -60,6 +60,7 @@ There are a few important configurations you might want to change:
 
 ### Run
 A classic run would look something like this:
+
 ```python
 from dreamer import System, config, log
 from dreamer import analysis, search, extraction, loading
@@ -68,10 +69,10 @@ from dreamer import analysis, search, extraction, loading
 config.configure(...)
 
 my_system = System(
-    if_srcs=[loading.pFq(log(2), 2, 1, -1)],            # Set up the loading stage - provide inspiration functions
-    extractor=extraction.extractor.ShardExtractorMod,   # Choose an extraction module
-    analyzers=[analysis.AnalyzerModV1],                 # Choose an analysis module(s)
-    searcher=search.SearcherModV1                       # Choose the search module
+    function_sources=[loading.pFq(log(2), 2, 1, -1)],  # Set up the loading stage - provide inspiration functions
+    extractor=extraction.extractor.ShardExtractorMod,  # Choose an extraction module
+    analyzers=[analysis.AnalyzerModV1],  # Choose an analysis module(s)
+    searcher=search.SearcherModV1  # Choose the search module
 )
 
 my_system.run(constants=[log(2)])

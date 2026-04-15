@@ -30,27 +30,28 @@ class System:
     """
 
     def __init__(self,
-                 if_srcs: List[DBModScheme | str | Formatter],
-                 extractor: Optional[Type[ExtractionModScheme]],
+                 *,
+                 function_sources: List[DBModScheme | str | Formatter],
+                 extractor: Optional[Type[ExtractionModScheme]] = None,
                  analyzers: List[Type[AnalyzerModScheme] | partial[AnalyzerModScheme] | str | Searchable],
                  searcher: Type[SearcherModScheme] | partial[SearcherModScheme]):
         """
         Constructing a system runnable instance for a given combination of modules.
-        :param if_srcs: A list of DBModScheme instances used as sources.
+        :param function_sources: A list of DBModScheme instances used as sources.
         :param extractor: An optional ExtractionModScheme type used to extract shards from the CMFs.
         If extractor not provided, analysis will try to read from the default searchables directory.
         :param analyzers: A list of AnalyzerModScheme types used for prioritization + preparation before the search
         :param searcher: A SearcherModScheme type used to deepen the search done by the analyzers
         """
-        if not isinstance(if_srcs, list):
+        if not isinstance(function_sources, list):
             raise ValueError('Inspiration Functions must be contained in a list')
 
-        self.if_srcs = if_srcs
+        self.func_srcs = function_sources
         self.extractor = extractor
         self.analyzers = analyzers
         self.searcher = searcher
 
-        if not self.if_srcs and self.extractor:
+        if not self.func_srcs and self.extractor:
             raise ValueError('Could not preform extraction if no sourced to extract from where provided')
 
     def run(self, constants: Optional[List[str | Constant] | str | Constant] = None):
@@ -165,14 +166,14 @@ class System:
         :param constants: A list of all constants relevant to this run
         :return: A mapping from a constant to the list of its CMFs (matching the inspiration functions)
         """
-        if not self.if_srcs:
+        if not self.func_srcs:
             return dict()
 
         Logger('Loading CMFs ...', Logger.Levels.info).log()
         modules = []
         cmf_data = defaultdict(set)
 
-        for db in self.if_srcs:
+        for db in self.func_srcs:
             if isinstance(db, DBModScheme):
                 modules.append(db)
             elif isinstance(db, str):
