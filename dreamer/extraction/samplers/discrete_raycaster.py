@@ -490,13 +490,18 @@ class DiscreteMCMCSampler(Sampler):
         else:
             quota = int(compute_n_samples)
         if quota <= 0 or self.d_flat == 0:
+            Logger(
+                f"DiscreteMCMCSampler: nothing to sample (quota={quota}, d_flat={self.d_flat}); "
+                f"returning no trajectories.",
+                Logger.Levels.debug,
+            ).log()
             return np.empty((0, self.d_orig), dtype=np.int64)
 
         # Seed search: a too-narrow cone raises NarrowConeError -> log + give up cleanly.
         try:
             z0 = self._compute_chebyshev_center()
         except NarrowConeError as err:
-            Logger(str(err), Logger.Levels.warning).log()
+            Logger(str(err), Logger.Levels.debug).log()
             return np.empty((0, self.d_orig), dtype=np.int64)
 
         v0 = self.Z @ z0
@@ -529,6 +534,6 @@ class DiscreteMCMCSampler(Sampler):
             try:
                 raise NoUsefulPointsError(self.max_useful_norm, max_steps, seed_norm)
             except NoUsefulPointsError as err:
-                Logger(str(err), Logger.Levels.warning).log()
+                Logger(str(err), Logger.Levels.debug).log()
             return np.empty((0, self.d_orig), dtype=np.int64)
         return np.unique(harvest[:count], axis=0)

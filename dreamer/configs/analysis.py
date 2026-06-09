@@ -22,6 +22,18 @@ class AnalysisConfig(Configurable):
         default=traj_from_dim,
         metadata={"description": "Callable that maps searchable dimension to number of sampled trajectories."},
     )
+    SAMPLING_METHOD: str = field(
+        default="raycast",
+        metadata={
+            "description": (
+                "Trajectory-sampling engine used during the analysis stage: "
+                "'raycast' (default), 'discrete' (DiscreteMCMCSampler), or 'pt' "
+                "(ParallelTemperingSampler).  Mirrors search.SAMPLING_METHOD but is "
+                "independent, so analysis and search can use different samplers.  See "
+                "that knob for the engine descriptions."
+            )
+        },
+    )
     IDENTIFY_THRESHOLD: float = field(
         default=-1,
         metadata={"description": "Minimum identified-trajectory ratio required to keep a shard; -1 disables filtering."},

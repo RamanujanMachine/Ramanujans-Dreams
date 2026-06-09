@@ -202,6 +202,7 @@ class AnalyzerModV1(AnalyzerModScheme):
         try:
             pairs = searcher.sample_pairs(
                 trajectory_generator=analysis_config.NUM_TRAJECTORIES_FROM_DIM,
+                sampling_method=analysis_config.SAMPLING_METHOD,
             )
         except ValueError as e:
             Logger(

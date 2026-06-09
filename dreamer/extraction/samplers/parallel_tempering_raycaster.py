@@ -54,6 +54,7 @@ def _pt_mcmc_walk(
     target_yield_ratio, learning_rate, min_gravity_floor,
     monitor_window, repulsion_subset,
     max_useful_norm, flatland_box,
+    burn_in_steps, initial_harvest_limit, harvest_expansion_factor,
     tol, rng_seed,
 ):
     """Run a parallel-tempering replica-exchange walk; return the cold-chain harvest.
@@ -66,6 +67,16 @@ def _pt_mcmc_walk(
     state swap.  ``lam`` is the *base* gravity, retuned by a two-phase log-ratio PID on
     the cold-chain yield (using the cold harvester's
     norm for the phase decision), then scaled per replica by ``beta_ladder``.
+
+    Two harvest-quality refinements gate replica 0's banking:
+
+    * **Burn-in:** once replica 0 enters the useful band it must spend ``burn_in_steps``
+      steps thermalising (gravity locked high so it settles at the bottom) before it may
+      bank *any* point — avoids recording the first transient high-norm hits.
+    * **Adaptive radius:** banking starts at a tight ``initial_harvest_limit`` and only
+      relaxes (``*= harvest_expansion_factor``, capped at ``max_useful_norm``) when a
+      monitor window banks nothing — so a fat cone stays greedy at the low limit while a
+      needle auto-expands until it reaches its (lowest available) integer points.
 
     :param Z: ``(d_orig, d_flat)`` integer basis of the equality solution lattice.
     :param B: ``(m, d_flat)`` facet normals; strict interior iff ``B z < 0``.
@@ -82,9 +93,13 @@ def _pt_mcmc_walk(
     :param min_gravity_floor: floor on ``lam``.
     :param monitor_window: steps per PID update window.
     :param repulsion_subset: max past harvests sampled for the cosine penalty.
-    :param max_useful_norm: only cold-harvester (replica 0) states with ``||Z z|| <= this``
-        are harvested; also the Phase-1/Phase-2 boundary (evaluated on replica 0).
+    :param max_useful_norm: the Phase-1/Phase-2 boundary (on replica 0) and the hard
+        ceiling the adaptive harvest limit may expand to.
     :param flatland_box: hard ``max|z_i|`` bound on lateral flatland wandering.
+    :param burn_in_steps: in-band steps replica 0 must thermalise before banking begins.
+    :param initial_harvest_limit: starting (tight) norm limit for banking; expands on stall.
+    :param harvest_expansion_factor: multiplicative relaxation of the harvest limit per
+        stalled monitor window (>= 1).
     :param tol: feasibility tolerance; a move is rejected unless ``B z' < -tol``.
     :param rng_seed: if ``>= 0``, seeds numba's RNG for reproducibility.
     :return: ``(harvest_buffer, harvest_count, accept_rate)`` — buffer is
@@ -124,6 +139,9 @@ def _pt_mcmc_walk(
 
     lam = initial_lambda
     window_yield = 0
+    burn_in_counter = 0                       # in-band steps replica 0 has thermalised
+    # never bank above the useful ceiling, even if the configured start limit exceeds it
+    current_harvest_limit = min(initial_harvest_limit, max_useful_norm)
 
     # Scratch buffers (reused every proposal / swap to avoid per-step allocation).
     z_prop = np.zeros(d_flat, dtype=np.int64)
@@ -133,6 +151,11 @@ def _pt_mcmc_walk(
 
     done = False
     for step in range(max_steps):
+        # Burn-in: count steps the cold harvester spends inside the useful band; banking
+        # is withheld until it has thermalised for burn_in_steps (settles at the bottom).
+        if norm_curr[0] <= max_useful_norm:
+            burn_in_counter += 1
+
         # ---------------- Independent per-replica steps ----------------
         for i in range(n_rep):
             total_proposed += 1
@@ -251,10 +274,10 @@ def _pt_mcmc_walk(
                 norm_curr[i] = norm_prop
 
                 # ---- Cold-chain harvest filter: ONLY the cold harvester (replica 0,
-                # beta=1.0) banks points, so hot explorers cannot pollute the quota
-                # with high-norm vectors.  Hot replicas (i > 0) still propose, evaluate,
-                # and swap with replica 0 — they are strictly auxiliaries. ----
-                if i == 0 and norm_prop <= max_useful_norm:
+                # beta=1.0) banks points, after burn-in, and only inside the *adaptive*
+                # radius (which starts tight and expands on stall).  Hot replicas (i > 0)
+                # still propose, evaluate, and swap — they are strictly auxiliaries. ----
+                if i == 0 and burn_in_counter > burn_in_steps and norm_prop <= current_harvest_limit:
                     v_int = np.zeros(d_orig, dtype=np.int64)
                     for ii in range(d_orig):
                         v_int[ii] = np.int64(np.round(v_prop[ii]))
@@ -308,11 +331,18 @@ def _pt_mcmc_walk(
 
         # ---------------- Two-phase log-ratio PID (cold-chain yield) ----------------
         if (step + 1) % monitor_window == 0:
-            if norm_curr[0] > max_useful_norm:
-                # PHASE 1 (funnel): cold harvester still descending -> lock max gravity.
+            if norm_curr[0] > max_useful_norm or burn_in_counter <= burn_in_steps:
+                # PHASE 1 (funnel) or still thermalising: lock max gravity so the cold
+                # harvester descends and settles at the bottom of the cone.
                 lam = initial_lambda
             else:
-                # PHASE 2 (harvest): log-ratio PID on the cold-chain yield.
+                # PHASE 2 (harvest).  Adaptive radius: if the window banked nothing the
+                # cone is too sparse at the current limit, so relax it (capped at the
+                # useful-norm ceiling); a fat cone keeps yielding and never expands.
+                if window_yield == 0 and current_harvest_limit < max_useful_norm:
+                    current_harvest_limit = min(max_useful_norm,
+                                                current_harvest_limit * harvest_expansion_factor)
+                # log-ratio PID on the cold-chain yield.
                 actual_yield_ratio = window_yield / monitor_window
                 epsilon = 1e-5
                 yield_ratio = (actual_yield_ratio + epsilon) / target_yield_ratio
@@ -343,7 +373,6 @@ class ParallelTemperingSampler(Sampler):
         A_prime,
         *,
         beta_ladder=(1.0, 0.1, 0.01, 0.0),
-        swap_interval: int = 50,
         initial_lambda: float = 0.5,
         gamma: float = 1.0,
         target_yield_ratio: float = 0.01,
@@ -353,6 +382,9 @@ class ParallelTemperingSampler(Sampler):
         repulsion_subset: int = 50,
         max_useful_norm: float = 1000.0,
         flatland_box: int = 10000,
+        burn_in_steps: int = 2000,
+        initial_harvest_limit: float = 50.0,
+        harvest_expansion_factor: float = 1.5,
         seed_bounds=(20, 100, 500, 2000, 5000),
         seed_eps: float = 1e-6,
         max_steps_per_quota: int = 200,
@@ -362,7 +394,6 @@ class ParallelTemperingSampler(Sampler):
         """
         :param A_prime: ``(rows, d_orig)`` constraint matrix for the shard.
         :param beta_ladder: descending temperature coefficients (1.0 cold .. 0.0 explorer).
-        :param swap_interval: attempt adjacent replica swaps every this many steps.
         :param initial_lambda: starting/ceiling base gravity weight.
         :param gamma: repulsion weight.
         :param target_yield_ratio: desired cold-chain useful-primitives-per-step the PID targets.
@@ -370,8 +401,12 @@ class ParallelTemperingSampler(Sampler):
         :param min_gravity_floor: hard floor on base gravity.
         :param monitor_window: steps per PID update window.
         :param repulsion_subset: max past harvests sampled for the cosine penalty.
-        :param max_useful_norm: only states with original-space norm ``<= this`` are harvested.
+        :param max_useful_norm: useful-norm ceiling — the Phase boundary and the cap the
+            adaptive harvest limit may expand to.
         :param flatland_box: hard ``max|z_i|`` bound on lateral flatland wandering.
+        :param burn_in_steps: in-band thermalisation steps before replica 0 starts banking.
+        :param initial_harvest_limit: tight starting norm limit for banking (expands on stall).
+        :param harvest_expansion_factor: per-stalled-window relaxation of the harvest limit.
         :param seed_bounds: expanding box half-widths for the Chebyshev seed search.
         :param seed_eps: minimum inscribed radius required of the seed.
         :param max_steps_per_quota: outer-step budget = this times the quota.
@@ -397,7 +432,6 @@ class ParallelTemperingSampler(Sampler):
         ))
 
         self.beta_ladder = np.asarray(beta_ladder, dtype=np.float64)
-        self.swap_interval = swap_interval
         self.initial_lambda = initial_lambda
         self.gamma = gamma
         self.target_yield_ratio = target_yield_ratio
@@ -407,6 +441,9 @@ class ParallelTemperingSampler(Sampler):
         self.repulsion_subset = repulsion_subset
         self.max_useful_norm = max_useful_norm
         self.flatland_box = flatland_box
+        self.burn_in_steps = burn_in_steps
+        self.initial_harvest_limit = initial_harvest_limit
+        self.harvest_expansion_factor = harvest_expansion_factor
         self.seed_bounds = tuple(seed_bounds)
         self.seed_eps = seed_eps
         self.max_steps_per_quota = max_steps_per_quota
@@ -471,21 +508,27 @@ class ParallelTemperingSampler(Sampler):
             volume-dependent quota the raycaster uses — unless ``exact`` is set.
         :param exact: if ``True`` with a callable, the requested count is used as-is
             (no volume scaling); the walk targets the quota exactly and stops on reaching it.
-        :return: ``(n, d_orig)`` array of unique primitive integer vectors, all with
-            original-space norm ``<= max_useful_norm``; empty array on a handled failure.
+        :return: ``(n, d_orig)`` array of unique primitive integer vectors, sorted by
+            ascending norm; empty array on a handled failure (logged to the log file).
         """
         if callable(compute_n_samples):
             requested = int(compute_n_samples(self.d_flat))
+            # volume-scaled quota, floored at 5 so a near-zero-volume cone still asks for >=5
             quota = requested if exact else max(int(requested * self.fraction * 1.05), 5)
         else:
             quota = int(compute_n_samples)
         if quota <= 0 or self.d_flat == 0:
+            Logger(
+                f"ParallelTemperingSampler: nothing to sample (quota={quota}, d_flat={self.d_flat}); "
+                f"returning no trajectories.",
+                Logger.Levels.debug,
+            ).log()
             return np.empty((0, self.d_orig), dtype=np.int64)
 
         try:
             z0 = self._compute_chebyshev_center()
         except NarrowConeError as err:
-            Logger(str(err), Logger.Levels.warning).log()
+            Logger(str(err), Logger.Levels.debug).log()
             return np.empty((0, self.d_orig), dtype=np.int64)
 
         v0 = self.Z @ z0
@@ -496,15 +539,23 @@ class ParallelTemperingSampler(Sampler):
             Logger.Levels.debug,
         ).log()
 
-        max_steps = max(self.monitor_window, quota * self.max_steps_per_quota)
+        # Budget must cover the burn-in *plus* the harvesting walk, or a small (volume-
+        # scaled) quota could exhaust max_steps before burn-in even completes.
+        max_steps = max(self.monitor_window, self.burn_in_steps + quota * self.max_steps_per_quota)
+        # Dynamic swap interval: ~100 swap attempts over the walk regardless of budget
+        # (a fixed interval starves swaps when the quota fills in few steps).
+        dynamic_swap_interval = max(20, max_steps // 100)
 
+        # Lowest-norm guarantee now comes from the burn-in + adaptive-radius harvesting
+        # inside the kernel (replaces the old Top-K over-sample/sort filter).
         harvest, count, accept_rate = _pt_mcmc_walk(
             self.Z, self.B, z0.astype(np.int64), v0.astype(np.int64), self.beta_ladder,
-            quota, max_steps, self.swap_interval,
+            quota, max_steps, dynamic_swap_interval,
             self.initial_lambda, self.gamma,
             self.target_yield_ratio, self.learning_rate, self.min_gravity_floor,
             self.monitor_window, self.repulsion_subset,
             self.max_useful_norm, self.flatland_box,
+            self.burn_in_steps, self.initial_harvest_limit, self.harvest_expansion_factor,
             self.tol, self.rng_seed,
         )
         self.last_accept_rate = float(accept_rate)
@@ -517,6 +568,10 @@ class ParallelTemperingSampler(Sampler):
             try:
                 raise NoUsefulPointsError(self.max_useful_norm, max_steps, seed_norm)
             except NoUsefulPointsError as err:
-                Logger(str(err), Logger.Levels.warning).log()
+                Logger(str(err), Logger.Levels.debug).log()
             return np.empty((0, self.d_orig), dtype=np.int64)
-        return np.unique(harvest[:count], axis=0)
+
+        # Return unique harvested vectors sorted by ascending L2 norm (lowest first).
+        unique = np.unique(harvest[:count], axis=0)
+        order = np.argsort(np.linalg.norm(unique, axis=1))
+        return unique[order]

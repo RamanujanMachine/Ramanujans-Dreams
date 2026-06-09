@@ -24,6 +24,7 @@ import matplotlib.pyplot as plt
 from dreamer.utils.rand import np
 from dreamer.extraction.samplers.discrete_raycaster import DiscreteMCMCSampler
 from dreamer.extraction.samplers.parallel_tempering_raycaster import ParallelTemperingSampler
+from dreamer.extraction.samplers.raw_space_raycaster import RawSpaceMCMCSampler
 from tests.testing_tool import TestHarness
 
 
@@ -298,6 +299,7 @@ class DiscreteTestHarness(TestHarness):
 ENGINES = {
     "discrete": DiscreteMCMCSampler,
     "pt": ParallelTemperingSampler,
+    "raw": RawSpaceMCMCSampler,
 }
 
 

@@ -16,8 +16,8 @@ from dreamer.extraction.sampling_orchestrators.sampling_orchestrator import Samp
 from dreamer.extraction.samplers.sphere_sampler import PrimitiveSphereSampler
 
 
-def _build_trajectory_sampler(a_matrix: np.ndarray):
-    """Construct the trajectory sampler selected by ``search_config.SAMPLING_METHOD``.
+def _build_trajectory_sampler(a_matrix: np.ndarray, method: str | None = None):
+    """Construct the trajectory sampler for the requested (or configured) method.
 
     The ``discrete`` / ``pt`` lattice walkers harvest primitive integer directions whose
     original-space norm stays within ``search_config.MAX_TRAJECTORY_LENGTH`` (the same
@@ -25,10 +25,13 @@ def _build_trajectory_sampler(a_matrix: np.ndarray):
     callers — all three return an ``(n, d_orig)`` integer array from ``harvest``.
 
     :param a_matrix: ``(rows, d_orig)`` constraint matrix of the shard.
-    :return: a constructed :class:`Sampler` for the configured method.
-    :raises ValueError: if ``SAMPLING_METHOD`` is not one of ``raycast`` / ``discrete`` / ``pt``.
+    :param method: explicit engine name (``raycast`` / ``discrete`` / ``pt``); when
+        ``None`` the stage-default ``search_config.SAMPLING_METHOD`` is used.  The
+        analysis stage passes ``analysis_config.SAMPLING_METHOD`` here so it can differ.
+    :return: a constructed :class:`Sampler` for the chosen method.
+    :raises ValueError: if ``method`` is not one of ``raycast`` / ``discrete`` / ``pt``.
     """
-    method = search_config.SAMPLING_METHOD
+    method = method if method is not None else search_config.SAMPLING_METHOD
     useful_norm = float(search_config.MAX_TRAJECTORY_LENGTH)
     if method == "raycast":
         return RaycastPipelineSampler(a_matrix)
@@ -45,9 +48,17 @@ class ShardSamplingOrchestrator(SamplingOrchestrator):
     """Trajectory sampler for shards using the extraction sampling pipeline.
 
     The concrete trajectory-sampling engine is selected by
-    ``search_config.SAMPLING_METHOD`` (``raycast`` / ``discrete`` / ``pt``).
+    ``search_config.SAMPLING_METHOD`` (``raycast`` / ``discrete`` / ``pt``), or by an
+    explicit ``sampling_method`` override (used by the analysis stage to pass
+    ``analysis_config.SAMPLING_METHOD``).
     """
-    def __init__(self, searchable: Shard):
+    def __init__(self, searchable: Shard, *, sampling_method: str | None = None):
+        """
+        :param searchable: the :class:`Shard` to sample trajectories for.
+        :param sampling_method: optional engine override (``raycast`` / ``discrete`` /
+            ``pt``); when ``None`` the search-stage default
+            ``search_config.SAMPLING_METHOD`` is used.
+        """
         super().__init__(searchable)
         if not isinstance(self.searchable, Shard):
             raise ValueError(f"{self.__class__.__name__} can only be used with {Shard.__name__} objects.")
@@ -56,7 +67,7 @@ class ShardSamplingOrchestrator(SamplingOrchestrator):
         if a_matrix is None:
             self.sampler = PrimitiveSphereSampler(len(self.searchable.symbols))
         else:
-            self.sampler = _build_trajectory_sampler(np.asarray(a_matrix, dtype=np.float64))
+            self.sampler = _build_trajectory_sampler(np.asarray(a_matrix, dtype=np.float64), sampling_method)
 
     def sample_trajectories(self, compute_n_samples: Callable[[int], int] | int, *, exact: bool = False) -> Set[Position]:
         if isinstance(self.sampler, PrimitiveSphereSampler):

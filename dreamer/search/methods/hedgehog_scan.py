@@ -115,6 +115,7 @@ class SerialSearcher(SearchMethod):
         self,
         starts: Optional[Position | List[Position]] = None,
         trajectory_generator: Callable[[int], int] = search_config.NUM_TRAJECTORIES_FROM_DIM,
+        sampling_method: Optional[str] = None,
     ) -> List[Tuple[Position, Position]]:
         """Return ``(trajectory, start)`` pairs for the shard — no computation.
 
@@ -130,6 +131,11 @@ class SerialSearcher(SearchMethod):
             ``self.space.get_interior_point()``.
         trajectory_generator:
             Callable mapping shard dimension → number of sampled trajectories.
+        sampling_method:
+            Optional trajectory-sampling engine override (``raycast`` / ``discrete`` /
+            ``pt``) forwarded to :class:`ShardSamplingOrchestrator`.  ``None`` uses the
+            search-stage default; the analysis stage passes
+            ``analysis_config.SAMPLING_METHOD`` so analysis can use its own engine.
 
         Raises
         ------
@@ -141,5 +147,7 @@ class SerialSearcher(SearchMethod):
         if starts is None:
             raise ValueError("sample_pairs requires at least one valid start point")
         starts_list: List[Position] = starts if isinstance(starts, list) else [starts]
-        trajectories = ShardSamplingOrchestrator(self.space).sample_trajectories(trajectory_generator)
+        trajectories = ShardSamplingOrchestrator(
+            self.space, sampling_method=sampling_method
+        ).sample_trajectories(trajectory_generator)
         return [(t, s) for s in starts_list for t in trajectories]
