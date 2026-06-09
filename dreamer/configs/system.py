@@ -68,9 +68,22 @@ class SystemConfig(Configurable):
             )
         },
     )
+    TOTAL_CORES: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Total CPU cores the pipeline may use. None resolves to "
+                "os.cpu_count() at runtime. Single source of truth for the core "
+                "budget: when Tier-2 is active, NUM_BACKGROUND_WORKERS + 1 (writer) "
+                "cores are reserved for the Tier-2 queue + sink and the rest go to "
+                "the search/eval pools; when Tier-2 is inactive, all cores go to "
+                "search/analysis. See dreamer.utils.multi_processing.search_worker_budget."
+            )
+        },
+    )
     NUM_BACKGROUND_WORKERS: int = field(
         default=4,
-        metadata={"description": "Number of background worker processes that compute Tier-2 trajectory attributes during search."},
+        metadata={"description": "Number of background worker processes that compute Tier-2 trajectory attributes during search. When Tier-2 is active these (plus 1 writer/sink) are the cores reserved from TOTAL_CORES."},
     )
     WRITER_BATCH_SIZE: int = field(
         default=100,

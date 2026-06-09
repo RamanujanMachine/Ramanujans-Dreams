@@ -40,7 +40,6 @@ from dreamer.extraction.samplers.discrete_raycaster import (
     _gcd_abs,
     _scale_jump,
     NarrowConeError,
-    NoUsefulPointsError,
 )
 from dreamer.utils.logger import Logger
 from dreamer.utils.rand import GLOBAL_SEED
@@ -149,8 +148,14 @@ def _pt_mcmc_walk(
     swap_z = np.zeros(d_flat, dtype=np.int64)
     swap_v = np.zeros(d_orig, dtype=np.float64)
 
+    # The MCMC loop is ALWAYS bounded by the computational budget (max_steps); it also
+    # exits early the moment the quota is met.  This prevents a "quota deadlock": because
+    # the adaptive radius cannot expand past max_useful_norm, a cone may simply contain
+    # fewer valid primitives than requested, and the walk must stop on budget exhaustion
+    # rather than loop forever hunting for points that do not exist.
     done = False
-    for step in range(max_steps):
+    step = 0
+    while step < max_steps and harvest_count < quota:
         # Burn-in: count steps the cold harvester spends inside the useful band; banking
         # is withheld until it has thermalised for burn_in_steps (settles at the bottom).
         if norm_curr[0] <= max_useful_norm:
@@ -195,6 +200,9 @@ def _pt_mcmc_walk(
                 continue
 
             # ---- Strict interior (B z' < -tol) ----
+            # B is the conditioner's flatland-projected constraint matrix (B_reduced,
+            # shape m x d_flat): this unrolled accumulation IS the precomputed projection
+            # B_Z @ z_prop — there is no per-step B @ (Z @ z) to eliminate.
             inside = True
             for row in range(m):
                 acc = 0.0
@@ -224,6 +232,9 @@ def _pt_mcmc_walk(
                 continue
 
             # ---- Repulsion vs a random subset of the (cold-chain) harvest ----
+            # Zero-allocation, fully-unrolled cosine similarity (dot products against the
+            # cached unit-harvest rows) — no np.linalg.norm and no temporary arrays in the
+            # hot loop, so numba keeps this branch allocation-free.
             s_prop = 0.0
             s_cur = 0.0
             if harvest_count > 0:
@@ -354,6 +365,8 @@ def _pt_mcmc_walk(
                 lam = initial_lambda
             window_yield = 0
 
+        step += 1
+
     accept_rate = total_accepted / total_proposed if total_proposed > 0 else 0.0
     return harvest, harvest_count, accept_rate
 
@@ -387,7 +400,7 @@ class ParallelTemperingSampler(Sampler):
         harvest_expansion_factor: float = 1.5,
         seed_bounds=(20, 100, 500, 2000, 5000),
         seed_eps: float = 1e-6,
-        max_steps_per_quota: int = 200,
+        max_steps_per_quota: int = 400,
         tol: float = 1e-6,
         rng_seed: int = GLOBAL_SEED,
     ):
@@ -409,7 +422,9 @@ class ParallelTemperingSampler(Sampler):
         :param harvest_expansion_factor: per-stalled-window relaxation of the harvest limit.
         :param seed_bounds: expanding box half-widths for the Chebyshev seed search.
         :param seed_eps: minimum inscribed radius required of the seed.
-        :param max_steps_per_quota: outer-step budget = this times the quota.
+        :param max_steps_per_quota: outer-step budget = this times the quota (default 400 —
+            a generous budget so the walker can overcome repulsion collisions and fill the
+            quota with a healthy angular spread rather than a tiny near-origin volume).
         :param tol: feasibility tolerance for the strict in-cone test.
         :param rng_seed: seed for numba's RNG (and NumPy) for reproducibility; ``<0`` disables.
         """
@@ -508,8 +523,11 @@ class ParallelTemperingSampler(Sampler):
             volume-dependent quota the raycaster uses — unless ``exact`` is set.
         :param exact: if ``True`` with a callable, the requested count is used as-is
             (no volume scaling); the walk targets the quota exactly and stops on reaching it.
-        :return: ``(n, d_orig)`` array of unique primitive integer vectors, sorted by
-            ascending norm; empty array on a handled failure (logged to the log file).
+        :return: ``(n, d_orig)`` array of unique primitive integer vectors sorted by
+            ascending norm, with ``n <= quota``.  The walk is bounded by the step budget,
+            so a genuinely sparse cone returns a **partial harvest** (``n < quota``, logged
+            as a warning) rather than hanging; an empty array signals a handled failure
+            (no usable points within budget — logged to the log file).
         """
         if callable(compute_n_samples):
             requested = int(compute_n_samples(self.d_flat))
@@ -564,14 +582,34 @@ class ParallelTemperingSampler(Sampler):
             Logger.Levels.debug,
         ).log()
 
+        # 1. Total failure — the cone yielded nothing inside the useful band within budget.
         if count == 0:
-            try:
-                raise NoUsefulPointsError(self.max_useful_norm, max_steps, seed_norm)
-            except NoUsefulPointsError as err:
-                Logger(str(err), Logger.Levels.debug).log()
+            Logger(
+                f"No points found under norm {self.max_useful_norm:.0f} within {max_steps} steps.",
+                Logger.Levels.debug,
+            ).log()
             return np.empty((0, self.d_orig), dtype=np.int64)
 
-        # Return unique harvested vectors sorted by ascending L2 norm (lowest first).
-        unique = np.unique(harvest[:count], axis=0)
-        order = np.argsort(np.linalg.norm(unique, axis=1))
-        return unique[order]
+        # 2. Strip the trailing zero rows of the fixed-size buffer and drop any
+        #    non-consecutive duplicates the walk may have re-banked (the kernel only
+        #    dedups against the immediately-previous harvest).
+        valid_harvest = np.unique(harvest[:count], axis=0)
+        n_unique = int(valid_harvest.shape[0])
+
+        # 3. Partial harvest — the step budget ran out before the quota was met.  This is
+        #    an expected outcome for a genuinely sparse cone (not a bug), so surface it as
+        #    a warning rather than failing.
+        if n_unique < quota:
+            Logger(
+                f"PT walk exhausted {max_steps} steps. Found {n_unique} points "
+                f"(short of quota {quota}). Returning partial harvest.",
+                Logger.Levels.warning,
+            ).log()
+
+        # 4. Sort the valid harvest by ascending L2 norm (lowest-norm directions first).
+        norms = np.linalg.norm(valid_harvest, axis=1)
+        sorted_harvest = valid_harvest[np.argsort(norms)]
+
+        # 5. Return exactly the quota, or however many we found if fewer.
+        final_return_count = min(n_unique, quota)
+        return sorted_harvest[:final_return_count]

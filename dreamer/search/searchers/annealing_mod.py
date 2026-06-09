@@ -17,7 +17,7 @@ from dreamer.configs.system import sys_config
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.annealing import SimulatedAnnealingSearch, NoInitialIdentification
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
-from dreamer.search.methods.flatland.parallel_eval import make_eval_pool
+from dreamer.search.methods.flatland.parallel_eval import make_shared_eval_pool
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.module import CatchErrorInModule
@@ -98,7 +98,9 @@ class SimulatedAnnealingMod(SearcherModScheme):
         # across every constant and every annealing step for the neighbour walks.
         geom = FlatlandGeometry(shard)
         start = shard.get_interior_point()
-        eval_pool = make_eval_pool(shard, start, search_config.ANNEAL_NUM_EVAL_WORKERS)
+        eval_pool, pq_manager = make_shared_eval_pool(
+            shard, start, search_config.ANNEAL_NUM_EVAL_WORKERS
+        )
 
         try:
             with worker_pool(
@@ -131,3 +133,5 @@ class SimulatedAnnealingMod(SearcherModScheme):
             if eval_pool is not None:
                 eval_pool.close()
                 eval_pool.join()
+            if pq_manager is not None:
+                pq_manager.shutdown()

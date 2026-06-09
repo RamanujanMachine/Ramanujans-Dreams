@@ -191,8 +191,8 @@ class SearchConfig(Configurable):
         metadata={"description": "Number of initial candidate trajectories sampled for small-angle seed selection."},
     )
     SA_NUM_EVAL_WORKERS: int = field(
-        default=6,
-        metadata={"description": "Number of worker processes for evaluating each hill-climb step's in-cone perturbation batch. <= 1 disables the pool (serial)."},
+        default=0,
+        metadata={"description": "Worker cap for evaluating each hill-climb step's in-cone perturbation batch. 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},
     )
 
     # ============================== Simulated Annealing settings ==============================
@@ -237,8 +237,8 @@ class SearchConfig(Configurable):
         metadata={"description": "Norm used to measure trajectory length for the ANNEAL_MAX_TRAJ_LEN cap. 'linf' = max absolute coordinate (default; directly bounds trajectory_matrix cost), 'l1' = sum of absolute coords (= exact trajectory_matrix symbolic mult count), 'l2' = Euclidean norm."},
     )
     ANNEAL_NUM_EVAL_WORKERS: int = field(
-        default=6,
-        metadata={"description": "Number of parallel threads for evaluating the neighbour batch in each SA step (Fix C). Uses ThreadPoolExecutor; 0 disables parallelism."},
+        default=0,
+        metadata={"description": "Worker cap for evaluating the neighbour batch in each SA step. 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},
     )
 
     # ============================== Genetic search — trajectory cap + parallelism ==============================
@@ -251,8 +251,8 @@ class SearchConfig(Configurable):
         metadata={"description": "Norm used to measure trajectory length for the GA_MAX_TRAJ_LEN cap. Same options as ANNEAL_TRAJ_NORM: 'linf', 'l1', 'l2'."},
     )
     GA_NUM_EVAL_WORKERS: int = field(
-        default=6,
-        metadata={"description": "Number of parallel threads for evaluating GA population batches (initial population and per-generation children). 0 disables parallelism."},
+        default=0,
+        metadata={"description": "Worker cap for evaluating GA population batches (initial population and per-generation children). 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},
     )
 
     # ============================== Gradient Ascent settings ==============================
@@ -329,8 +329,8 @@ class SearchConfig(Configurable):
         metadata={"description": "Number of initial candidate trajectories sampled for gradient-ascent seed selection."},
     )
     GRAD_NUM_EVAL_WORKERS: int = field(
-        default=6,
-        metadata={"description": "Number of worker processes for evaluating the per-step forward-difference gradient probe batch. <= 1 disables the pool (serial)."},
+        default=0,
+        metadata={"description": "Worker cap for evaluating the per-step forward-difference gradient probe batch. 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},
     )
 
     # ============================== Raycaster settings ==============================

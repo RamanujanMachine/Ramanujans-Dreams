@@ -22,6 +22,7 @@ This module provides two layers:
 """
 
 import json
+import os
 import queue
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
@@ -31,7 +32,32 @@ import multiprocessing as mp
 from multiprocessing import Pool
 
 from dreamer.configs import config
+from dreamer.configs.system import sys_config
 from dreamer.utils.logger import Logger
+
+
+# ---------------------------------------------------------------------------
+# Core budget
+# ---------------------------------------------------------------------------
+
+def search_worker_budget() -> int:
+    """Return the number of cores available to search / analysis pools.
+
+    Single source of truth for sizing every search/eval pool.  Starts from
+    ``sys_config.TOTAL_CORES`` (``None`` → ``os.cpu_count()``) and reserves cores
+    for the Tier-2 background workers **and** their dedicated writer/sink — but
+    only when Tier-2 is actually active (``search.TIER2_ATTRIBUTES`` non-empty).
+    When Tier-2 is inactive, nothing is reserved and the whole machine is given
+    to search/analysis.
+
+    :return: Worker budget, floored at 1.
+    """
+    total = sys_config.TOTAL_CORES or os.cpu_count() or 1
+    if config.search.TIER2_ATTRIBUTES:
+        reserved = sys_config.NUM_BACKGROUND_WORKERS + 1  # +1 dedicated writer/sink
+    else:
+        reserved = 0
+    return max(1, total - reserved)
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +83,14 @@ def create_process_pool_executor() -> ProcessPoolExecutor:
 
 
 def create_pool() -> Pool:
-    """Return a ``multiprocessing.Pool`` whose workers inherit the current config."""
+    """Return a ``multiprocessing.Pool`` whose workers inherit the current config.
+
+    Sized by :func:`search_worker_budget` so it never oversubscribes the cores
+    reserved for the Tier-2 queue + sink (and uses the whole machine when Tier-2
+    is inactive).
+    """
     return Pool(
+        processes=search_worker_budget(),
         initializer=_init_worker,
         initargs=(config.export_configurations(),),
     )

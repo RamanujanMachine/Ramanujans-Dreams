@@ -53,7 +53,8 @@ if __name__ == '__main__':
             # Under 'exact'/'heuristic' alone, only the matching knob applies.
             'EXACT_TIMEOUT_SECONDS': 60.0,
             'HEURISTIC_TIMEOUT_SECONDS': 200.0,
-            'LOAD_SHARD_CACHE': True
+            'LOAD_SHARD_CACHE': True,
+            'SAMPLING_METHOD': 'pt'
         },
         search={
             # number of trajectories to be auto-generated in search if needed by the module

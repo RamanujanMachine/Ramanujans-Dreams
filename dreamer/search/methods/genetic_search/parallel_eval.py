@@ -11,6 +11,16 @@ from dreamer.search.methods.flatland.parallel_eval import (  # noqa: F401
     _pool_walk,
     evaluate_batch,
     make_eval_pool,
+    make_shared_eval_pool,
+    resolve_eval_workers,
 )
 
-__all__ = ["WalkError", "_pool_init", "_pool_walk", "evaluate_batch", "make_eval_pool"]
+__all__ = [
+    "WalkError",
+    "_pool_init",
+    "_pool_walk",
+    "evaluate_batch",
+    "make_eval_pool",
+    "make_shared_eval_pool",
+    "resolve_eval_workers",
+]

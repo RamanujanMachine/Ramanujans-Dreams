@@ -28,6 +28,7 @@ genuinely-new Case-C walks, de-duplicating directions that share a primitive
 ray.  ``pool=None`` evaluates serially in-process.
 """
 
+import multiprocessing as mp
 from collections import namedtuple
 from multiprocessing import Pool
 from typing import Callable, Dict, List, Optional, Tuple
@@ -38,6 +39,7 @@ from dreamer.search.methods.flatland.evaluator import (
     flatland_trajectory_key,
 )
 from dreamer.utils.logger import Logger
+from dreamer.utils.multi_processing import search_worker_budget
 from dreamer.utils.storage.attribute_registry import attribute_name
 
 search_config = config.search
@@ -61,6 +63,17 @@ def _pool_init(config_overrides: dict, shard, start) -> None:
     :param start: Interior start :class:`Position` (constant-independent).
     """
     config.configure(**config_overrides)
+    # Rebind this worker's per-shard (p, q) cache onto the shared append-log (if
+    # one was attached by the deep-search module before the pool was built), so
+    # relations identified by any worker are reused by all of them instead of
+    # each worker re-deriving them via LIReC.  ``shared_pq_log`` is a Manager
+    # list proxy that survives pickling into the worker and reconnects to the
+    # parent's manager process; absent it, the cache stays process-local.
+    from dreamer.utils.storage.frequency_list import FrequencyList
+    shard.cache = FrequencyList(
+        shard.cache.max_size,
+        shared_log=getattr(shard, "shared_pq_log", None),
+    )
     _POOL_STATE["shard"] = shard
     _POOL_STATE["start"] = start
 
@@ -101,21 +114,75 @@ def _pool_walk(args):
         return WalkError(str(exc))
 
 
+def resolve_eval_workers(cap: Optional[int]) -> int:
+    """Resolve a ``*_NUM_EVAL_WORKERS`` knob against the global core budget.
+
+    The per-method knobs are interpreted as **optional caps**: ``None`` or
+    ``<= 0`` means "use the full search budget"
+    (:func:`dreamer.utils.multi_processing.search_worker_budget`), while a
+    positive value caps the worker count at ``min(cap, budget)``.  This is what
+    lets the eval pools scale to a large machine without per-method tuning while
+    still honouring the cores reserved for the Tier-2 queue + sink.
+
+    :param cap: The configured per-method worker cap (knob value).
+    :return: Effective worker count (>= 1).
+    """
+    budget = search_worker_budget()
+    if cap is None or cap <= 0:
+        return budget
+    return max(1, min(cap, budget))
+
+
 def make_eval_pool(shard, start, workers: int) -> Optional[Pool]:
     """Create a persistent per-shard evaluation pool, or ``None`` if disabled.
 
     :param shard: The shard being searched (handed to workers once).
     :param start: Interior start :class:`Position`.
-    :param workers: Desired worker count; ``<= 1`` returns ``None`` (serial).
+    :param workers: Per-method worker cap (see :func:`resolve_eval_workers`);
+        the effective count is capped by the global core budget.  A resolved
+        count ``<= 1`` returns ``None`` (serial in-process evaluation).
     :return: A ready :class:`multiprocessing.Pool`, or ``None``.
     """
-    if workers is None or workers <= 1:
+    effective = resolve_eval_workers(workers)
+    if effective <= 1:
         return None
     return Pool(
-        processes=workers,
+        processes=effective,
         initializer=_pool_init,
         initargs=(config.export_configurations(), shard, start),
     )
+
+
+def make_shared_eval_pool(shard, start, workers: int):
+    """Per-shard eval pool with a shared ``(p, q)`` cache log attached.
+
+    Wraps :func:`make_eval_pool`.  When a real (multi-worker) pool will be
+    created, a :class:`multiprocessing.Manager` list is attached to
+    ``shard.shared_pq_log`` **before** the pool is built, so every worker's
+    :class:`~dreamer.utils.storage.frequency_list.FrequencyList` (rebound in
+    :func:`_pool_init`) publishes/consumes identified relations through it —
+    eliminating redundant LIReC re-identification across the shard's workers.
+
+    The manager owns a server process and must be shut down by the caller
+    (alongside ``pool.close()``/``join()``).  When evaluation is serial
+    (resolved workers ``<= 1``) no manager is created and ``(None, None)`` is
+    returned, leaving the cache process-local.
+
+    :param shard: The shard being searched.
+    :param start: Interior start :class:`Position`.
+    :param workers: Per-method worker cap (see :func:`resolve_eval_workers`).
+    :return: ``(pool_or_None, manager_or_None)``.
+    """
+    if resolve_eval_workers(workers) <= 1:
+        return None, None
+    manager = mp.Manager()
+    shard.shared_pq_log = manager.list()
+    pool = make_eval_pool(shard, start, workers)
+    if pool is None:  # Defensive: resolution disagreed (shouldn't happen).
+        manager.shutdown()
+        shard.shared_pq_log = None
+        return None, None
+    return pool, manager
 
 
 def evaluate_batch(

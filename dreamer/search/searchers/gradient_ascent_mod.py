@@ -17,7 +17,7 @@ from dreamer.configs import config
 from dreamer.configs.system import sys_config
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
-from dreamer.search.methods.flatland.parallel_eval import make_eval_pool
+from dreamer.search.methods.flatland.parallel_eval import make_shared_eval_pool
 from dreamer.search.methods.gradient_ascent import (
     GradientAscentSearch,
     NoInitialIdentification,
@@ -103,7 +103,9 @@ class GradientAscentMod(SearcherModScheme):
         # constants and steps.
         geom = FlatlandGeometry(shard)
         start = shard.get_interior_point()
-        eval_pool = make_eval_pool(shard, start, search_config.GRAD_NUM_EVAL_WORKERS)
+        eval_pool, pq_manager = make_shared_eval_pool(
+            shard, start, search_config.GRAD_NUM_EVAL_WORKERS
+        )
 
         try:
             with worker_pool(
@@ -136,3 +138,5 @@ class GradientAscentMod(SearcherModScheme):
             if eval_pool is not None:
                 eval_pool.close()
                 eval_pool.join()
+            if pq_manager is not None:
+                pq_manager.shutdown()

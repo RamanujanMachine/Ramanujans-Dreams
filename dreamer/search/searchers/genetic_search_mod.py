@@ -17,7 +17,7 @@ from dreamer.configs.system import sys_config
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.search.methods.genetic_search import GeneticSearch, NoInitialPopulation
-from dreamer.search.methods.genetic_search.parallel_eval import make_eval_pool
+from dreamer.search.methods.genetic_search.parallel_eval import make_shared_eval_pool
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.module import CatchErrorInModule
@@ -103,7 +103,9 @@ class GeneticSearchModV2(SearcherModScheme):
         # once (workers receive the shard + start a single time) and reused
         # across every identified constant and every generation, amortising the
         # ~0.06 s pool-spawn cost.  ``None`` (workers <= 1) means serial.
-        eval_pool = make_eval_pool(shard, start, search_config.GA_NUM_EVAL_WORKERS)
+        eval_pool, pq_manager = make_shared_eval_pool(
+            shard, start, search_config.GA_NUM_EVAL_WORKERS
+        )
 
         try:
             with worker_pool(
@@ -136,3 +138,5 @@ class GeneticSearchModV2(SearcherModScheme):
             if eval_pool is not None:
                 eval_pool.close()
                 eval_pool.join()
+            if pq_manager is not None:
+                pq_manager.shutdown()
