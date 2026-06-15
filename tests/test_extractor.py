@@ -11,11 +11,12 @@ from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.utils.types import CMFData
 
 
-def _shift_cmf(selected_points=None, only_selected=False):
+def _shift_cmf(selected_points=None, only_selected=False, selected_trajectories=None):
     cmf = rt_pFq(1, 1, sp.Integer(1))
     symbols = list(cmf.matrices.keys())
     shift = Position({symbols[0]: sp.Integer(0), symbols[1]: sp.Integer(0)})
-    return CMFData(cmf=cmf, shift=shift, selected_points=selected_points, only_selected=only_selected)
+    return CMFData(cmf=cmf, shift=shift, selected_points=selected_points, only_selected=only_selected,
+                   selected_trajectories=selected_trajectories)
 
 
 def test_extract_returns_whole_space_when_no_hyperplanes(monkeypatch):
@@ -50,6 +51,83 @@ def test_extract_uses_selected_points_to_create_shards(monkeypatch):
     assert len(shards) >= 1
     for shard in shards:
         assert shard.get_interior_point() is not None
+
+
+def test_selected_trajectory_resolves_boundary_start_point(monkeypatch):
+    """A border start point + trajectory resolves to the stepped point's shard."""
+    # Start (0, 2) lies on the symbols[0] = 0 hyperplane; one step (1, 0) -> (1, 2).
+    cmf_data = _shift_cmf(
+        selected_points=[(0, 2)], only_selected=True, selected_trajectories=[(1, 0)]
+    )
+    extractor = ShardExtractor(e, cmf_data)
+    symbols = list(cmf_data.cmf.matrices.keys())
+    hyperplanes = {
+        Hyperplane(symbols[0], symbols=symbols),
+        Hyperplane(symbols[1], symbols=symbols),
+    }
+    monkeypatch.setattr(extractor, "_extract_cmf_hps", lambda: hyperplanes)
+
+    shards = extractor.extract(call_number=1)
+
+    assert len(shards) == 1
+    # Encoding taken at stepped point (1, 2): both coordinates positive.
+    assert set(shards[0].encoding) == {1}
+    # The user's border start point is kept verbatim as the interior/start point.
+    start = shards[0].get_interior_point()
+    assert start[symbols[0]] == 0 and start[symbols[1]] == 2
+
+
+def test_selected_trajectory_landing_on_hyperplane_raises(monkeypatch):
+    cmf_data = _shift_cmf(
+        selected_points=[(0, 2)], only_selected=True, selected_trajectories=[(0, 1)]
+    )
+    extractor = ShardExtractor(e, cmf_data)
+    symbols = list(cmf_data.cmf.matrices.keys())
+    hyperplanes = {
+        Hyperplane(symbols[0], symbols=symbols),
+        Hyperplane(symbols[1], symbols=symbols),
+    }
+    monkeypatch.setattr(extractor, "_extract_cmf_hps", lambda: hyperplanes)
+
+    # Step parallel to the s0 = 0 border keeps the stepped point on the hyperplane.
+    with pytest.raises(ValueError, match="lies on hyperplane"):
+        extractor.extract(call_number=1)
+
+
+def test_selected_trajectory_none_entry_uses_start_point(monkeypatch):
+    """A None trajectory falls back to start-point behaviour: a border start is skipped."""
+    cmf_data = _shift_cmf(
+        selected_points=[(0, 2), (3, 3)], only_selected=True, selected_trajectories=[None, None]
+    )
+    extractor = ShardExtractor(e, cmf_data)
+    symbols = list(cmf_data.cmf.matrices.keys())
+    hyperplanes = {
+        Hyperplane(symbols[0], symbols=symbols),
+        Hyperplane(symbols[1], symbols=symbols),
+    }
+    monkeypatch.setattr(extractor, "_extract_cmf_hps", lambda: hyperplanes)
+
+    shards = extractor.extract(call_number=1)
+
+    # (0, 2) is on a border and has no trajectory -> skipped; only (3, 3) yields a shard.
+    assert len(shards) == 1
+    start = shards[0].get_interior_point()
+    assert start[symbols[0]] == 3 and start[symbols[1]] == 3
+
+
+def test_selected_trajectory_length_mismatch_raises(monkeypatch):
+    cmf_data = _shift_cmf(
+        selected_points=[(2, 2), (3, 3)], only_selected=True, selected_trajectories=[(1, 0)]
+    )
+    extractor = ShardExtractor(e, cmf_data)
+    symbols = list(cmf_data.cmf.matrices.keys())
+    monkeypatch.setattr(
+        extractor, "_extract_cmf_hps",
+        lambda: {Hyperplane(symbols[0], symbols=symbols), Hyperplane(symbols[1], symbols=symbols)},
+    )
+
+    with pytest.raises(ValueError, match="selected_trajectories length"):
+        extractor.extract(call_number=1)
 
 
 # ----------------------------------------------------------------------

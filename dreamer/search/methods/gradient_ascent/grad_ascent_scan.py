@@ -6,8 +6,9 @@ delta is continuous and generally smooth in the trajectory direction's angle
 (non-differentiable only at a finite set of points), so a gradient method over
 the real-valued direction space is well-posed.  The optimizer maintains a
 real-valued direction ``d``; each updated direction is *realized* as the
-angle-best integer trajectory with bounded L2 norm (:func:`snap_to_trajectory`),
-which is then walked / evaluated.
+angle-best integer trajectory with bounded real-space norm (the shared
+``SEARCH_MAX_TRAJ_LEN`` / ``SEARCH_TRAJ_NORM`` cap, via
+:func:`snap_to_trajectory`), which is then walked / evaluated.
 
 Design choices:
 
@@ -179,7 +180,7 @@ class GradientAscentSearch(SearchMethod):
         )
 
         cfg = search_config
-        max_norm = cfg.GRAD_MAX_NORM
+        max_norm = cfg.SEARCH_MAX_TRAJ_LEN
 
         # --- Seed -----------------------------------------------------
         cur_z = self._select_seed(geom, eval_ctx, shard_id, constant)
@@ -283,7 +284,7 @@ class GradientAscentSearch(SearchMethod):
             yielded a usable (identified, in-cone) probe.
         """
         h = search_config.GRAD_FD_ANGLE
-        max_norm = search_config.GRAD_MAX_NORM
+        max_norm = search_config.SEARCH_MAX_TRAJ_LEN
         grad = np.zeros(geom.d_flat, dtype=np.float64)
         usable = 0
 
@@ -291,7 +292,7 @@ class GradientAscentSearch(SearchMethod):
         probes: List[Tuple[int, np.ndarray]] = []
         for i in range(geom.d_flat):
             d_rot = rotate_toward(d, i, h)
-            z_probe = snap_to_trajectory(d_rot, geom, max_norm, search_config.GRAD_TRAJ_NORM)
+            z_probe = snap_to_trajectory(d_rot, geom, max_norm, search_config.SEARCH_TRAJ_NORM)
             if z_probe is not None:
                 probes.append((i, z_probe))
 
@@ -330,14 +331,14 @@ class GradientAscentSearch(SearchMethod):
         :param update: Optimizer update vector.
         :param geom: Flatland geometry.
         :param lr: Base learning rate (step scale).
-        :param max_norm: Trajectory L2-norm cap for snapping.
+        :param max_norm: Trajectory norm cap for snapping (``SEARCH_MAX_TRAJ_LEN``).
         :return: ``(z_new, d_new)`` — the realized integer direction (or ``None``
             if no in-cone realization was found) and the real direction used.
         """
         scale = lr
         d_new = d + scale * update
         for _ in range(5):
-            z_new = snap_to_trajectory(d_new, geom, max_norm, search_config.GRAD_TRAJ_NORM)
+            z_new = snap_to_trajectory(d_new, geom, max_norm, search_config.SEARCH_TRAJ_NORM)
             if z_new is not None:
                 return z_new, d_new
             scale *= 0.5
@@ -382,7 +383,7 @@ class GradientAscentSearch(SearchMethod):
         if doubling_count < cfg.GRAD_MAX_DOUBLINGS:
             # Stage 2 — length-doubling fallback (escape the dead region).
             doubled = last_identified_z * 2
-            if geom.traj_norm(doubled, search_config.GRAD_TRAJ_NORM) <= max_norm and geom.is_inside(doubled):
+            if geom.traj_norm(doubled, search_config.SEARCH_TRAJ_NORM) <= max_norm and geom.is_inside(doubled):
                 delta, identified = evaluate_in_flatland(doubled, **eval_ctx)
                 if identified:
                     return (
@@ -427,7 +428,7 @@ class GradientAscentSearch(SearchMethod):
             kick /= (np.linalg.norm(kick) or 1.0)
             angle = self._rng.uniform(cfg.GRAD_FD_ANGLE, np.pi / 3.0)
             d_rand = np.cos(angle) * base + np.sin(angle) * np.linalg.norm(base) * kick
-            z = snap_to_trajectory(d_rand, geom, max_norm, search_config.GRAD_TRAJ_NORM)
+            z = snap_to_trajectory(d_rand, geom, max_norm, search_config.SEARCH_TRAJ_NORM)
             if z is None:
                 continue
             delta, identified = evaluate_in_flatland(z, **eval_ctx)

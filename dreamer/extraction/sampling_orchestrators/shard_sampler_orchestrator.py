@@ -70,15 +70,35 @@ class ShardSamplingOrchestrator(SamplingOrchestrator):
             self.sampler = _build_trajectory_sampler(np.asarray(a_matrix, dtype=np.float64), sampling_method)
 
     def sample_trajectories(self, compute_n_samples: Callable[[int], int] | int, *, exact: bool = False) -> Set[Position]:
+        # Local imports avoid a circular dependency (logger/trajectory_attributes
+        # pull in extraction modules at import time).
+        import time
+        from dreamer.utils.logger import Logger
+        from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
+
+        _, shard_id, _ = derive_cmf_and_shard_ids(self.searchable)
+        sampler_name = type(self.sampler).__name__
+        Logger(
+            f"Starting trajectory sampling in shard {shard_id} via {sampler_name}",
+            Logger.Levels.debug,
+        ).log()
+        t0 = time.perf_counter()
+
         if isinstance(self.sampler, PrimitiveSphereSampler):
             samples = self.sampler.harvest(compute_n_samples)
         else:
             samples = self.sampler.harvest(compute_n_samples, exact=exact)
 
-        return {
+        result = {
             Position({sym: sp.sympify(int(v)) for v, sym in zip(p, self.searchable.symbols)})
             for p in samples
         }
+        Logger(
+            f"Finished sampling {len(result)} trajectories in shard {shard_id} "
+            f"in {time.perf_counter() - t0:.1f}s",
+            Logger.Levels.debug,
+        ).log()
+        return result
 
     @cached_property
     def search_space_dim(self):

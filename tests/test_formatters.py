@@ -103,6 +103,37 @@ class TestpFq:
         with pytest.raises(ValueError):
             pFq(log2, 2, 1, -1, shifts=[0, 0])  # needs 3, given 2
 
+    def test_selected_trajectories_paired_with_start_points(self, log2):
+        fmt = pFq(
+            log2, 2, 1, -1,
+            selected_start_points=[(1, 2, 3)],
+            selected_trajectories=[(0, 1, 0)],
+            only_selected=True,
+        )
+        cmf_data = fmt.to_cmf()
+        assert cmf_data.selected_trajectories == [(0, 1, 0)]
+
+    def test_selected_trajectories_length_mismatch_raises(self, log2):
+        with pytest.raises(ValueError, match="selected_trajectories length"):
+            pFq(log2, 2, 1, -1,
+                selected_start_points=[(1, 2, 3)],
+                selected_trajectories=[(0, 1, 0), (1, 0, 0)])
+
+    def test_selected_trajectories_without_start_points_raises(self, log2):
+        with pytest.raises(ValueError, match="requires selected_start_points"):
+            pFq(log2, 2, 1, -1, selected_trajectories=[(0, 1, 0)])
+
+    def test_selected_trajectories_json_roundtrip(self, log2):
+        original = pFq(
+            log2, 2, 1, -1,
+            selected_start_points=[(1, 2, 3), (4, 5, 6)],
+            selected_trajectories=[(0, 1, 0), None],
+            only_selected=True,
+        )
+        restored = Formatter.from_json_obj(original.to_json_obj())
+        assert restored.selected_trajectories == [(0, 1, 0), None]
+        assert restored.selected_start_points == [(1, 2, 3), (4, 5, 6)]
+
 
 # ---------------------------------------------------------------------------
 # 3. MeijerG

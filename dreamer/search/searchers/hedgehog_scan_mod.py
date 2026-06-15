@@ -41,6 +41,7 @@ from dreamer.extraction.shard import Shard
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs import config
 from dreamer.configs.system import sys_config
+from dreamer.configs.logging import logging_config
 from dreamer.utils.logger import Logger
 from dreamer.utils.storage.attribute_registry import attribute_name
 from dreamer.utils.storage.trajectory_attributes import (
@@ -128,6 +129,10 @@ class SearcherModV1(SearcherModScheme):
     ) -> None:
         """Run the search for a single shard using only *identified_consts*."""
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
+        Logger(
+            f"Starting deep search on shard {shard_id} (cmf={cmf_id})",
+            Logger.Levels.debug,
+        ).log()
         output_path = os.path.join(
             sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl"
         )
@@ -150,6 +155,11 @@ class SearcherModV1(SearcherModScheme):
                 sink=push,
                 seen_trajectories=seen_trajectories,
             )
+
+        Logger(
+            f"Finished deep search on shard {shard_id}",
+            Logger.Levels.debug,
+        ).log()
 
     # ------------------------------------------------------------------
     # Producer
@@ -223,11 +233,16 @@ class SearcherModV1(SearcherModScheme):
 
                 # Case 2: partial coverage — emit patch.
                 try:
-                    handler = TrajectoryAttributesHandler.from_cmf(
-                        shard.cmf, traj, start,
-                        constant=primary_sympy,
-                        searchable=shard,
-                    )
+                    with Logger.watchdog(
+                        f"Tier-1 trajectory compute (shard {shard_id})",
+                        logging_config.WATCHDOG_TRAJECTORY_SECONDS,
+                        detail=lambda: f"traj_id={trajectory_id} start={start_t} direction={dir_t}",
+                    ):
+                        handler = TrajectoryAttributesHandler.from_cmf(
+                            shard.cmf, traj, start,
+                            constant=primary_sympy,
+                            searchable=shard,
+                        )
                 except Exception as e:
                     Logger(
                         f"Handler error — shard {shard_id}, traj={traj}, start={start}: {e}",
@@ -248,21 +263,26 @@ class SearcherModV1(SearcherModScheme):
 
             # Case 3: new trajectory.
             try:
-                handler = TrajectoryAttributesHandler.from_cmf(
-                    shard.cmf, traj, start,
-                    constant=None,
-                    searchable=shard,
-                )
-                dto = build_trajectory_dto(
-                    handler,
-                    cmf_id=cmf_id,
-                    shard_id=shard_id,
-                    cmf_name=shard.cmf_name,
-                    shard_encoding_str=shard_encoding_str,
-                    start=start,
-                    direction=traj,
-                    constants=identified_consts,  # Constant objects → keys are c.name
-                )
+                with Logger.watchdog(
+                    f"Tier-1 trajectory compute (shard {shard_id})",
+                    logging_config.WATCHDOG_TRAJECTORY_SECONDS,
+                    detail=lambda: f"traj_id={trajectory_id} start={start_t} direction={dir_t}",
+                ):
+                    handler = TrajectoryAttributesHandler.from_cmf(
+                        shard.cmf, traj, start,
+                        constant=None,
+                        searchable=shard,
+                    )
+                    dto = build_trajectory_dto(
+                        handler,
+                        cmf_id=cmf_id,
+                        shard_id=shard_id,
+                        cmf_name=shard.cmf_name,
+                        shard_encoding_str=shard_encoding_str,
+                        start=start,
+                        direction=traj,
+                        constants=identified_consts,  # Constant objects → keys are c.name
+                    )
             except Exception as e:
                 Logger(
                     f"Handler error — shard {shard_id}, traj={traj}, start={start}: {e}",

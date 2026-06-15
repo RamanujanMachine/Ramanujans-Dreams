@@ -251,37 +251,37 @@ if __name__ == "__main__":
     #     1_000, "15D_Realistic_Dense",
     #     matrix=np.array([[1, 0, 0], [0, 1, 0], [7, -11, 2], [-7, 11, -2]])
     # )
-    from dreamer import config
-    config.configure(
-        system={
-            'EXPORT_CMFS': './CMFs',  # export CMF as objects to directory: ./CMFs
-            'EXPORT_ANALYSIS_PRIORITIES': './analysis priorities',
-            # export shards found in analysis into: ./analysis priorities
-            'EXPORT_SEARCH_RESULTS': './search results',  # export the search results into: ./search results
-            'PATH_TO_SEARCHABLES': './spaces'  # export all shard to this directory: ./spaces
-        },
-        analysis={
-            # ignore shards with less than 0.1% identified trajectories as converge to the constant
-            'IDENTIFY_THRESHOLD': 1e-3,
-            # number of trajectories to be auto-generated in analysis
-            # 'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func_analysis
-        },
-        extraction={
-            'INIT_POINT_MAX_COORD': 2,
-            # In this case this indicates usage of pFq symmetries utilization to reduce the number of shards
-            'IGNORE_DUPLICATE_SEARCHABLES': True
-        },
-        search={
-            # number of trajectories to be auto-generated in search if needed by the module
-            # 'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func,
-            'DEFAULT_USES_INV_T': True,
-            'MAX_TRAJECTORY_LENGTH': 1_000,
-            # 'DEPTH_FROM_TRAJECTORY_LEN': depth_from_len
-        },
-        logging={
-            'GENERATE_LOGS': True
-        }
-    )
+    # from dreamer import config
+    # config.configure(
+    #     system={
+    #         'EXPORT_CMFS': './CMFs',  # export CMF as objects to directory: ./CMFs
+    #         'EXPORT_ANALYSIS_PRIORITIES': './analysis priorities',
+    #         # export shards found in analysis into: ./analysis priorities
+    #         'EXPORT_SEARCH_RESULTS': './search results',  # export the search results into: ./search results
+    #         'PATH_TO_SEARCHABLES': './spaces'  # export all shard to this directory: ./spaces
+    #     },
+    #     analysis={
+    #         # ignore shards with less than 0.1% identified trajectories as converge to the constant
+    #         'IDENTIFY_THRESHOLD': 1e-3,
+    #         # number of trajectories to be auto-generated in analysis
+    #         # 'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func_analysis
+    #     },
+    #     extraction={
+    #         'INIT_POINT_MAX_COORD': 2,
+    #         # In this case this indicates usage of pFq symmetries utilization to reduce the number of shards
+    #         'IGNORE_DUPLICATE_SEARCHABLES': True
+    #     },
+    #     search={
+    #         # number of trajectories to be auto-generated in search if needed by the module
+    #         # 'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func,
+    #         'DEFAULT_USES_INV_T': True,
+    #         'MAX_TRAJECTORY_LENGTH': 1_000,
+    #         # 'DEPTH_FROM_TRAJECTORY_LEN': depth_from_len
+    #     },
+    #     logging={
+    #         'GENERATE_LOGS': True
+    #     }
+    # )
     run_diagnostic_dashboard(
         100_000, "", matrix = np.array([[0, -1, 0, 0, 0, 0, 1],
      [-1, 0, 0, 0, 0, 0, 0],

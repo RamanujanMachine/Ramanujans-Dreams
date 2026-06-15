@@ -15,6 +15,7 @@ from typing import Dict, List, Set
 
 from dreamer.configs import config
 from dreamer.configs.system import sys_config
+from dreamer.configs.logging import logging_config
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.search.methods.flatland.parallel_eval import make_shared_eval_pool
@@ -92,6 +93,10 @@ class GradientAscentMod(SearcherModScheme):
     ) -> None:
         """Run gradient ascent for each identified constant of a single shard."""
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
+        Logger(
+            f"Starting Gradient Ascent search on shard {shard_id} (cmf={cmf_id})",
+            Logger.Levels.debug,
+        ).log()
         output_path = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl")
         seen_trajectories = load_seen_trajectories(output_path)
 
@@ -108,7 +113,11 @@ class GradientAscentMod(SearcherModScheme):
         )
 
         try:
-            with worker_pool(
+            with Logger.watchdog(
+                f"Gradient Ascent shard search (shard {shard_id})",
+                logging_config.WATCHDOG_TRAJECTORY_SECONDS,
+                detail=lambda: f"shard={shard_id} cmf={cmf_id}",
+            ), worker_pool(
                 num_workers=num_workers,
                 worker_fn=compute_tier2_for_item,
                 writer_fn=write_jsonl_line,
@@ -140,3 +149,8 @@ class GradientAscentMod(SearcherModScheme):
                 eval_pool.join()
             if pq_manager is not None:
                 pq_manager.shutdown()
+
+        Logger(
+            f"Finished Gradient Ascent search on shard {shard_id}",
+            Logger.Levels.debug,
+        ).log()

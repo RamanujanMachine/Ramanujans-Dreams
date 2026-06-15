@@ -290,6 +290,7 @@ def compute_attributes(
     specs,
     on_error: str = "store",
     context: Optional[dict] = None,
+    watchdog_detail: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Compute many attributes and collect them into a dict keyed by name.
 
@@ -317,6 +318,11 @@ def compute_attributes(
         shard-level state into predicates that need it (e.g. the set of
         top-N trajectory ids for an ``if_top_n_delta`` gate).  Single-arg
         predicates ignore it.
+    watchdog_detail:
+        Optional descriptor (e.g. ``"traj_id=… start=… direction=…"``) appended
+        to the per-attribute watchdog warning so a heavy/stuck attribute (e.g.
+        ``asymptotics``) can be traced back to its trajectory.  ``None`` keeps
+        the warning generic.
 
     Returns
     -------
@@ -337,7 +343,14 @@ def compute_attributes(
             continue
 
         try:
-            out[name] = compute_attribute(handler, name)
+            from dreamer.utils.logger import Logger
+            from dreamer.configs.logging import logging_config
+            with Logger.watchdog(
+                f"attribute:{name}",
+                logging_config.WATCHDOG_ATTRIBUTE_SECONDS,
+                detail=watchdog_detail,
+            ):
+                out[name] = compute_attribute(handler, name)
         except Exception as exc:  # pragma: no cover — behaviour driven by tests
             if on_error == "raise":
                 raise

@@ -78,6 +78,56 @@ class Shard(Searchable, JSONable):
         )
 
     @classmethod
+    def from_start_and_trajectory(cls, cmf_data: CMFData,
+                                  constants: Union[Constant, List[Constant]],
+                                  start: Position, trajectory: Position, *,
+                                  hyperplanes: Optional[List[Hyperplane]] = None) -> 'Shard':
+        """Build the shard that contains ``start`` after one step along ``trajectory``.
+
+        The shard identity is its encoding (sign vector) ``sign(hp_i(point))`` over the
+        CMF's canonically-ordered hyperplanes.  A ``start`` that lies *on* a hyperplane has
+        a zero sign there, so its shard is ambiguous.  Stepping once along the full
+        trajectory vector (``start + trajectory``) moves off the border into the interior;
+        the encoding is computed from that stepped point, while the originally provided
+        ``start`` is kept as the shard's interior/start point.
+
+        :param cmf_data: The CMFData (CMF object + shift) to build the shard in.
+        :param constants: A constant or list of constants to search for in the shard.
+        :param start: The exact start point chosen by the user (absolute coordinates); may
+            lie on a shard border.  Kept verbatim as the shard's start point.
+        :param trajectory: The trajectory direction; one full step ``start + trajectory``
+            must reach a strictly-interior point of a shard.
+        :param hyperplanes: Optional pre-computed canonical hyperplanes; defaults to
+            ``extract_cmf_hyperplanes(cmf_data)``.
+        :raises ValueError: If ``start + trajectory`` lies on any hyperplane, i.e. one step
+            does not reach a legal interior point of a shard.
+        :return: The reconstructed :class:`Shard` carrying the derived encoding.
+        """
+        # Local import to avoid a circular import (extractor imports Shard).
+        from dreamer.extraction.extractor import extract_cmf_hyperplanes
+
+        hps = hyperplanes if hyperplanes is not None else extract_cmf_hyperplanes(cmf_data)
+        symbols = list(cmf_data.cmf.matrices.keys())
+
+        # One step along the trajectory, in absolute (unshifted) coordinates.  Evaluating
+        # the unshifted hyperplane expressions here matches the sign convention used by
+        # generate_matrices / in_space after the internal apply_shift.
+        stepped = {s: sp.sympify(start[s]) + sp.sympify(trajectory[s]) for s in symbols}
+
+        encoding, on_boundary = cls.encoding_at(hps, stepped)
+        if on_boundary:
+            raise ValueError(
+                f"start + trajectory = {stepped} lies on hyperplane(s) {on_boundary}; "
+                "one step does not reach a legal interior point of a shard — "
+                "choose a different trajectory or start."
+            )
+
+        return cls.from_cmf_data(
+            cmf_data, constants, hps, encoding, start,
+            hyperplanes_already_shifted=False,
+        )
+
+    @classmethod
     def from_matrices(cls, cmf: CMF,
                  constants: Union[Constant, List[Constant]],
                  A: np.ndarray, b: np.ndarray,
@@ -128,6 +178,35 @@ class Shard(Searchable, JSONable):
         if not self.start_coord:
             return Position({s: sp.Integer(0) for s in self.symbols})
         return Position({sym: self.start_coord[sym] for sym in self.symbols})
+
+    @staticmethod
+    def encoding_at(
+            hyperplanes: List[Hyperplane],
+            point: Dict[sp.Symbol, sp.Expr],
+    ) -> Tuple[List[int], List[sp.Expr]]:
+        """
+        Compute the sign vector (shard encoding) of ``point`` against ``hyperplanes``.
+
+        The hyperplane expressions are in absolute (unshifted) coordinates, so ``point``
+        must be given in the same absolute coordinates.  This matches the sign convention
+        used by :meth:`generate_matrices` / :meth:`in_space` after the internal
+        ``apply_shift`` (shifted-hp at ``point - shift`` == unshifted-hp at ``point``).
+        :param hyperplanes: Canonically-ordered hyperplanes of the CMF.
+        :param point: Mapping ``{symbol: value}`` in absolute coordinates.
+        :return: ``(encoding, on_boundary)`` where ``encoding[i]`` is ``+1``/``-1`` (and
+            ``0`` where the point lies exactly on hyperplane ``i``), and ``on_boundary``
+            lists the hyperplane expressions the point lies on (empty when strictly interior).
+        """
+        encoding: List[int] = []
+        on_boundary: List[sp.Expr] = []
+        for hp in hyperplanes:
+            val = sp.sympify(hp.expr.subs({s: point[s] for s in hp.symbols}))
+            if val == 0:
+                on_boundary.append(hp.expr)
+                encoding.append(0)
+            else:
+                encoding.append(1 if val > 0 else -1)
+        return encoding, on_boundary
 
     @staticmethod
     def generate_matrices(

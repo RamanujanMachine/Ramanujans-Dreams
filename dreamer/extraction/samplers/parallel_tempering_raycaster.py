@@ -534,7 +534,7 @@ class ParallelTemperingSampler(Sampler):
             # volume-scaled quota, floored at 5 so a near-zero-volume cone still asks for >=5
             quota = requested if exact else max(int(requested * self.fraction * 1.05), 5)
         else:
-            quota = int(compute_n_samples)
+            quota = int(compute_n_samples * 1.05)
         if quota <= 0 or self.d_flat == 0:
             Logger(
                 f"ParallelTemperingSampler: nothing to sample (quota={quota}, d_flat={self.d_flat}); "
@@ -603,7 +603,7 @@ class ParallelTemperingSampler(Sampler):
             Logger(
                 f"PT walk exhausted {max_steps} steps. Found {n_unique} points "
                 f"(short of quota {quota}). Returning partial harvest.",
-                Logger.Levels.warning,
+                Logger.Levels.debug,
             ).log()
 
         # 4. Sort the valid harvest by ascending L2 norm (lowest-norm directions first).

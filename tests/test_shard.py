@@ -8,6 +8,7 @@ from ramanujantools.cmf import pFq as rt_pFq
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.extraction.shard import Shard
 from dreamer.utils.storage import Exporter, Importer, Formats
+from dreamer.utils.types import CMFData
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +242,76 @@ class TestTrajectoryValidity:
 
         assert shard.is_valid_trajectory(_point(symbols, [1, 2]))
         assert not shard.is_valid_trajectory(_point(symbols, [-1, 2]))
+
+
+class TestFromStartAndTrajectory:
+    """Derive a shard's encoding from a user start point + one step along a trajectory."""
+
+    def _encoding_at(self, hyperplanes, point):
+        """Reference encoding: sign of each hyperplane evaluated at ``point``."""
+        return tuple(
+            1 if hp.expr.subs({s: point[s] for s in hp.symbols}) > 0 else -1
+            for hp in hyperplanes
+        )
+
+    def test_interior_start_matches_pointwise_encoding(self, simple_cmf, const_e, symbols):
+        s0, s1 = symbols
+        hps = [Hyperplane(s0, symbols), Hyperplane(s1, symbols), Hyperplane(s0 + s1 - 10, symbols)]
+        cmf_data = CMFData(cmf=simple_cmf, shift=_point(symbols, [0, 0]))
+        start = _point(symbols, [3, 3])
+        traj = _point(symbols, [1, 1])
+
+        shard = Shard.from_start_and_trajectory(cmf_data, const_e, start, traj, hyperplanes=hps)
+
+        # Encoding is taken at the stepped point [4, 4].
+        assert shard.encoding == self._encoding_at(hps, _point(symbols, [4, 4]))
+        # The user's start point is kept verbatim as the shard start.
+        assert shard.get_interior_point()[s0] == 3
+        assert shard.get_interior_point()[s1] == 3
+        assert shard.in_space(start)
+
+    def test_boundary_start_steps_into_shard(self, simple_cmf, const_e, symbols):
+        s0, s1 = symbols
+        hps = [Hyperplane(s0, symbols), Hyperplane(s1, symbols), Hyperplane(s0 + s1 - 10, symbols)]
+        cmf_data = CMFData(cmf=simple_cmf, shift=_point(symbols, [0, 0]))
+        # start sits exactly on the s0 = 0 hyperplane (a shard border).
+        start = _point(symbols, [0, 5])
+        traj = _point(symbols, [1, 0])  # one step -> [1, 5], strictly interior
+
+        shard = Shard.from_start_and_trajectory(cmf_data, const_e, start, traj, hyperplanes=hps)
+
+        # Encoding equals the neighbouring interior shard's encoding at [1, 5].
+        assert shard.encoding == self._encoding_at(hps, _point(symbols, [1, 5]))
+        # The boundary start is preserved; a clearly-interior point is inside the shard.
+        assert shard.get_interior_point()[s0] == 0
+        assert shard.in_space(_point(symbols, [3, 3]))
+
+    def test_step_landing_on_hyperplane_raises(self, simple_cmf, const_e, symbols):
+        s0, s1 = symbols
+        hps = [Hyperplane(s0, symbols), Hyperplane(s1, symbols), Hyperplane(s0 + s1 - 10, symbols)]
+        cmf_data = CMFData(cmf=simple_cmf, shift=_point(symbols, [0, 0]))
+        start = _point(symbols, [0, 5])
+        # Step parallel to the s0 = 0 border -> stepped [0, 6] still on the hyperplane.
+        traj = _point(symbols, [0, 1])
+
+        with pytest.raises(ValueError, match=r"lies on hyperplane"):
+            Shard.from_start_and_trajectory(cmf_data, const_e, start, traj, hyperplanes=hps)
+
+    def test_default_hyperplane_extraction_matches_explicit(self, simple_cmf, const_e, symbols):
+        """Default path (extract_cmf_hyperplanes) agrees with the explicit-hyperplanes path."""
+        from dreamer.extraction.extractor import extract_cmf_hyperplanes
+
+        cmf_data = CMFData(cmf=simple_cmf, shift=_point(symbols, [0, 0]))
+        hps = extract_cmf_hyperplanes(cmf_data)
+        start = _point(symbols, [7, 4])
+        traj = _point(symbols, [1, 2])
+
+        shard_default = Shard.from_start_and_trajectory(cmf_data, const_e, start, traj)
+        shard_explicit = Shard.from_start_and_trajectory(cmf_data, const_e, start, traj, hyperplanes=hps)
+
+        assert shard_default.encoding == shard_explicit.encoding
+        # And the encoding is exactly the pointwise sign at the stepped point [8, 6].
+        assert shard_default.encoding == self._encoding_at(hps, _point(symbols, [8, 6]))
 
 
 # ---------------------------------------------------------------------------

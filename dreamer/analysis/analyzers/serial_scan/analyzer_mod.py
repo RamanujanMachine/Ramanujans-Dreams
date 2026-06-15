@@ -34,6 +34,7 @@ from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs.system import sys_config
 from dreamer.configs import config
+from dreamer.configs.logging import logging_config
 from dreamer.extraction.shard import Shard
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
@@ -195,6 +196,12 @@ class AnalyzerModV1(AnalyzerModScheme):
         The trajectory walk is computed once per trajectory and evaluated
         against every constant via ``build_trajectory_dto(..., constants=...)``.
         """
+        Logger(
+            f"Starting analysis on shard {shard_id} "
+            f"(cmf={cmf_id}, encoding={encoding_str})",
+            Logger.Levels.debug,
+        ).log()
+
         # Use the first constant just to drive the SerialSearcher for pair sampling
         # (trajectory sampling is constant-independent).
         primary_const = shard.consts[0]
@@ -259,21 +266,26 @@ class AnalyzerModV1(AnalyzerModScheme):
                     continue
 
                 try:
-                    handler = TrajectoryAttributesHandler.from_cmf(
-                        shard.cmf, traj, start,
-                        constant=None,  # constant injected per-constant in build_trajectory_dto
-                        searchable=shard,
-                    )
-                    dto = build_trajectory_dto(
-                        handler,
-                        cmf_id=cmf_id,
-                        shard_id=shard_id,
-                        cmf_name=shard.cmf_name,
-                        shard_encoding_str=encoding_str,
-                        start=start,
-                        direction=traj,
-                        constants=shard.consts,  # Constant objects → keys are c.name
-                    )
+                    with Logger.watchdog(
+                        f"Tier-1 trajectory compute (shard {shard_id})",
+                        logging_config.WATCHDOG_TRAJECTORY_SECONDS,
+                        detail=lambda: f"traj_id={tid} start={start_t} direction={dir_t}",
+                    ):
+                        handler = TrajectoryAttributesHandler.from_cmf(
+                            shard.cmf, traj, start,
+                            constant=None,  # constant injected per-constant in build_trajectory_dto
+                            searchable=shard,
+                        )
+                        dto = build_trajectory_dto(
+                            handler,
+                            cmf_id=cmf_id,
+                            shard_id=shard_id,
+                            cmf_name=shard.cmf_name,
+                            shard_encoding_str=encoding_str,
+                            start=start,
+                            direction=traj,
+                            constants=shard.consts,  # Constant objects → keys are c.name
+                        )
                 except Exception as e:
                     Logger(
                         f"Handler error — shard {shard_id}, "
@@ -298,6 +310,11 @@ class AnalyzerModV1(AnalyzerModScheme):
                                 best_delta[c.name] = delta_val
 
                 total += 1
+
+        Logger(
+            f"Finished analysis on shard {shard_id}: {total} trajectories",
+            Logger.Levels.debug,
+        ).log()
 
         # Build the final result: only include constants that passed the threshold.
         result: Dict[Constant, Optional[float]] = {}
