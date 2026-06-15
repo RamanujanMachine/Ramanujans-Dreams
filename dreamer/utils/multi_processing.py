@@ -365,9 +365,20 @@ def compute_tier2_for_item(item):
     ]
     if missing and traj_matrix is not None:
         try:
+            # Descriptor for the per-attribute watchdog so a stuck heavy
+            # attribute (e.g. asymptotics) can be traced to its trajectory.
+            if is_patch:
+                wd_detail = f"traj_id={tid}"
+            else:
+                wd_detail = (
+                    f"traj_id={tid} start={dto_or_patch.start_point} "
+                    f"direction={dto_or_patch.direction}"
+                )
             handler = TrajectoryAttributesHandler(traj_matrix, constant=constant)
             extended_metrics.update(
-                compute_attributes(handler, missing, on_error="store")
+                compute_attributes(
+                    handler, missing, on_error="store", watchdog_detail=wd_detail
+                )
             )
         except Exception as e:
             Logger(

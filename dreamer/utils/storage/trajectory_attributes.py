@@ -499,13 +499,13 @@ class TrajectoryAttributesHandler:
         """
         def _build():
             tmat = self.trajectory_matrix()
-            # Simplify the symbolic form here (lazily) so that the companion matrix
-            # and recurrence coefficients are extracted from a fully-reduced expression.
-            # This is the only place sp.cancel() is needed; from_cmf skips it for speed.
-            if hasattr(tmat, 'applyfunc'):
-                tmat = tmat.applyfunc(sp.cancel)
-            elif hasattr(tmat, 'matrix'):
-                tmat.matrix = tmat.matrix.applyfunc(sp.cancel)
+            # sp.cancel() commented out: LinearRecurrence extracts recurrence
+            # coefficients correctly from the unsimplified symbolic matrix.
+            # Re-enable here if symbolic simplification is needed for Tier-2 attributes.
+            # if hasattr(tmat, 'applyfunc'):
+            #     tmat = tmat.applyfunc(sp.cancel)
+            # elif hasattr(tmat, 'matrix'):
+            #     tmat.matrix = tmat.matrix.applyfunc(sp.cancel)
             return LinearRecurrence(tmat)
         return self._get("linear_recurrence", _build)
 

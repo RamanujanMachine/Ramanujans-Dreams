@@ -72,10 +72,11 @@ def _raw_mcmc_walk(
     adaptive scale-jump, raw gravity + repulsion energy, two-phase log-ratio PID,
     useful-band harvest) except: there is no ``Z`` (the lattice *is* the original space),
     so a proposal must satisfy **both** ``|E v'| <= tol`` (equalities, checked manually)
-    and ``B v' < -tol`` (strict interior).
+    and ``B v' <= 0`` (the **closed** recession cone; a ray parallel to a facet is valid).
 
     :param E: ``(p, d_orig)`` equality rows; a move is rejected unless ``|E v'| <= tol``.
-    :param B: ``(m, d_orig)`` inequality rows; a move is rejected unless ``B v' < -tol``.
+    :param B: ``(m, d_orig)`` inequality rows; a move is rejected only if ``B v' > tol``
+        (closed cone ``B v' <= 0``; ``v == 0`` is excluded by the norm guard).
     :param v0: ``(d_orig,)`` strict-interior integer seed (``E v0 = 0``, ``B v0 < 0``).
     :param quota: target number of useful primitive harvested vectors.
     :param max_steps: hard cap on chain steps.
@@ -166,13 +167,17 @@ def _raw_mcmc_walk(
                 current_max_stride -= 1
             continue
 
-        # ---- Strict interior B v' < -tol ----
+        # ---- Closed recession cone B v' <= 0 (non-strict) ----
+        # A ray with ``B_i v == 0`` runs parallel to facet ``i``; from a strictly-interior
+        # start it stays inside the open shard forever, so the closed cone is the correct
+        # admissible set.  ``acc > tol`` rejects only genuinely-exterior moves; the origin
+        # (v == 0) is excluded by the norm guard below (the sole v == 0 gate now).
         inside = True
         for row in range(m):
             acc = 0.0
             for k in range(d):
                 acc += B[row, k] * v_prop[k]
-            if acc >= -tol:
+            if acc > tol:
                 inside = False
                 break
         if not inside:

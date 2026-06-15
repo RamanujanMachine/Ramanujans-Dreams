@@ -14,7 +14,8 @@ class pFq(Formatter):
                  p: int, q: int, z: sp.Expr | int, shifts: Optional[list] = None,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
-                 use_inv_t: bool = None
+                 use_inv_t: bool = None,
+                 selected_trajectories: Optional[List[Optional[Tuple[Union[int, sp.Rational], ...]]]] = None
                  ):
         """
         Represents a pFq and its CMF + allows conversion to and from JSON.
@@ -24,8 +25,12 @@ class pFq(Formatter):
         :var z: The z value of the pFq.
         :var shifts: The shifts in starting point in the CMF where a sp.Rational indicates a shift.
         While 0 indicates no shift (None if not doesn't matter).
-        :param selected_start_points: Optional list of start points to extract shards from.
-        :param only_selected: If True, only extract shards from the selected start points.
+        :var selected_start_points: Optional list of start points to extract shards from.
+        :var only_selected: If True, only extract shards from the selected start points.
+        :var selected_trajectories: Optional list of trajectories paired 1:1 with
+            ``selected_start_points``.  A non-None trajectory lets a border start point
+            resolve to the correct shard via one step; a None entry uses the start point
+            as-is (must be a strict interior point).
         """
         self.p = p
         self.q = q
@@ -35,7 +40,8 @@ class pFq(Formatter):
             self.shifts = [0] * (self.p + self.q)
 
         super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t,
-                         [[self.__class__.__name__, self.p, self.q, self.z]])
+                         [[self.__class__.__name__, self.p, self.q, self.z]],
+                         selected_trajectories=selected_trajectories)
 
         if self.p <= 0 or self.q <= 0:
             raise ValueError("p and q should be positive integers")
@@ -61,6 +67,7 @@ class pFq(Formatter):
         data['z'] = sp.sympify(data['z']) if isinstance(data['z'], str) else data['z']
         data['shifts'] = cls._shift_from_json(data['shifts'])
         data['selected_start_points'] = cls._selected_start_points_from_json(data['selected_start_points'])
+        data['selected_trajectories'] = cls._selected_trajectories_from_json(data.get('selected_trajectories'))
         return cls(**data)
 
     def _to_json_obj(self) -> dict:
@@ -82,7 +89,8 @@ class pFq(Formatter):
         """
         cmf = rt_pFq(self.p, self.q, self.z)
         shifts = Position({k: v for k, v in zip(cmf.matrices.keys(), self.shifts)})
-        return CMFData(cmf, shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
+        return CMFData(cmf, shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name,
+                       selected_trajectories=self.selected_trajectories)
 
     def __repr__(self):
         return json.dumps(self._to_json_obj())

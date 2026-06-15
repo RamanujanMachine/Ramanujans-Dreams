@@ -1148,10 +1148,43 @@ class TestBestTrajectoryRecord:
 
         class _Const:
             name = "e"
-        record, delta_val = System._System__best_trajectory_record(_Const())
+        record, delta_val = System._System__best_trajectory_record(
+            _Const(), {"cmfA__sh1", "cmfB__sh2"},
+        )
         assert record is not None
         assert record["trajectory_id"] == "b1"
         assert delta_val == pytest.approx(4.7)
+
+    def test_scoped_to_run_shards_ignores_other_runs(self, tmp_path, monkeypatch):
+        """Only shards in *this run's* shard_ids are scanned — a leftover JSONL
+        from a previous run on a different CMF (same constant) must not bleed
+        its (larger) delta into this run's best-delta report.
+        """
+        from dreamer.configs.system import sys_config
+        from dreamer.system.system import System
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+
+        # Run 1 (CMF A) left a high-delta file behind in the flat dir.
+        (tmp_path / "cmfA__sh1.jsonl").write_text(
+            json.dumps({"trajectory_id": "a1", "delta_estimate": {"e": 9.9},
+                        "start_point": [0, 0], "direction": [1, 0]}) + "\n"
+        )
+        # Run 2 (CMF B) — the only shard this run actually searched.
+        (tmp_path / "cmfB__sh2.jsonl").write_text(
+            json.dumps({"trajectory_id": "b1", "delta_estimate": {"e": 1.0},
+                        "start_point": [2, 2], "direction": [0, 1]}) + "\n"
+        )
+
+        class _Const:
+            name = "e"
+        # Scope to run 2's shard only.
+        record, delta_val = System._System__best_trajectory_record(
+            _Const(), {"cmfB__sh2"},
+        )
+        assert record is not None
+        assert record["trajectory_id"] == "b1", "must not pick CMF-A's leftover record"
+        assert delta_val == pytest.approx(1.0)
 
     def test_returns_none_when_dir_missing(self, tmp_path, monkeypatch):
         from dreamer.configs.system import sys_config
@@ -1162,7 +1195,7 @@ class TestBestTrajectoryRecord:
 
         class _Const:
             name = "missing_const"
-        record, delta_val = System._System__best_trajectory_record(_Const())
+        record, delta_val = System._System__best_trajectory_record(_Const(), {"any__sh"})
         assert record is None
         assert delta_val is None
 
@@ -1175,7 +1208,7 @@ class TestBestTrajectoryRecord:
 
         class _Const:
             name = "e"
-        record, delta_val = System._System__best_trajectory_record(_Const())
+        record, delta_val = System._System__best_trajectory_record(_Const(), {"stray"})
         assert record is None
         assert delta_val is None
 
@@ -1192,7 +1225,7 @@ class TestBestTrajectoryRecord:
 
         class _Const:
             name = "e"
-        record, delta_val = System._System__best_trajectory_record(_Const())
+        record, delta_val = System._System__best_trajectory_record(_Const(), {"f"})
         assert record["trajectory_id"] == "has_delta"
         assert delta_val == pytest.approx(1.0)
 
@@ -1912,13 +1945,27 @@ class TestAnalyzerDedup:
         monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
 
         _cmf_id, shard_id, enc_str = derive_cmf_and_shard_ids(simple_shard)
-        pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs(
+
+        # Capture one fixed set of pairs and pin ``sample_pairs`` to it, so the
+        # trajectories the analyzer processes are *exactly* the ones we seed.
+        # The samplers are not yet seeded for determinism (see roadmap backlog),
+        # and the search-stage default (``pt``) differs from
+        # ``analysis.SAMPLING_METHOD`` (``raycast``); without pinning, two
+        # separate sample calls would draw different trajectories and the cache
+        # would miss, defeating the point of this test.
+        fixed_pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs(
             trajectory_generator=analysis_config.NUM_TRAJECTORIES_FROM_DIM,
+            sampling_method=analysis_config.SAMPLING_METHOD,
         )
+        monkeypatch.setattr(
+            SerialSearcher, "sample_pairs",
+            lambda self_, *args, **kwargs: fixed_pairs,
+        )
+
         # JSONL now lives flat under EXPORT_SEARCH_RESULTS.
         jsonl_path = tmp_path / f"{shard_id}.jsonl"
         with open(jsonl_path, "w") as fout:
-            for traj_p, start_p in pairs:
+            for traj_p, start_p in fixed_pairs:
                 start_t = tuple(int(v) for v in start_p.values())
                 dir_t = tuple(int(v) for v in traj_p.values())
                 tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)

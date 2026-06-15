@@ -31,46 +31,47 @@ from ramanujantools import Position
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 
-def extract_cmf_hyperplanes(cmf_data: CMFData) -> List[Hyperplane]:
-    """Compute and return the canonically-ordered hyperplanes of *cmf_data*.
+# TODO: remove this copy
+# def extract_cmf_hyperplanes(cmf_data: CMFData) -> List[Hyperplane]:
+#     """Compute and return the canonically-ordered hyperplanes of *cmf_data*.
 
-    Exposed at module level so callers (e.g. shard reconstruction from a
-    cached ``ShardDTO``) don't need a full ``ShardExtractor`` instance.
+#     Exposed at module level so callers (e.g. shard reconstruction from a
+#     cached ``ShardDTO``) don't need a full ``ShardExtractor`` instance.
 
-    The ordering is deterministic (sorted by ``str(hp.expr)``) and matches
-    what ``ShardExtractor._extract_cmf_hps`` produces, so
-    ``shard_encoding[i]`` unambiguously labels ``hyperplanes[i]``.
-    """
-    cmf = cmf_data.cmf
-    shift = cmf_data.shift
-    symbols = list(cmf.matrices.keys())
-    hps: Set[Hyperplane] = set()
+#     The ordering is deterministic (sorted by ``str(hp.expr)``) and matches
+#     what ``ShardExtractor._extract_cmf_hps`` produces, so
+#     ``shard_encoding[i]`` unambiguously labels ``hyperplanes[i]``.
+#     """
+#     cmf = cmf_data.cmf
+#     shift = cmf_data.shift
+#     symbols = list(cmf.matrices.keys())
+#     hps: Set[Hyperplane] = set()
 
-    for s in symbols:
-        if isinstance(cmf, rt_pFq):
-            det = rt_pFq.determinant(cmf.p, cmf.q, cmf.z, s)
-        else:
-            det = cmf.matrices[s].det()
-        zeros = sp.solve(det)
-        zeros = [Hyperplane(lhs - rhs, symbols) for sol in zeros for lhs, rhs in sol.items()]
-        hps.update(zeros)
+#     for s in symbols:
+#         if isinstance(cmf, rt_pFq):
+#             det = rt_pFq.determinant(cmf.p, cmf.q, cmf.z, s)
+#         else:
+#             det = cmf.matrices[s].det()
+#         zeros = sp.solve(det)
+#         zeros = [Hyperplane(lhs - rhs, symbols) for sol in zeros for lhs, rhs in sol.items()]
+#         hps.update(zeros)
 
-        poles: Set[Hyperplane] = set()
-        for v in cmf.matrices[s].iter_values():
-            if (den := v.as_numer_denom()[1]) == 1:
-                continue
-            solutions = {
-                (sym, sol)
-                for sym in den.free_symbols
-                for sol in sp.solve(sp.simplify(den), sym)
-            }
-            for lhs, rhs in solutions:
-                poles.add(Hyperplane(lhs - rhs, symbols))
-        hps.update(poles)
+#         poles: Set[Hyperplane] = set()
+#         for v in cmf.matrices[s].iter_values():
+#             if (den := v.as_numer_denom()[1]) == 1:
+#                 continue
+#             solutions = {
+#                 (sym, sol)
+#                 for sym in den.free_symbols
+#                 for sol in sp.solve(sp.simplify(den), sym)
+#             }
+#             for lhs, rhs in solutions:
+#                 poles.add(Hyperplane(lhs - rhs, symbols))
+#         hps.update(poles)
 
-    filtered = [hp for hp in hps if hp.apply_shift(shift).is_in_integer_shift()]
-    filtered.sort(key=lambda hp: str(hp.expr))
-    return filtered
+#     filtered = [hp for hp in hps if hp.apply_shift(shift).is_in_integer_shift()]
+#     filtered.sort(key=lambda hp: str(hp.expr))
+#     return filtered
 
 
 def extract_cmf_hyperplanes(cmf_data: CMFData) -> List[Hyperplane]:
@@ -280,23 +281,51 @@ class ShardExtractor(ExtractionScheme):
                     )
 
         if self.cmf_data.selected_points:
-            points = [
-                tuple(coord + shift for coord, shift in zip(p, self.cmf_data.shift.values()))
-                for p in selected
-            ]
+            # Trajectories pair 1:1 with the selected start points.  A None entry (or no
+            # trajectories at all) means "use the start point as-is".  A provided trajectory
+            # disambiguates a border start point by deriving the encoding one step along it.
+            trajectories = self.cmf_data.selected_trajectories
+            if trajectories is None:
+                trajectories = [None] * len(selected)
+            elif len(trajectories) != len(selected):
+                raise ValueError(
+                    f'selected_trajectories length ({len(trajectories)}) must match '
+                    f'selected_start_points length ({len(selected)})'
+                )
+
+            shift_vals = list(self.cmf_data.shift.values())
 
             # validate shards using the sampled points
-            for p in SmartTQDM(points, desc='Computing shard encodings', **sys_config.TQDM_CONFIG):
-                enc = []
-                point_dict = {sym: coord for sym, coord in zip(symbols, p)}
-                for hp in hps:
-                    res = hp.expr.subs(point_dict)
-                    if res == 0:
-                        break
-                    enc.append(1 if res > 0 else -1)
+            for p, traj in SmartTQDM(
+                    list(zip(selected, trajectories)),
+                    desc='Computing shard encodings', **sys_config.TQDM_CONFIG):
+                # Absolute (unshifted) coordinates of the user's start point.
+                abs_point = tuple(coord + shift for coord, shift in zip(p, shift_vals))
+                point_dict = {sym: coord for sym, coord in zip(symbols, abs_point)}
 
-                if len(enc) == len(hps):
-                    shard_encodings[tuple(enc)] = Position(point_dict)
+                if traj is None:
+                    # No trajectory: encode at the start point itself; a point lying on a
+                    # shard border is ambiguous, so skip it (legacy behaviour).
+                    enc, on_boundary = Shard.encoding_at(hps, point_dict)
+                    if on_boundary:
+                        continue
+                else:
+                    # One step along the trajectory (direction is shift-invariant).  The
+                    # stepped point must be a strict interior point of a shard.
+                    stepped_dict = {
+                        sym: coord + step
+                        for sym, coord, step in zip(symbols, abs_point, traj)
+                    }
+                    enc, on_boundary = Shard.encoding_at(hps, stepped_dict)
+                    if on_boundary:
+                        raise ValueError(
+                            f'start point {p} + trajectory {traj} lies on hyperplane(s) '
+                            f'{on_boundary}; one step does not reach a legal interior point '
+                            'of a shard — choose a different trajectory or start point.'
+                        )
+
+                # Keep the user's start point verbatim as the shard's interior/start point.
+                shard_encodings[tuple(enc)] = Position(point_dict)
 
         Logger(
             f'In CMF no. {call_number}: found {len(hps)} hyperplanes and {len(shard_encodings)} shards ',

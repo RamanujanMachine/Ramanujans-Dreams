@@ -16,7 +16,8 @@ class BaseCMF(Formatter):
                  cmf_name: str, cmf: CMF, shifts: Optional[list] = None,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
-                 use_inv_t: bool = None
+                 use_inv_t: bool = None,
+                 selected_trajectories: Optional[List[Optional[Tuple[Union[int, sp.Rational], ...]]]] = None
                  ):
         """
         Represents a general CMF and allows conversion to and from JSON.
@@ -34,7 +35,8 @@ class BaseCMF(Formatter):
         if self.shifts is None:
             self.shifts = [0] * self.cmf.dim()
 
-        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t, [[cmf_name]])
+        super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t, [[cmf_name]],
+                         selected_trajectories=selected_trajectories)
 
         if not isinstance(self.shifts, list) and not isinstance(self.shifts, Position):
             raise ValueError("Shifts should be a list or Position")
@@ -56,6 +58,7 @@ class BaseCMF(Formatter):
         )
         data['shifts'] = cls._shift_from_json(data['shifts'])
         data['selected_start_points'] = cls._selected_start_points_from_json(data['selected_start_points'])
+        data['selected_trajectories'] = cls._selected_trajectories_from_json(data.get('selected_trajectories'))
         return cls(**data)
 
     def _to_json_obj(self) -> dict:
@@ -74,7 +77,8 @@ class BaseCMF(Formatter):
         :return: A Shift CMF object
         """
         shifts = Position({k: v for k, v in zip(self.cmf.matrices.keys(), self.shifts)})
-        return CMFData(self.cmf, shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
+        return CMFData(self.cmf, shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name,
+                       selected_trajectories=self.selected_trajectories)
 
     def __repr__(self):
         return json.dumps(self._to_json_obj())

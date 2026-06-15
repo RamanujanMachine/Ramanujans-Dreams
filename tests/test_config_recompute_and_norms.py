@@ -285,3 +285,22 @@ class TestShardSpaceNorm:
         # A cap below the shortest primitive ray length admits nothing.
         z = snap_to_trajectory(d, geom, 0.5, "l2")
         assert z is None
+
+
+# ===========================================================================
+# Closed recession cone — the zero direction is never inside (not a trajectory)
+# ===========================================================================
+
+class TestZeroDirectionExcluded:
+    def test_is_inside_rejects_zero(self, whole_space_shard):
+        geom = FlatlandGeometry(whole_space_shard)
+        zero = np.zeros(geom.d_flat, dtype=np.int64)
+        nonzero = np.ones(geom.d_flat, dtype=np.int64)
+        assert not geom.is_inside(zero)
+        assert geom.is_inside(nonzero)  # whole space: any non-zero direction is inside
+
+    def test_is_inside_many_rejects_zero_row(self, whole_space_shard):
+        geom = FlatlandGeometry(whole_space_shard)
+        Z = np.array([np.zeros(geom.d_flat), np.ones(geom.d_flat)], dtype=np.int64)
+        mask = geom.is_inside_many(Z)
+        assert mask.tolist() == [False, True]

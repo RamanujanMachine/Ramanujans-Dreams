@@ -15,7 +15,8 @@ class MeijerG(Formatter):
                  m: int, n: int, p: int, q: int, z: sp.Expr | int, shifts: Optional[list] = None,
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
-                 use_inv_t: bool = config.search.DEFAULT_USES_INV_T
+                 use_inv_t: bool = config.search.DEFAULT_USES_INV_T,
+                 selected_trajectories: Optional[List[Optional[Tuple[Union[int, sp.Rational], ...]]]] = None
                  ):
         """
         Represents a pFq and its CMF + allows conversion to and from JSON.
@@ -41,7 +42,8 @@ class MeijerG(Formatter):
             self.shifts = [0] * (self.p + self.q)
 
         super().__init__(const, self.shifts, selected_start_points, only_selected, use_inv_t,
-                         [[self.__class__.__name__, self.m, self.n, self.p, self.q, self.z]])
+                         [[self.__class__.__name__, self.m, self.n, self.p, self.q, self.z]],
+                         selected_trajectories=selected_trajectories)
 
         if not (p > 0 and 0 <= n <= p) or not (q > 0 and 0 <= m <= q):
             raise ValueError("Meijer G must satisfy p > 0, 0 <= n <= p and q > 0, 0 <= m <= q")
@@ -63,6 +65,8 @@ class MeijerG(Formatter):
             data['const'] = data.pop('consts')
         data['z'] = sp.sympify(data['z']) if isinstance(data['z'], str) else data['z']
         data['shifts'] = [sp.sympify(shift) if isinstance(shift, str) else shift for shift in data['shifts']]
+        data['selected_start_points'] = cls._selected_start_points_from_json(data.get('selected_start_points'))
+        data['selected_trajectories'] = cls._selected_trajectories_from_json(data.get('selected_trajectories'))
         return cls(**data)
 
     def _to_json_obj(self) -> dict:
@@ -87,7 +91,8 @@ class MeijerG(Formatter):
         """
         cmf = rt_mg(self.m, self.n, self.p, self.q, self.z)
         shifts = Position({k: v for k, v in zip(cmf.matrices.keys(), self.shifts)})
-        return CMFData(cmf, shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name)
+        return CMFData(cmf, shifts, self.selected_start_points, self.only_selected, self.use_inv_t, self.cmf_name,
+                       selected_trajectories=self.selected_trajectories)
 
     def __repr__(self):
         return json.dumps(self._to_json_obj())

@@ -173,24 +173,26 @@ class SimulatedAnnealingSearch(SearchMethod):
             handler_cache=handler_cache,
         )
 
-        cur_z = self._select_seed(geom, eval_ctx, shard_id, constant)
-        cur_delta, _ = evaluate_in_flatland(cur_z, **eval_ctx)
-        best_delta = cur_delta
-
         T0 = search_config.ANNEAL_T0
         Tmin = search_config.ANNEAL_TMIN
         schedule = search_config.ANNEAL_SCHEDULE
         max_iters = search_config.ANNEAL_MAX_ITERS
         max_doublings = search_config.ANNEAL_MAX_DOUBLINGS
         max_total_steps = search_config.ANNEAL_MAX_TOTAL_STEPS
+        max_reseeds = search_config.ANNEAL_MAX_RESEEDS
         tabu_size = search_config.ANNEAL_TABU_SIZE
-        max_traj_len = search_config.ANNEAL_MAX_TRAJ_LEN
-        traj_norm = search_config.ANNEAL_TRAJ_NORM
+        max_traj_len = search_config.SEARCH_MAX_TRAJ_LEN
+        traj_norm_name = search_config.SEARCH_TRAJ_NORM
+
+        cur_z = self._select_seed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
+        cur_delta, _ = evaluate_in_flatland(cur_z, **eval_ctx)
+        best_delta = cur_delta
 
         T = T0
         iter_left = max_iters
         doubling_count = 0
         total_steps = 0
+        consecutive_failed_reseeds = 0
 
         # Tabu: bounded recent-position list (reference update_old_list_neighs).
         old_pos_list: List[bytes] = [cur_z.tobytes()]
@@ -212,7 +214,7 @@ class SimulatedAnnealingSearch(SearchMethod):
                     continue
                 if cand.tobytes() in old_pos_list:
                     continue
-                if geom.traj_norm(cand, traj_norm) > max_traj_len:
+                if geom.traj_norm(cand, traj_norm_name) > max_traj_len:
                     continue
                 neighbours.append(cand)
 
@@ -220,14 +222,24 @@ class SimulatedAnnealingSearch(SearchMethod):
                 # No valid neighbour: double and continue (reference adaptive scaling).
                 if doubling_count >= max_doublings:
                     doubling_count = 0
-                    fresh = self._try_reseed(geom, eval_ctx, shard_id, constant)
+                    fresh = self._try_reseed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
                     if fresh is not None:
+                        consecutive_failed_reseeds = 0
                         cur_z = fresh
                         cur_delta, _ = evaluate_in_flatland(cur_z, **eval_ctx)
                         # Full tabu clear on reseed: old region's history is
                         # irrelevant to the new starting point and would otherwise
                         # block all of its neighbours (tabu deadlock).
                         old_pos_list = [cur_z.tobytes()]
+                    else:
+                        consecutive_failed_reseeds += 1
+                        if consecutive_failed_reseeds >= max_reseeds:
+                            Logger(
+                                f"Simulated Annealing: {max_reseeds} consecutive failed reseeds "
+                                f"in shard {shard_id} — terminating early.",
+                                Logger.Levels.debug,
+                            ).log()
+                            break
                 else:
                     cur_z = cur_z * 2  # no GCD reduce
                     doubling_count += 1
@@ -279,12 +291,22 @@ class SimulatedAnnealingSearch(SearchMethod):
                 # Adaptive scaling: double on rejection (reference).
                 if doubling_count >= max_doublings:
                     doubling_count = 0
-                    fresh = self._try_reseed(geom, eval_ctx, shard_id, constant)
+                    fresh = self._try_reseed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
                     if fresh is not None:
+                        consecutive_failed_reseeds = 0
                         cur_z = fresh
                         cur_delta, _ = evaluate_in_flatland(cur_z, **eval_ctx)
                         # Full tabu clear on reseed (same reason as above).
                         old_pos_list = [cur_z.tobytes()]
+                    else:
+                        consecutive_failed_reseeds += 1
+                        if consecutive_failed_reseeds >= max_reseeds:
+                            Logger(
+                                f"Simulated Annealing: {max_reseeds} consecutive failed reseeds "
+                                f"in shard {shard_id} — terminating early.",
+                                Logger.Levels.debug,
+                            ).log()
+                            break
                 else:
                     cur_z = cur_z * 2  # no GCD reduce
                     doubling_count += 1
@@ -298,15 +320,26 @@ class SimulatedAnnealingSearch(SearchMethod):
         eval_ctx: dict,
         shard_id: str,
         constant: Constant,
+        max_traj_len: float,
+        traj_norm_name: str,
     ) -> np.ndarray:
         """
-        Pick the first reservoir trajectory (ascending L2 norm) that identifies.
+        Pick the first reservoir trajectory (ascending L2 norm) that identifies
+        *and* has at least one valid neighbour within the trajectory-length cap.
+
+        A seed whose entire neighbourhood is filtered by the traj-len cap would
+        immediately enter the no-neighbours stall loop (doubling → reseed → repeat),
+        causing the 12-hour stall.  Skipping such seeds here ensures every accepted
+        seed can actually make a step.
 
         :param geom: Flatland geometry for the current shard.
         :param eval_ctx: Evaluation context dict (forwarded to evaluate_in_flatland).
         :param shard_id: Shard identifier used in the exception message.
         :param constant: The constant to identify.
-        :raises NoInitialIdentification: if no reservoir trajectory identifies *constant*.
+        :param max_traj_len: Maximum allowed trajectory norm (``SEARCH_MAX_TRAJ_LEN``).
+        :param traj_norm_name: Which norm to use (``SEARCH_TRAJ_NORM``).
+        :raises NoInitialIdentification: if no reservoir trajectory identifies *constant*
+            while also having a reachable neighbourhood.
         :return: Flatland coordinate vector of the seed trajectory.
         """
         trajectories = ShardSamplingOrchestrator(self.space).sample_trajectories(
@@ -322,6 +355,14 @@ class SimulatedAnnealingSearch(SearchMethod):
             z = geom.to_flatland(t)
             if not np.any(z):
                 continue
+            # Skip seeds whose entire neighbourhood is outside the traj-len cap —
+            # they would immediately enter the no-neighbours stall cycle.
+            has_valid_neighbour = any(
+                geom.is_inside(nb) and geom.traj_norm(nb, traj_norm_name) <= max_traj_len
+                for nb in geom.perturbations(z, reduce=False)
+            )
+            if not has_valid_neighbour:
+                continue
             _, identified = evaluate_in_flatland(z, **eval_ctx)
             if identified:
                 return z
@@ -334,6 +375,8 @@ class SimulatedAnnealingSearch(SearchMethod):
         eval_ctx: dict,
         shard_id: str,
         constant: Constant,
+        max_traj_len: float,
+        traj_norm_name: str,
     ) -> Optional[np.ndarray]:
         """
         Attempt to find a fresh seed when the doubling budget is exhausted.
@@ -342,9 +385,11 @@ class SimulatedAnnealingSearch(SearchMethod):
         :param eval_ctx: Evaluation context dict.
         :param shard_id: Shard identifier.
         :param constant: The constant to identify.
+        :param max_traj_len: Maximum allowed trajectory norm.
+        :param traj_norm_name: Which norm to use.
         :return: New flatland seed vector, or ``None`` if no identifying trajectory found.
         """
         try:
-            return self._select_seed(geom, eval_ctx, shard_id, constant)
+            return self._select_seed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
         except NoInitialIdentification:
             return None

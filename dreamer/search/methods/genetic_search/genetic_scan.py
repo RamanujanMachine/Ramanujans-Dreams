@@ -323,7 +323,7 @@ class GeneticSearch(SearchMethod):
             return np.zeros(Z.shape[0], dtype=bool)
         nonzero = np.any(Z != 0, axis=1)
         inside = geom.is_inside_many(Z)
-        within = geom.traj_norm_many(Z, search_config.GA_TRAJ_NORM) <= search_config.GA_MAX_TRAJ_LEN
+        within = geom.traj_norm_many(Z, search_config.SEARCH_TRAJ_NORM) <= search_config.SEARCH_MAX_TRAJ_LEN
         return nonzero & inside & within
 
     def _valid_genome(self, z: np.ndarray, geom: FlatlandGeometry) -> bool:

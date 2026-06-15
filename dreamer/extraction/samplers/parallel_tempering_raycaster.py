@@ -78,7 +78,9 @@ def _pt_mcmc_walk(
       needle auto-expands until it reaches its (lowest available) integer points.
 
     :param Z: ``(d_orig, d_flat)`` integer basis of the equality solution lattice.
-    :param B: ``(m, d_flat)`` facet normals; strict interior iff ``B z < 0``.
+    :param B: ``(m, d_flat)`` facet normals; the walk admits the **closed** recession
+        cone ``B z <= 0`` (a ray parallel to a facet, ``B_i z == 0``, is valid). ``B`` is
+        integer-valued (``B_orig @ Z @ U^T``) so the test is exact.
     :param z0: ``(d_flat,)`` strict-interior integer seed (shared start for all replicas).
     :param v0: ``Z @ z0`` original-space seed.
     :param beta_ladder: ``(n_rep,)`` temperature coefficients, descending from 1.0 to 0.0.
@@ -99,7 +101,8 @@ def _pt_mcmc_walk(
     :param initial_harvest_limit: starting (tight) norm limit for banking; expands on stall.
     :param harvest_expansion_factor: multiplicative relaxation of the harvest limit per
         stalled monitor window (>= 1).
-    :param tol: feasibility tolerance; a move is rejected unless ``B z' < -tol``.
+    :param tol: feasibility tolerance; a move is rejected only if ``B z' > tol`` (i.e. the
+        closed cone ``B z' <= 0`` is admitted; ``v == 0`` is excluded by the norm guard).
     :param rng_seed: if ``>= 0``, seeds numba's RNG for reproducibility.
     :return: ``(harvest_buffer, harvest_count, accept_rate)`` — buffer is
         ``(quota, d_orig)`` int64; ``accept_rate`` is accepted/proposed over all replicas.
@@ -199,16 +202,22 @@ def _pt_mcmc_walk(
                     stride[i] -= 1
                 continue
 
-            # ---- Strict interior (B z' < -tol) ----
+            # ---- Closed recession cone (B z' <= 0) ----
             # B is the conditioner's flatland-projected constraint matrix (B_reduced,
             # shape m x d_flat): this unrolled accumulation IS the precomputed projection
-            # B_Z @ z_prop — there is no per-step B @ (Z @ z) to eliminate.
+            # B_Z @ z_prop — there is no per-step B @ (Z @ z) to eliminate.  We admit the
+            # *closed* cone (non-strict, ``B z <= 0``): a ray with ``B_i z == 0`` runs
+            # parallel to facet ``i`` and, from a strictly-interior start, stays inside the
+            # open shard forever (the recession cone is closed).  B is integer-valued
+            # (B_orig @ Z @ U^T, all integer), so ``acc`` is exact and ``acc > tol`` rejects
+            # only genuinely-exterior moves.  The origin (v == 0) is excluded by the norm
+            # guard below — it is the sole v == 0 gate now that the test is non-strict.
             inside = True
             for row in range(m):
                 acc = 0.0
                 for k in range(d_flat):
                     acc += B[row, k] * z_prop[k]
-                if acc >= -tol:
+                if acc > tol:
                     inside = False
                     break
             if not inside:
@@ -534,7 +543,7 @@ class ParallelTemperingSampler(Sampler):
             # volume-scaled quota, floored at 5 so a near-zero-volume cone still asks for >=5
             quota = requested if exact else max(int(requested * self.fraction * 1.05), 5)
         else:
-            quota = int(compute_n_samples)
+            quota = int(compute_n_samples * 1.05)
         if quota <= 0 or self.d_flat == 0:
             Logger(
                 f"ParallelTemperingSampler: nothing to sample (quota={quota}, d_flat={self.d_flat}); "
@@ -603,7 +612,7 @@ class ParallelTemperingSampler(Sampler):
             Logger(
                 f"PT walk exhausted {max_steps} steps. Found {n_unique} points "
                 f"(short of quota {quota}). Returning partial harvest.",
-                Logger.Levels.warning,
+                Logger.Levels.debug,
             ).log()
 
         # 4. Sort the valid harvest by ascending L2 norm (lowest-norm directions first).

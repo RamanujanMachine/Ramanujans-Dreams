@@ -48,7 +48,9 @@ def test_shard_sampler_translates_pipeline_output(monkeypatch, cmf_2d, symbols):
     s0 = symbols[0]
     hps = [Hyperplane(s0, symbols)]
     shard = Shard(cmf_2d, e, hps, [1], _position(symbols, [0, 0]), _position(symbols, [1, 0]))
-    sampler = ShardSamplingOrchestrator(shard)
+    # Pin the raycast engine: this test monkeypatches RaycastPipelineSampler.harvest, so it
+    # must use that engine regardless of the production default (search_config.SAMPLING_METHOD).
+    sampler = ShardSamplingOrchestrator(shard, sampling_method="raycast")
 
     sampled = sampler.sample_trajectories(lambda d: d * 4)
 
@@ -89,5 +91,8 @@ def test_shard_sampler_forwards_exact_flag(monkeypatch, cmf_2d, symbols):
     hps = [Hyperplane(s0, symbols)]
     shard = Shard(cmf_2d, e, hps, [1], _position(symbols, [0, 0]), _position(symbols, [1, 0]))
 
-    _ = ShardSamplingOrchestrator(shard).sample_trajectories(lambda d: d, exact=True)
+    # Pin raycast (the monkeypatched engine) so the test is independent of the default.
+    _ = ShardSamplingOrchestrator(shard, sampling_method="raycast").sample_trajectories(
+        lambda d: d, exact=True
+    )
     assert observed_exact[0] is True

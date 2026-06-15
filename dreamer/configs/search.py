@@ -91,15 +91,15 @@ class SearchConfig(Configurable):
         metadata={"description": "Tolerance used when deciding whether a searched trajectory identifies the constant."},
     )
 
-    COMPUTE_EIGEN_VALUES: bool = field(
+    COMPUTE_EIGEN_VALUES: bool = field( # deprecated
         default=False,
         metadata={"description": "Compute eigenvalue diagnostics for trajectory matrices in search results."},
     )
-    COMPUTE_GCD_SLOPE: bool = field(
+    COMPUTE_GCD_SLOPE: bool = field( # deprecated
         default=False,
         metadata={"description": "Compute gcd-slope diagnostics for search trajectories."},
     )
-    COMPUTE_LIMIT: bool = field(
+    COMPUTE_LIMIT: bool = field( # deprecated
         default=False,
         metadata={"description": "Compute explicit limit approximations during search evaluation."},
     )
@@ -213,12 +213,16 @@ class SearchConfig(Configurable):
         metadata={"description": "Maximum number of accepted moves (primary stop condition). Primary termination criterion; Tmin is a secondary safety net."},
     )
     ANNEAL_MAX_DOUBLINGS: int = field(
-        default=10,
-        metadata={"description": "Cap on consecutive trajectory length-doublings on rejection before reseeding."},
+        default=50,
+        metadata={"description": "Cap on consecutive trajectory length-doublings on rejection before reseeding. Reference effectively uses infinity; 50 keeps reseeding rare while acting as a safety net."},
     )
     ANNEAL_MAX_TOTAL_STEPS: int = field(
-        default=50_000,
-        metadata={"description": "Hard ceiling on total while-loop iterations (accepted + rejected) to prevent infinite stalls. Should be large enough never to trigger in normal operation; exists as a safety net for tabu-deadlock edge cases."},
+        default=10_000,
+        metadata={"description": "Hard ceiling on total while-loop iterations (accepted + rejected). Exists as a safety net for stalls; fires in seconds/minutes rather than hours so the shard is abandoned quickly when stuck."},
+    )
+    ANNEAL_MAX_RESEEDS: int = field(
+        default=5,
+        metadata={"description": "Hard cap on consecutive failed _try_reseed calls (returning None) per SA run. After this many consecutive failures the run terminates, preventing the PT sampler being called indefinitely."},
     )
     ANNEAL_TABU_SIZE: int = field(
         default=70,
@@ -228,28 +232,22 @@ class SearchConfig(Configurable):
         default=10,
         metadata={"description": "Number of initial candidate trajectories sampled for the SA seed selection."},
     )
-    ANNEAL_MAX_TRAJ_LEN: int = field(
-        default=35,
-        metadata={"description": "Maximum allowed trajectory length in real shard space. Neighbours exceeding this bound are skipped, preventing expensive trajectory_matrix() calls for large-coordinate directions. Interpretation controlled by ANNEAL_TRAJ_NORM."},
-    )
-    ANNEAL_TRAJ_NORM: str = field(
-        default="linf",
-        metadata={"description": "Norm used to measure trajectory length for the ANNEAL_MAX_TRAJ_LEN cap. 'linf' = max absolute coordinate (default; directly bounds trajectory_matrix cost), 'l1' = sum of absolute coords (= exact trajectory_matrix symbolic mult count), 'l2' = Euclidean norm."},
-    )
     ANNEAL_NUM_EVAL_WORKERS: int = field(
         default=0,
         metadata={"description": "Worker cap for evaluating the neighbour batch in each SA step. 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},
     )
 
-    # ============================== Genetic search — trajectory cap + parallelism ==============================
-    GA_MAX_TRAJ_LEN: int = field(
-        default=35,
-        metadata={"description": "Maximum allowed trajectory length for GA genomes in real shard space. Genomes and neighbours exceeding this bound are rejected/resampled. Interpretation controlled by GA_TRAJ_NORM."},
+    # ============================== Shared trajectory-length cap (all search methods) ==============================
+    SEARCH_MAX_TRAJ_LEN: float = field(
+        default=35.0,
+        metadata={"description": "Maximum real-space trajectory norm applied by all search methods (SA, GA, Gradient Ascent). Trajectories/neighbours/genomes exceeding this bound are skipped or resampled. Bounding trajectory length directly bounds trajectory_matrix() symbolic cost. Interpretation controlled by SEARCH_TRAJ_NORM."},
     )
-    GA_TRAJ_NORM: str = field(
+    SEARCH_TRAJ_NORM: str = field(
         default="linf",
-        metadata={"description": "Norm used to measure trajectory length for the GA_MAX_TRAJ_LEN cap. Same options as ANNEAL_TRAJ_NORM: 'linf', 'l1', 'l2'."},
+        metadata={"description": "Norm used to measure trajectory length for the SEARCH_MAX_TRAJ_LEN cap, shared by all search methods. 'linf' = max absolute coordinate (tightest bound on trajectory_matrix cost), 'l1' = sum of abs coords (exact symbolic mult count), 'l2' = Euclidean norm."},
     )
+
+    # ============================== Genetic search — parallelism ==============================
     GA_NUM_EVAL_WORKERS: int = field(
         default=0,
         metadata={"description": "Worker cap for evaluating GA population batches (initial population and per-generation children). 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},
@@ -259,7 +257,7 @@ class SearchConfig(Configurable):
     # Gradient *Ascent* over the continuous trajectory-direction angle (larger delta is
     # better).  delta is continuous and generally smooth in the angle, so the optimizer
     # works in a real-valued direction space; each updated direction is realized as the
-    # angle-best integer trajectory whose L2 norm does not exceed GRAD_MAX_NORM.
+    # angle-best integer trajectory whose norm does not exceed SEARCH_MAX_TRAJ_LEN.
     GRAD_VARIANT: str = field(
         default="adam",
         metadata={"description": "Gradient-ascent optimizer variant: 'vanilla' | 'momentum' | 'rmsprop' | 'adam'."},
@@ -300,14 +298,6 @@ class SearchConfig(Configurable):
         default=1e-4,
         metadata={"description": "Convergence stop: terminate when the estimated gradient L2 norm falls below this (no better step to take)."},
     )
-    GRAD_MAX_NORM: float = field(
-        default=60.0,
-        metadata={"description": "Maximum trajectory length (in real shard space) of a realized integer trajectory direction when snapping a real direction onto the lattice. Interpretation controlled by GRAD_TRAJ_NORM."},
-    )
-    GRAD_TRAJ_NORM: str = field(
-        default="l2",
-        metadata={"description": "Norm used to measure trajectory length for the GRAD_MAX_NORM cap, in real shard space. Same options as ANNEAL_TRAJ_NORM: 'linf', 'l1', 'l2' (default 'l2' — gradient ascent reasons about Euclidean direction length)."},
-    )
     GRAD_FD_ANGLE: float = field(
         default=0.1,
         metadata={"description": "Finite-difference rotation angle (radians) used to estimate the gradient by forward differences in angle space."},
@@ -345,14 +335,14 @@ class SearchConfig(Configurable):
     )
 
     SAMPLING_METHOD: str = field(
-        default="raycast",
+        default="pt",
         metadata={
             "description": (
                 "Trajectory-sampling engine used by ShardSamplingOrchestrator: "
-                "'raycast' (default; continuous guide-ray + raycast pipeline, "
+                "'raycast' (continuous guide-ray + raycast pipeline, "
                 "RaycastPipelineSampler), 'discrete' (DiscreteMCMCSampler: a "
                 "repulsive / PID-annealed discrete lattice walk), or 'pt' "
-                "(ParallelTemperingSampler: replica-exchange lattice walk that "
+                "(default; ParallelTemperingSampler: replica-exchange lattice walk that "
                 "beats the single chain in tightly constrained cones).  The "
                 "'discrete' / 'pt' engines harvest primitive integer directions "
                 "with original-space norm <= MAX_TRAJECTORY_LENGTH."
