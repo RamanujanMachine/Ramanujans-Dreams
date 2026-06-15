@@ -160,15 +160,24 @@ class Shard(Searchable, JSONable):
     def is_valid_trajectory(self, trajectory: Position) -> bool:
         """
         Checks if a trajectory ray remains inside the shard as it scales to infinity.
-        Mathematically, the vector v must satisfy A @ v <= 0.
+        Mathematically, the vector v must be a non-zero recession direction, i.e.
+        ``v != 0`` and ``A @ v <= 0`` (the *closed* recession cone): a direction with
+        ``A_i v == 0`` runs parallel to facet ``i`` and, from a strictly-interior start,
+        stays inside the open shard forever.  The zero vector is rejected explicitly —
+        it does not move and is not a trajectory (under the non-strict cone ``A @ 0 <= 0``
+        would otherwise pass).
         """
-        if self.is_whole_space:
-            return True
-
         # Ensure we match the symbol ordering of the Shard's A matrix
         v = np.array([trajectory[sym] for sym in self.symbols], dtype=np.float64)
 
-        # Check A @ v <= 0 (allowing a tiny float tolerance)
+        # The zero vector is never a valid trajectory (even in whole space).
+        if not np.any(v):
+            return False
+
+        if self.is_whole_space:
+            return True
+
+        # Check A @ v <= 0 (closed recession cone, allowing a tiny float tolerance)
         return np.all(self.A @ v <= 1e-9)
 
     def get_interior_point(self) -> Position:

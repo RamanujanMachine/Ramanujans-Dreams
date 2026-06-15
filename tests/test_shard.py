@@ -243,6 +243,27 @@ class TestTrajectoryValidity:
         assert shard.is_valid_trajectory(_point(symbols, [1, 2]))
         assert not shard.is_valid_trajectory(_point(symbols, [-1, 2]))
 
+    def test_face_parallel_trajectory_is_valid(self, simple_cmf, const_e, symbols):
+        """A direction running *parallel* to a facet (``A_i v == 0``) is a valid
+        recession direction: the closed cone ``A v <= 0`` admits the boundary."""
+        s0, s1 = symbols
+        hps = [Hyperplane(s0, symbols), Hyperplane(s1, symbols)]
+        shard = _build_shard(simple_cmf, const_e, hps, _point(symbols, [0, 0]), _point(symbols, [1, 1]))
+
+        # [1, 0] / [0, 1] run along a facet of the {s0>0, s1>0} cone -> on the cone
+        # boundary, but still inside the open shard forever from a strict interior start.
+        assert shard.is_valid_trajectory(_point(symbols, [1, 0]))
+        assert shard.is_valid_trajectory(_point(symbols, [0, 1]))
+
+    def test_zero_trajectory_is_invalid(self, simple_cmf, const_e, symbols):
+        """The zero vector never moves and is not a trajectory, even though
+        ``A @ 0 <= 0`` would trivially pass the non-strict cone test."""
+        s0, s1 = symbols
+        hps = [Hyperplane(s0, symbols), Hyperplane(s1, symbols)]
+        shard = _build_shard(simple_cmf, const_e, hps, _point(symbols, [0, 0]), _point(symbols, [1, 1]))
+
+        assert not shard.is_valid_trajectory(_point(symbols, [0, 0]))
+
 
 class TestFromStartAndTrajectory:
     """Derive a shard's encoding from a user start point + one step along a trajectory."""

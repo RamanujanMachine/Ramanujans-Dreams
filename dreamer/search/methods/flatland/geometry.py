@@ -158,11 +158,16 @@ class FlatlandGeometry:
     def is_inside(self, z: np.ndarray) -> bool:
         """
         :param z: Integer flatland direction.
-        :return: True iff the real direction stays inside the shard cone.
+        :return: True iff the real direction is a non-zero recession direction of the
+            shard cone (``z != 0`` and ``M @ z <= 0``).  The zero vector is rejected: it
+            is not a trajectory, and under the non-strict cone ``M @ 0 <= 0`` would
+            otherwise pass.
         """
+        z = np.asarray(z, dtype=np.float64)
+        if not np.any(z):
+            return False
         if self._M is None:
             return True
-        z = np.asarray(z, dtype=np.float64)
         return bool(np.all(self._M @ z <= self._CONE_TOL))
 
     def is_inside_many(self, Z: np.ndarray) -> np.ndarray:
@@ -170,13 +175,15 @@ class FlatlandGeometry:
         Batch cone-membership test for many flatland directions at once.
 
         :param Z: Integer array of shape ``(k, d_flat)`` — one direction per row.
-        :return: Boolean array of length ``k``; ``True`` where the row is inside
-            the shard cone.
+        :return: Boolean array of length ``k``; ``True`` where the row is a non-zero
+            recession direction of the shard cone (``z != 0`` and ``M @ z <= 0``).  Zero
+            rows are rejected (not trajectories; ``M @ 0 <= 0`` would otherwise pass).
         """
         Z = np.asarray(Z, dtype=np.float64)
+        nonzero = np.any(Z != 0, axis=1)
         if self._M is None:
-            return np.ones(Z.shape[0], dtype=bool)
-        return np.all((self._M @ Z.T) <= self._CONE_TOL, axis=0)
+            return nonzero
+        return nonzero & np.all((self._M @ Z.T) <= self._CONE_TOL, axis=0)
 
     def perturbations(self, z: np.ndarray, *, reduce: bool = True) -> Iterator[np.ndarray]:
         """
