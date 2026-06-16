@@ -55,7 +55,7 @@ from dreamer.utils.storage.trajectory_attributes import (
 )
 from dreamer.utils.multi_processing import (
     compute_tier2_for_item,
-    load_seen_trajectories,
+    load_seen_trajectories_for_search,
     worker_pool,
     write_jsonl_line,
 )
@@ -136,7 +136,7 @@ class SearcherModV1(SearcherModScheme):
         output_path = os.path.join(
             sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl"
         )
-        seen_trajectories = load_seen_trajectories(output_path)
+        seen_trajectories = load_seen_trajectories_for_search(output_path, shard_id)
 
         with worker_pool(
             num_workers=num_workers,

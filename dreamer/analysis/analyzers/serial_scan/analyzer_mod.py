@@ -10,7 +10,12 @@ bound to the shard; per-constant attributes (``delta_estimate``,
 constant name.
 
 **JSONL layout** — one file per shard (no constant subdirectory):
-    ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl``
+    ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` by default, shared with the
+    search stage.  When ``analysis.STORE_TRAJECTORIES_SEPARATELY`` is enabled the
+    records are written to a separate per-shard store,
+    ``EXPORT_ANALYSIS_RESULTS/<shard_id>.jsonl``, instead; the search stage then
+    seeds its cache from that store (see
+    ``multi_processing.load_seen_trajectories_for_search``).
 
 **Per-shard deduplication** — each unique shard (by shard_id) is processed
 exactly once even if it appears under several constants in the input dict.
@@ -82,7 +87,17 @@ class AnalyzerModV1(AnalyzerModScheme):
         (descending), then by dimension (ascending, as a tie-breaker).
         Only constants whose shards are identified above threshold appear.
         """
-        os.makedirs(sys_config.EXPORT_SEARCH_RESULTS, exist_ok=True)
+        # Trajectory records normally share the search-results dir so the search
+        # stage reuses them directly.  When STORE_TRAJECTORIES_SEPARATELY is set,
+        # the analysis stage keeps its own per-shard store under
+        # EXPORT_ANALYSIS_RESULTS instead (the search stage still seeds its cache
+        # from it — see load_seen_trajectories_for_search).
+        out_dir = (
+            sys_config.EXPORT_ANALYSIS_RESULTS
+            if analysis_config.STORE_TRAJECTORIES_SEPARATELY
+            else sys_config.EXPORT_SEARCH_RESULTS
+        )
+        os.makedirs(out_dir, exist_ok=True)
 
         result: Dict[Constant, List[Searchable]] = {c: [] for c in self.cmf_data.keys()}
 
@@ -122,9 +137,7 @@ class AnalyzerModV1(AnalyzerModScheme):
                 seen_shard_ids.add(shard_id)
                 shard_objects[shard_id] = shard
 
-                shard_jsonl_path = os.path.join(
-                    sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl"
-                )
+                shard_jsonl_path = os.path.join(out_dir, f"{shard_id}.jsonl")
                 seen_trajectories = load_seen_trajectories(shard_jsonl_path)
 
                 per_const_best = self._analyze_shard(

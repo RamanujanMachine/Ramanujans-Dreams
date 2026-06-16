@@ -2049,6 +2049,35 @@ class TestAnalyzerDedup:
             assert "shard_id" in record
             assert record["shard_id"] == shard_id
 
+    def test_analyzer_writes_to_separate_store_when_flag_on(
+        self, simple_shard, tmp_path, monkeypatch,
+    ):
+        """With ``STORE_TRAJECTORIES_SEPARATELY`` the analyzer writes to
+        ``EXPORT_ANALYSIS_RESULTS`` and leaves ``EXPORT_SEARCH_RESULTS`` empty."""
+        from dreamer.analysis.analyzers.serial_scan.analyzer_mod import AnalyzerModV1
+        from dreamer.configs.system import sys_config
+        from dreamer.configs.analysis import analysis_config
+
+        search_dir = tmp_path / "search"
+        analysis_dir = tmp_path / "analysis"
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(search_dir))
+        monkeypatch.setattr(sys_config, "EXPORT_ANALYSIS_RESULTS", str(analysis_dir))
+        monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
+        monkeypatch.setattr(analysis_config, "STORE_TRAJECTORIES_SEPARATELY", True)
+
+        AnalyzerModV1({e: [simple_shard]}).execute()
+
+        _cmf_id, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
+        analysis_jsonl = analysis_dir / f"{shard_id}.jsonl"
+        search_jsonl = search_dir / f"{shard_id}.jsonl"
+
+        assert analysis_jsonl.exists(), "Trajectories must go to the analysis store"
+        assert [ln for ln in analysis_jsonl.read_text().splitlines() if ln.strip()]
+        assert not search_jsonl.exists(), (
+            "Search-results dir must not receive analysis trajectories when the "
+            "separate-store flag is on"
+        )
+
     def test_analyzer_partial_cache_only_walks_missing(
         self, simple_shard, tmp_path, monkeypatch,
     ):
@@ -2388,6 +2417,50 @@ class TestTier3PostProcess:
         assert json.loads(jsonl.read_text().strip())["extended_metrics"] == {
             "asymptotics": ["pre-computed"],
         }
+
+    def test_skips_shards_not_in_priorities(
+        self, simple_shard, tmp_path, monkeypatch,
+    ):
+        """JSONLs whose shard isn't in ``priorities`` must be left untouched.
+
+        Extraction may write data for shards that didn't pass the analysis
+        identification threshold (so they aren't in ``priorities``).  Tier-3
+        compute on those is wasted work — the post-process stage should
+        process only the prioritised shards.
+        """
+        from dreamer.post_process.tier3_post_process_mod import Tier3PostProcessModV1
+        from dreamer.configs.system import sys_config
+        from dreamer.configs import config
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        monkeypatch.setattr(
+            config.post_process,
+            "TIER3_ATTRIBUTES",
+            ("kamidelta",),
+        )
+
+        _cmf_id, prioritised_shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
+        # An orphan shard JSONL — same cmf prefix, different encoding hash.
+        # The structural shard_id format is ``<cmf_id>__<hash>``.
+        orphan_shard_id = prioritised_shard_id.rsplit("__", 1)[0] + "__deadbeefdeadbeef"
+        orphan_jsonl = tmp_path / f"{orphan_shard_id}.jsonl"
+        orphan_record = {
+            "trajectory_id": f"{orphan_shard_id}__cafef00dcafef00d",
+            "cmf_id": prioritised_shard_id.rsplit("__", 1)[0],
+            "shard_id": orphan_shard_id,
+            "start_point": [1, 1],
+            "direction": [1, 1],
+            "extended_metrics": {},
+        }
+        original_orphan_text = json.dumps(orphan_record) + "\n"
+        orphan_jsonl.write_text(original_orphan_text)
+
+        # ``priorities`` contains *only* simple_shard — the orphan isn't in it.
+        Tier3PostProcessModV1({e: [simple_shard]}).execute()
+
+        # The orphan file is byte-for-byte unchanged: post-process didn't even
+        # open it, let alone append a patch.
+        assert orphan_jsonl.read_text() == original_orphan_text
 
     def test_appends_patch_for_missing_tier3_attr(
         self, simple_shard, tmp_path, monkeypatch,

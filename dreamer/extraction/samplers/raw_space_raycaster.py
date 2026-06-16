@@ -337,9 +337,11 @@ class RawSpaceMCMCSampler(Sampler):
 
         # Cone-volume fraction (inequality-only; equalities are measure-zero) — reused
         # from the raycaster for parity with the conditioned samplers' quota scaling.
+        # Seeded from ``rng_seed`` so the fraction (and hence the quota) is reproducible.
         self.fraction = float(RaycastPipelineSampler._estimate_cone_fraction(
             self.B, self.d_flat,
             samples=min(500_000, max(10_000, 10 ** self.d_flat)),
+            rng=np.random.default_rng(rng_seed if rng_seed >= 0 else None),
         ))
 
         self.initial_lambda = initial_lambda

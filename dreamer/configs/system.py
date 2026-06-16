@@ -61,10 +61,12 @@ class SystemConfig(Configurable):
         default='analysis_results.tempdir',
         metadata={
             "description": (
-                "Legacy directory for the analyzer's shard-level audit trail. "
-                "Unused since the analyzer was switched to per-trajectory dedup "
-                "and writes directly to EXPORT_SEARCH_RESULTS. Retained for "
-                "backward compatibility / ad-hoc tools."
+                "Directory for the analysis stage's separate per-trajectory store, "
+                "used only when analysis.STORE_TRAJECTORIES_SEPARATELY is True. "
+                "Each analysed shard is written to <shard_id>.jsonl here instead of "
+                "in EXPORT_SEARCH_RESULTS. When the flag is False (default) the "
+                "analyzer writes directly to EXPORT_SEARCH_RESULTS and this path is "
+                "unused."
             )
         },
     )

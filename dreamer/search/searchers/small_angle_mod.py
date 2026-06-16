@@ -28,7 +28,7 @@ from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.utils.multi_processing import (
     compute_tier2_for_item,
-    load_seen_trajectories,
+    load_seen_trajectories_for_search,
     worker_pool,
     write_jsonl_line,
 )
@@ -94,7 +94,7 @@ class SmallAngleSearchMod(SearcherModScheme):
             Logger.Levels.debug,
         ).log()
         output_path = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl")
-        seen_trajectories = load_seen_trajectories(output_path)
+        seen_trajectories = load_seen_trajectories_for_search(output_path, shard_id)
 
         # Shared across all constant-runs for this shard so that trajectories
         # evaluated for one constant reuse their walk matrices when a second

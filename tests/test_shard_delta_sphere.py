@@ -18,6 +18,7 @@ Agg backend is forced):
 
 import importlib.util
 import json
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -151,6 +152,22 @@ class TestValueExtractors:
         fn = sds.sympy_attribute_value("expr", {"n": 2}, in_extended_metrics=False)
         assert fn({"expr": "n**3"}) == pytest.approx(8.0)
 
+    def test_eigenvalue_lognorm_value(self):
+        fn0 = sds.eigenvalue_lognorm_value(0)
+        fn1 = sds.eigenvalue_lognorm_value(1)
+        rec = {"direction": [3, 4, 0],  # ||v|| = 5
+               "extended_metrics": {"eigenvalues": ["2.0", "0.5"]}}
+        assert fn0(rec) == pytest.approx(math.log(2.0) / 5.0)
+        assert fn1(rec) == pytest.approx(math.log(0.5) / 5.0)
+        # Negative / complex eigenvalue → log of magnitude (well-defined).
+        rec_neg = {"direction": [1, 0, 0], "extended_metrics": {"eigenvalues": ["-2"]}}
+        assert fn0(rec_neg) == pytest.approx(math.log(2.0))
+        # Missing / too-short list, zero vector, or λ=0 → skipped.
+        assert fn1({"direction": [1, 0, 0], "extended_metrics": {"eigenvalues": ["2"]}}) is None
+        assert fn0({"extended_metrics": {}}) is None
+        assert fn0({"direction": [0, 0, 0], "extended_metrics": {"eigenvalues": ["2"]}}) is None
+        assert fn0({"direction": [1, 0, 0], "extended_metrics": {"eigenvalues": ["0"]}}) is None
+
 
 # ===========================================================================
 # CLI parsers
@@ -168,25 +185,33 @@ class TestCliParsers:
         assert spec.axes == (0, 1, 2)
         assert spec.dependent == {3: (1.0, -1.0, 0.0)}
 
+    @staticmethod
+    def _args(**kw):
+        base = dict(field=None, metric=None, sympy_attr=None, eigen_lognorm=None,
+                    subs=None, value_label=None)
+        base.update(kw)
+        return SimpleNamespace(**base)
+
     def test_resolve_value_fn_default_is_delta(self):
-        args = SimpleNamespace(field=None, metric=None, sympy_attr=None,
-                               subs=None, value_label=None)
-        fn, label = sds._resolve_value_fn(args)
+        fn, label = sds._resolve_value_fn(self._args())
         assert fn is None and label is None  # δ default
 
     def test_resolve_value_fn_field(self):
-        args = SimpleNamespace(field="limit_value", metric=None, sympy_attr=None,
-                               subs=None, value_label=None)
-        fn, label = sds._resolve_value_fn(args)
+        fn, label = sds._resolve_value_fn(self._args(field="limit_value"))
         assert label == "limit_value"
         assert fn({"limit_value": 1.0}) == 1.0
 
     def test_resolve_value_fn_sympy(self):
-        args = SimpleNamespace(field=None, metric=None, sympy_attr="asymptotics",
-                               subs="n=10", value_label="asy")
-        fn, label = sds._resolve_value_fn(args)
+        fn, label = sds._resolve_value_fn(
+            self._args(sympy_attr="asymptotics", subs="n=10", value_label="asy"))
         assert label == "asy"
         assert fn({"extended_metrics": {"asymptotics": "n+5"}}) == pytest.approx(15.0)
+
+    def test_resolve_value_fn_eigen(self):
+        fn, label = sds._resolve_value_fn(self._args(eigen_lognorm=1))
+        assert "lambda_1" in label
+        rec = {"direction": [3, 4, 0], "extended_metrics": {"eigenvalues": ["2.0"]}}
+        assert fn(rec) == pytest.approx(math.log(2.0) / 5.0)
 
 
 # ===========================================================================
@@ -214,6 +239,19 @@ def _write_shard_jsonl(root: Path, shard, records):
 
 
 class TestJsonlLoaders:
+    def test_merge_unions_extended_metrics(self, tmp_path):
+        # Regression: a base line with empty extended_metrics and a patch line
+        # carrying the Tier-2 attributes (any order) must NOT wipe each other —
+        # the merged record keeps the populated attributes.
+        path = tmp_path / "s.jsonl"
+        with open(path, "w") as f:
+            f.write(json.dumps({"trajectory_id": "t1", "direction": [1, 0, 0],
+                                "extended_metrics": {"gcd_slope": 14.5}}) + "\n")
+            f.write(json.dumps({"trajectory_id": "t1", "direction": [1, 0, 0],
+                                "extended_metrics": {}}) + "\n")
+        merged = sds._merge_jsonl(path)
+        assert merged["t1"]["extended_metrics"]["gcd_slope"] == pytest.approx(14.5)
+
     def test_load_shard_trajectories(self, tmp_path, const):
         shard = _fake_shard()
         _write_shard_jsonl(tmp_path, shard, [
@@ -253,7 +291,7 @@ class TestJsonlLoaders:
         # absent file → False
         assert sds.shard_has_identified(_fake_shard(("a", "b")), const, str(tmp_path / "x")) is False
 
-    def test_load_shard_samples(self, tmp_path, const):
+    def test_load_shard_samples_delta(self, tmp_path, const):
         shard = _fake_shard()
         _write_shard_jsonl(tmp_path, shard, [
             {"direction": [0, 0, 1], "delta_estimate": {"log-2": 0.3},
@@ -262,19 +300,33 @@ class TestJsonlLoaders:
              "identified": {"log-2": False}},
             {"direction": [1, 1, 1], "identified": {"log-2": False}},  # no delta
         ])
-        dirs, deltas, ident = sds.load_shard_samples(shard, const, str(tmp_path))
+        dirs, vals, ident = sds.load_shard_samples(
+            shard, sds.delta_value(const), const, str(tmp_path))
         # All samples kept (unlike load_shard_trajectories, which drops non-finite).
         assert dirs.shape == (3, 3)
         assert ident.tolist() == [True, False, False]
-        # Identified sample keeps its δ; the others are NaN (−inf / missing).
-        assert deltas[0] == pytest.approx(0.3)
-        assert np.isnan(deltas[1]) and np.isnan(deltas[2])
+        # Identified sample keeps its δ; the others are NaN (-inf / missing).
+        assert vals[0] == pytest.approx(0.3)
+        assert np.isnan(vals[1]) and np.isnan(vals[2])
+
+    def test_load_shard_samples_uses_value_fn(self, tmp_path, const):
+        # Colour value must come from value_fn (e.g. a metric), not δ.
+        shard = _fake_shard()
+        _write_shard_jsonl(tmp_path, shard, [
+            {"direction": [0, 0, 1], "delta_estimate": {"log-2": 0.3},
+             "identified": {"log-2": True},
+             "extended_metrics": {"digits_per_step": 19.0}},
+        ])
+        _, vals, ident = sds.load_shard_samples(
+            shard, sds.extended_metric_value("digits_per_step"), const, str(tmp_path))
+        assert vals[0] == pytest.approx(19.0)  # the metric, not δ (0.3)
+        assert ident.tolist() == [True]
 
     def test_load_shard_samples_missing_file(self, tmp_path, const):
-        dirs, deltas, ident = sds.load_shard_samples(
-            _fake_shard(), const, str(tmp_path / "nope")
+        dirs, vals, ident = sds.load_shard_samples(
+            _fake_shard(), sds.delta_value(const), const, str(tmp_path / "nope")
         )
-        assert dirs.shape == (0, 3) and deltas.shape == (0,) and ident.shape == (0,)
+        assert dirs.shape == (0, 3) and vals.shape == (0,) and ident.shape == (0,)
 
     def test_load_path_directions_order(self, tmp_path):
         shard = _fake_shard()

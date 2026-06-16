@@ -42,6 +42,7 @@ from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.search.methods.gradient_ascent.lattice import rotate_toward, snap_to_trajectory
 from dreamer.search.methods.gradient_ascent.optimizers import optimizer_for
 from dreamer.utils.constants.constant import Constant
+from dreamer.utils.rand import derive_rng
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
 from dreamer.utils.ui.tqdm_config import SmartTQDM
@@ -159,6 +160,12 @@ class GradientAscentSearch(SearchMethod):
         """
         if handler_cache is None:
             handler_cache = {}
+
+        # Per-(shard, method, constant) reproducible RNG for the diffraction kicks.
+        # Same GLOBAL_SEED + shard + constant => identical run; distinct shards/
+        # constants get independent streams (nondeterministic when GLOBAL_SEED is
+        # None).  Overrides the unseeded generator created in __init__.
+        self._rng = derive_rng(shard_id, "gradient", str(constant))
 
         shard: Shard = self.space
         if geom is None:

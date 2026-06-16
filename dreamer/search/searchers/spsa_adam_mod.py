@@ -1,11 +1,13 @@
 """
-SimulatedAnnealingMod — search-stage module driving :class:`SimulatedAnnealingSearch`.
+HybridSPSAMod — search-stage module driving :class:`HybridSPSASearch`.
 
-Modelled on :class:`SmallAngleSearchMod` (the modern DTO/JSONL pipeline).
-For each unique shard (deduplicated by ``shard_id`` across all constants) it
-opens a ``worker_pool`` writing ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` and
-runs simulated annealing **once per identified constant**.  A constant whose
-reservoir produces no initial identification is logged and skipped.
+Mirrors :class:`GradientAscentMod` (the modern DTO/JSONL pipeline): for each
+unique shard (deduplicated by ``shard_id`` across all constants) it opens a
+``worker_pool`` writing ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` and runs the
+hybrid SPSA + Adam ascent **once per identified constant**.  A constant whose
+reservoir produces no initial identification is logged and skipped; unlike
+gradient ascent, the hybrid method never raises a stall (the discrete fallback
+always terminates at a well-defined discrete local maximum).
 """
 
 import os
@@ -16,9 +18,12 @@ from dreamer.configs import config
 from dreamer.configs.system import sys_config
 from dreamer.configs.logging import logging_config
 from dreamer.extraction.shard import Shard
-from dreamer.search.methods.annealing import SimulatedAnnealingSearch, NoInitialIdentification
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.search.methods.flatland.parallel_eval import make_shared_eval_pool
+from dreamer.search.methods.gradient_ascent.spsa_adam_ascent import (
+    HybridSPSASearch,
+    NoInitialIdentification,
+)
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.module import CatchErrorInModule
@@ -35,8 +40,8 @@ from dreamer.utils.multi_processing import (
 search_config = config.search
 
 
-class SimulatedAnnealingMod(SearcherModScheme):
-    """Search module — per-shard, per-constant simulated annealing."""
+class HybridSPSAMod(SearcherModScheme):
+    """Search module — per-shard, per-constant hybrid SPSA + Adam ascent."""
 
     def __init__(self, priorities, use_LIReC: bool = True):
         """
@@ -47,8 +52,8 @@ class SimulatedAnnealingMod(SearcherModScheme):
         super().__init__(
             priorities,
             use_LIReC,
-            name="SimulatedAnnealing",
-            description="Search module — simulated annealing with Tier-1 DTO output",
+            name="HybridSPSA",
+            description="Search module — hybrid SPSA + Adam ascent with discrete fallback",
             version="1.0.0",
         )
 
@@ -73,7 +78,7 @@ class SimulatedAnnealingMod(SearcherModScheme):
 
         for shard_id, shard in SmartTQDM(
             shard_by_id.items(),
-            desc="Simulated annealing in shards: ",
+            desc="Hybrid SPSA in shards: ",
             **sys_config.TQDM_CONFIG,
         ):
             identified_consts = list(shard_identified[shard_id])
@@ -86,10 +91,10 @@ class SimulatedAnnealingMod(SearcherModScheme):
         num_workers: int,
         config_overrides: dict,
     ) -> None:
-        """Run SA for each identified constant of a single shard."""
+        """Run the hybrid SPSA + Adam ascent for each identified constant of a shard."""
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
         Logger(
-            f"Starting Simulated Annealing search on shard {shard_id} (cmf={cmf_id})",
+            f"Starting Hybrid SPSA search on shard {shard_id} (cmf={cmf_id})",
             Logger.Levels.debug,
         ).log()
         output_path = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl")
@@ -97,19 +102,18 @@ class SimulatedAnnealingMod(SearcherModScheme):
 
         handler_cache: dict = {}
 
-        # Build the flatland geometry (integer nullspace + LLL/BKZ reduction) and
-        # interior start ONCE per shard — both are constant-independent.  The
-        # persistent per-shard process pool (shard+start handed in once) is reused
-        # across every constant and every annealing step for the neighbour walks.
+        # Flatland geometry (LLL/BKZ) + interior start built once per shard
+        # (constant-independent).  The persistent per-shard process pool walks the
+        # discrete-fallback neighbour batch; reused across all constants.
         geom = FlatlandGeometry(shard)
         start = shard.get_interior_point()
         eval_pool, pq_manager = make_shared_eval_pool(
-            shard, start, search_config.ANNEAL_NUM_EVAL_WORKERS
+            shard, start, search_config.SPSA_NUM_EVAL_WORKERS
         )
 
         try:
             with Logger.watchdog(
-                f"Simulated Annealing shard search (shard {shard_id})",
+                f"Hybrid SPSA shard search (shard {shard_id})",
                 logging_config.WATCHDOG_TRAJECTORY_SECONDS,
                 detail=lambda: f"shard={shard_id} cmf={cmf_id}",
             ), worker_pool(
@@ -121,7 +125,7 @@ class SimulatedAnnealingMod(SearcherModScheme):
                 parallel=bool(search_config.TIER2_ATTRIBUTES),
             ) as push:
                 for const in identified_consts:
-                    method = SimulatedAnnealingSearch(shard, const, use_LIReC=self.use_LIReC)
+                    method = HybridSPSASearch(shard, const, use_LIReC=self.use_LIReC)
                     try:
                         method.run(
                             constant=const,
@@ -146,6 +150,6 @@ class SimulatedAnnealingMod(SearcherModScheme):
                 pq_manager.shutdown()
 
         Logger(
-            f"Finished Simulated Annealing search on shard {shard_id}",
+            f"Finished Hybrid SPSA search on shard {shard_id}",
             Logger.Levels.debug,
         ).log()

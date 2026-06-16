@@ -82,14 +82,22 @@ def _raycast(d_orig, d_flat, Z_int, B, continuous_rays, R_max, t_step=0.1, max_p
     return harvest_buffer, ray_counts
 
 
-@njit(parallel=True)
-def _guide_rays_mcmc(d_flat, B, start_pos, target_rays, mix_steps=200):
+# NOTE: serial (`@njit`, not `parallel=True`).  These guide-ray walks DRAW RANDOM
+# NUMBERS, and numba's RNG is process-global; running the chains across `prange`
+# threads makes the stream depend on thread scheduling => non-reproducible.  Per the
+# project rule "do not parallelize code that needs randomness", the chains run in a
+# serial `range` loop seeded once via `rng_seed`.  The heavy, RNG-free `_raycast`
+# kernel below stays `parallel=True`.
+@njit
+def _guide_rays_mcmc(d_flat, B, start_pos, target_rays, mix_steps=200, rng_seed=-1):
+    if rng_seed >= 0:
+        np.random.seed(rng_seed)
     rays = np.zeros((target_rays, d_flat), dtype=np.float64)
     m = len(B)
     num_chains = 16
     rays_per_chain = (target_rays // num_chains) + 1
 
-    for chain_idx in prange(num_chains):
+    for chain_idx in range(num_chains):
         pos = start_pos.copy()
         start_norm = 0.0
         for k in range(d_flat):
@@ -207,14 +215,17 @@ def _guide_rays_mcmc(d_flat, B, start_pos, target_rays, mix_steps=200):
     return rays
 
 
-@njit(parallel=True)
-def _guide_rays_mhs(d_flat, B, start_pos, target_rays, mix_steps=200):
+# Serial + seeded for reproducibility — see the note on ``_guide_rays_mcmc``.
+@njit
+def _guide_rays_mhs(d_flat, B, start_pos, target_rays, mix_steps=200, rng_seed=-1):
+    if rng_seed >= 0:
+        np.random.seed(rng_seed)
     rays = np.zeros((target_rays, d_flat), dtype=np.float64)
     m = len(B)
     num_chains = 16
     rays_per_chain = (target_rays // num_chains) + 1
 
-    for chain_idx in prange(num_chains):
+    for chain_idx in range(num_chains):
         # Initialize walker exactly on the sphere surface
         pos = start_pos.copy()
         new_pos = np.zeros(d_flat, dtype=np.float64)
@@ -279,17 +290,20 @@ def _guide_rays_mhs(d_flat, B, start_pos, target_rays, mix_steps=200):
 
 
 class RayCastingSamplingMethod:
-    def __init__(self, Z_reduced: np.ndarray, B_reduced: np.ndarray, d_orig: int, guidance_method: str = 'mcmc'):
+    def __init__(self, Z_reduced: np.ndarray, B_reduced: np.ndarray, d_orig: int, guidance_method: str = 'mcmc', rng_seed: int = -1):
         """
         :param Z_reduced: The sample space basis matrix
         :param B_reduced: The sample bound matrix
         :param d_orig: The original dimensions of the sample space (before reduction)
         :param guidance_method: The ray guidance method to use (MCMC or MHS)
+        :param rng_seed: seed for the (serial) guide-ray walk kernel; ``< 0`` disables
+            seeding (nondeterministic).
         """
         self.Z = np.array(Z_reduced, dtype=np.int64)
         self.B = np.array(B_reduced, dtype=np.float64)
         self.d_orig = d_orig
         self.d_flat = self.Z.shape[1]
+        self.rng_seed = int(rng_seed)
 
         if guidance_method == 'mcmc':
             self.guidance_method = _guide_rays_mcmc
@@ -330,9 +344,9 @@ class RayCastingSamplingMethod:
         if start_pos is None:
             return None
 
-        # Execute the Numba kernel
+        # Execute the Numba kernel (serial + seeded for reproducibility)
         rays = self.guidance_method(
-            self.d_flat, self.B, start_pos, target_rays, mix_steps
+            self.d_flat, self.B, start_pos, target_rays, mix_steps, self.rng_seed
         )
         return rays
 

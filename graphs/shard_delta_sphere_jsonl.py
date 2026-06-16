@@ -1,4 +1,4 @@
-"""
+r"""
 Aesthetic δ-on-a-sphere projections from the **current JSONL pipeline**.
 
 This is the pickle-free successor to ``graphs/shard delta sphere.py``.  The old
@@ -6,20 +6,20 @@ script unpickled ``Shard`` and ``DataManager`` objects and matched data to shard
 by comparing start coordinates.  The system has since moved to a self-sustaining
 JSONL layout (no pickle files):
 
-  * Shards          — reconstructed from ``<EXPORT_CMFS>/<const>/<cmf>.json`` +
+  * Shards          - reconstructed from ``<EXPORT_CMFS>/<const>/<cmf>.json`` +
                       ``<EXPORT_CMFS>/<cmf>__shards.jsonl`` via
                       :func:`dreamer.utils.storage.atlas_writer.load_shards_from_export`.
-  * Trajectories    — one file per shard at
+  * Trajectories    - one file per shard at
                       ``<EXPORT_SEARCH_RESULTS>/<shard_id>.jsonl``; each line is a
                       ``TrajectoryDTO`` with a ``direction`` tuple and a
                       **per-constant** ``delta_estimate`` dict.
 
 Matching data to a shard is therefore trivial now: the JSONL filename *is*
-``<shard_id>.jsonl`` and ``derive_cmf_and_shard_ids(shard)`` yields that id — no
+``<shard_id>.jsonl`` and ``derive_cmf_and_shard_ids(shard)`` yields that id - no
 start-coordinate matching needed.
 
 The sphere-rendering maths (rotate the best direction to the equator for a clean
-local interpolation, ``griddata`` the δ field, trim to the shard's cone ``A·v ≤ 0``,
+local interpolation, ``griddata`` the δ field, trim to the shard's cone ``A\cdot v ≤ 0``,
 draw the bounding hyperplane circles) carries straight over from the old script.
 
 Three options, exactly as requested:
@@ -30,12 +30,12 @@ Three options, exactly as requested:
 
   2. For a ``D > 3`` CMF, a :class:`ProjectionSpec` selects which 3 coordinates
      become the sphere's ``(x, y, z)`` and constrains the remaining coordinates to
-     a *linear* function of those three — only trajectories lying in that 3-D
+     a *linear* function of those three - only trajectories lying in that 3-D
      subspace (within ``subspace_tol``) are drawn.  This realises the
-     ``(x, y, z, f(x,y,z)) / (f(x,y,z), x, y, z) / …`` notation from the request.
+     ``(x, y, z, f(x,y,z)) / (f(x,y,z), x, y, z) / ...`` notation from the request.
 
   3. Overlay paths (e.g. gradient-ascent steps) are optional.  ``None`` →
-     δ-projection only (like the old script's example output).  Otherwise a path
+     δ-projection only (like the old script's example output). Otherwise a path
      is either pulled automatically from a second search-results directory or
      passed explicitly as a list of direction vectors per shard.
 
@@ -66,7 +66,7 @@ from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 # ===========================================================================
 #
 # A *value function* maps a merged trajectory record (a plain dict, exactly as
-# stored in the JSONL) to the scalar to plot — or ``None`` to skip that
+# stored in the JSONL) to the scalar to plot - or ``None`` to skip that
 # trajectory.  δ is the default, but any Tier-1/Tier-2/Tier-3 attribute can be
 # plotted instead, including string-formatted sympy expressions (e.g. the
 # trajectory asymptotics) reduced to a number via substitution.
@@ -109,7 +109,7 @@ def extended_metric_value(
     """Value function reading a Tier-2/Tier-3 attribute from ``extended_metrics``.
 
     Background workers (and the post-process stage) populate the open
-    ``extended_metrics`` dict — e.g. ``digits_per_step``, ``spectral_gap``,
+    ``extended_metrics`` dict - e.g. ``digits_per_step``, ``spectral_gap``,
     ``asymptotics``.  Use *transform* for non-numeric attributes (see
     :func:`sympy_attribute_value` for the string-sympy case).
 
@@ -169,13 +169,59 @@ def sympy_attribute_value(
     return _fn
 
 
+def eigenvalue_lognorm_value(index: int = 0) -> ValueFn:
+    """Value function: ``log|λ_index| / ||v||₂`` for a trajectory.
+
+    The eigenvalues are stored sorted, as serialised sympy strings, under
+    ``extended_metrics["eigenvalues"]`` (so ``index=0`` is λ₁, ``index=1`` is λ₂).
+    Each is parsed and the **log of its magnitude** (``log|λ|`` = ``Re log λ``,
+    well-defined for negative/complex eigenvalues) is divided by the L2 norm of
+    the trajectory direction ``v`` (the raw ``direction`` vector), giving a
+    growth rate per unit trajectory length.
+
+    Returns ``None`` (skipped) when the eigenvalue list is missing/too short, the
+    eigenvalue does not parse, ``λ`` is 0, or ``v`` is the zero vector.
+
+    :param index: 0-based eigenvalue index (0 → λ₁, 1 → λ₂).
+    :return: a :data:`ValueFn`.
+    """
+    import math
+    import sympy as sp
+
+    def _fn(rec: Dict[str, Any]) -> Optional[float]:
+        eigs = (rec.get("extended_metrics") or {}).get("eigenvalues")
+        if not isinstance(eigs, (list, tuple)) or index >= len(eigs):
+            return None
+        direction = rec.get("direction")
+        if not direction:
+            return None
+        norm = float(np.linalg.norm([float(x) for x in direction]))
+        if norm == 0:
+            return None
+        try:
+            lam = complex(sp.sympify(str(eigs[index])).evalf())
+        except (sp.SympifyError, TypeError, ValueError):
+            return None
+        mag = abs(lam)
+        if mag == 0 or not np.isfinite(mag):
+            return None
+        return math.log(mag) / norm
+    return _fn
+
+def convergence_rate(neg: bool) -> ValueFn:
+    def _fn(rec: Dict[str, Any]) -> Optional[float]:
+        result = eigenvalue_lognorm_value(1)(rec) - eigenvalue_lognorm_value(0)(rec)
+        return -result if neg else result
+    return _fn
+
+
 # ===========================================================================
 # Projection spec (choose the 3-D subspace of a D-dimensional CMF)
 # ===========================================================================
 
 @dataclass
 class ProjectionSpec:
-    """Selects the 3-D subspace of a ``D``-dimensional CMF to draw on the sphere.
+    r"""Selects the 3-D subspace of a ``D``-dimensional CMF to draw on the sphere.
 
     The CMF's direction vectors live in ``D`` coordinates (one per CMF symbol,
     in ``shard.symbols`` order).  This spec picks **three** of them to be the
@@ -185,8 +231,8 @@ class ProjectionSpec:
     relative tolerance), i.e. the trajectory lies in the chosen subspace.
 
     :param axes: the three coordinate indices mapped to sphere ``(x, y, z)``.
-    :param dependent: ``{coord_index: (a, b, c)}`` — the dependent coordinate at
-        ``coord_index`` must equal ``a·x + b·y + c·z`` where ``(x, y, z)`` are
+    :param dependent: ``{coord_index: (a, b, c)}`` - the dependent coordinate at
+        ``coord_index`` must equal ``a\cdot x + b\cdot y + c\cdot z`` where ``(x, y, z)`` are
         the free coordinates selected by ``axes``.  Empty for ``D == 3``.
     """
 
@@ -206,13 +252,13 @@ class ProjectionSpec:
 
     @classmethod
     def from_layout(cls, layout: Sequence) -> "ProjectionSpec":
-        """Build a spec from the ``(x, y, z, f(x,y,z))`` layout notation.
+        r"""Build a spec from the ``(x, y, z, f(x,y,z))`` layout notation.
 
         ``layout`` has one entry per CMF coordinate (length ``D``):
 
-          * ``"x"`` / ``"y"`` / ``"z"`` — this coordinate is a free sphere axis.
-          * a 3-tuple ``(a, b, c)``      — this coordinate is dependent and equals
-            ``a·x + b·y + c·z``.
+          * ``"x"`` / ``"y"`` / ``"z"`` - this coordinate is a free sphere axis.
+          * a 3-tuple ``(a, b, c)``      - this coordinate is dependent and equals
+            ``a\cdot x + b\cdot y + c\cdot z``.
 
         For example, a 4-D CMF drawn as ``(x, y, z, f)`` with ``f = x - y`` is
         ``ProjectionSpec.from_layout(["x", "y", "z", (1, -1, 0)])``; the
@@ -240,10 +286,10 @@ class ProjectionSpec:
         return cls(axes=(free["x"], free["y"], free["z"]), dependent=dependent)
 
     def free_to_full(self, xyz: np.ndarray) -> np.ndarray:
-        """Embed sphere points ``(x, y, z)`` back into full ``D``-dim space.
+        r"""Embed sphere points ``(x, y, z)`` back into full ``D``-dim space.
 
         Free axes receive ``x/y/z`` directly; dependent axes are filled with
-        their linear prediction ``a·x + b·y + c·z``.  Used to test the
+        their linear prediction ``a\cdot x + b\cdot y + c\cdot z``.  Used to test the
         reconstructed grid against the shard's constraint matrix ``A``.
 
         :param xyz: ``(N, 3)`` array of sphere points.
@@ -293,7 +339,7 @@ def load_shards(export_cmfs: str, constant: Constant, cmf_id: Optional[str] = No
 
     Thin wrapper over :func:`load_shards_from_export` that returns just the
     list of shards for the single constant (or an empty list).  When *cmf_id*
-    is given, only shards belonging to that CMF are returned — drawing every
+    is given, only shards belonging to that CMF are returned - drawing every
     CMF's shards at once produces an enormous figure (and can exhaust the X
     server's pixmap memory), so restricting to one CMF is the normal mode.
 
@@ -306,7 +352,7 @@ def load_shards(export_cmfs: str, constant: Constant, cmf_id: Optional[str] = No
     """
     # Restrict reconstruction to the requested CMF.  Reconstructing every CMF's
     # shards (each needs sympy hyperplane extraction) and discarding all but one
-    # is dramatically slower — measured ~58× on the example data — so push the
+    # is dramatically slower - measured ~58x on the example data - so push the
     # filter down into ``load_shards_from_export`` instead of filtering after.
     relevant = {constant.name: {cmf_id}} if cmf_id is not None else None
     by_const = load_shards_from_export(export_cmfs, [constant], relevant)
@@ -328,7 +374,7 @@ def load_shards(export_cmfs: str, constant: Constant, cmf_id: Optional[str] = No
 def _available_cmf_ids(export_cmfs: str, constant: Constant) -> List[str]:
     """List CMF ids available for *constant* by scanning formatter JSON names.
 
-    Cheap (filename scan, no shard reconstruction) — used for error messages
+    Cheap (filename scan, no shard reconstruction) - used for error messages
     and the ``--list-cmfs`` CLI command.
 
     :param export_cmfs: the ``EXPORT_CMFS`` directory.
@@ -345,9 +391,15 @@ def _available_cmf_ids(export_cmfs: str, constant: Constant) -> List[str]:
 def _merge_jsonl(path: Path) -> Dict[str, dict]:
     """Read a per-shard JSONL, folding patch lines into base records.
 
-    Mirrors ``examples/search_data.py._merge_jsonl`` (last-write-wins on
-    scalar fields, union on ``extended_metrics``) so the same merge semantics
-    as the rest of the tooling are used.
+    Mirrors ``data_utils/search_data.py._merge_jsonl`` (last-write-wins on scalar
+    fields, **union** on ``extended_metrics``).  The union is essential: the
+    Tier-2/Tier-3 attributes (eigenvalues, gcd_slope, ...) arrive on a *separate*
+    patch line written by the background worker, and the base line for the same
+    trajectory carries ``extended_metrics: {}``.  A plain ``dict.update`` would
+    let whichever line comes last win outright, so an empty ``{}`` could wipe the
+    attributes - which is exactly why attribute spheres came out blank.  Unioning
+    the two ``extended_metrics`` dicts preserves the populated keys regardless of
+    line order.
 
     :param path: the ``<shard_id>.jsonl`` file.
     :return: ``{trajectory_id: merged_record}``.
@@ -368,7 +420,10 @@ def _merge_jsonl(path: Path) -> Dict[str, dict]:
             if tid not in merged:
                 merged[tid] = record
             else:
+                existing_em = dict(merged[tid].get("extended_metrics") or {})
+                new_em = dict(record.get("extended_metrics") or {})
                 merged[tid].update(record)
+                merged[tid]["extended_metrics"] = {**existing_em, **new_em}
     return merged
 
 
@@ -390,7 +445,7 @@ def load_shard_trajectories(
     :param value_fn: callable ``(record_dict) -> Optional[float]`` extracting the
         scalar to colour the sphere with.
     :param results_root: the ``EXPORT_SEARCH_RESULTS`` directory.
-    :return: ``(directions, values)`` — an ``(N, D)`` float array of raw
+    :return: ``(directions, values)`` - an ``(N, D)`` float array of raw
         directions and an ``(N,)`` array of values (empty arrays if none).
     """
     _, shard_id, _ = derive_cmf_and_shard_ids(shard)
@@ -421,21 +476,28 @@ def load_shard_trajectories(
 
 def load_shard_samples(
     shard,
+    value_fn: "ValueFn",
     constant: Constant,
     results_root: str,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Load **all** sampled trajectories of a shard (for the scatter view).
 
-    Unlike :func:`load_shard_trajectories` (which keeps only finite-δ records for
-    the surface interpolation), this returns *every* sampled trajectory with a
-    direction, so the scatter plot shows the full sampling — including the
+    Unlike :func:`load_shard_trajectories` (which keeps only finite-value records
+    for the surface interpolation), this returns *every* sampled trajectory with
+    a direction, so the scatter plot shows the full sampling - including the
     trajectories that were **not** identified as *constant*.
 
+    The colour value comes from *value_fn* (δ by default, or any attribute - e.g.
+    ``extended_metric_value("asymptotic_digits_per_step")``), so the scatter
+    colours and the colorbar match the requested attribute, not just δ.
+
     :param shard: a reconstructed ``Shard``.
-    :param constant: the constant whose δ / identification to read.
+    :param value_fn: callable ``(record_dict) -> Optional[float]`` extracting the
+        scalar to colour each point with.
+    :param constant: the constant whose identification flag to read.
     :param results_root: the ``EXPORT_SEARCH_RESULTS`` directory.
-    :return: ``(directions, deltas, identified)`` — an ``(N, D)`` float array of
-        raw directions, an ``(N,)`` δ array (``NaN`` where missing/non-finite),
+    :return: ``(directions, values, identified)`` - an ``(N, D)`` float array of
+        raw directions, an ``(N,)`` value array (``NaN`` where missing/non-finite),
         and an ``(N,)`` boolean array of identification flags.
     """
     _, shard_id, _ = derive_cmf_and_shard_ids(shard)
@@ -445,22 +507,25 @@ def load_shard_samples(
 
     merged = _merge_jsonl(path)
     directions: List[List[float]] = []
-    deltas: List[float] = []
+    values: List[float] = []
     identified: List[bool] = []
     for rec in merged.values():
         direction = rec.get("direction")
         if direction is None:
             continue
-        d = (rec.get("delta_estimate") or {}).get(constant.name)
+        try:
+            val = value_fn(rec)
+        except Exception:
+            val = None
         ident = bool((rec.get("identified") or {}).get(constant.name))
         directions.append([float(v) for v in direction])
-        deltas.append(float(d) if d is not None and np.isfinite(d) else np.nan)
+        values.append(float(val) if val is not None and np.isfinite(val) else np.nan)
         identified.append(ident)
 
     if not directions:
         return (np.empty((0, len(shard.symbols))), np.empty((0,)), np.empty((0,), bool))
     return (np.asarray(directions, dtype=float),
-            np.asarray(deltas, dtype=float),
+            np.asarray(values, dtype=float),
             np.asarray(identified, dtype=bool))
 
 
@@ -523,14 +588,14 @@ def load_path_directions(
 # ===========================================================================
 
 def get_rotation_matrix(vec1: np.ndarray, vec2: np.ndarray) -> np.ndarray:
-    """Rotation aligning ``vec1`` onto ``vec2`` (Rodrigues' formula).
+    r"""Rotation aligning ``vec1`` onto ``vec2`` (Rodrigues' formula).
 
     Handles the parallel / antiparallel degenerate cases explicitly so the
-    180° rotation preserves the right-hand rule.
+    180 rotation preserves the right-hand rule.
 
     :param vec1: source vector.
     :param vec2: target vector.
-    :return: a ``3×3`` rotation matrix ``R`` with ``R·vec1 ∥ vec2``.
+    :return: a ``3x3`` rotation matrix ``R`` with ``R\cdot vec1 ∥ vec2``.
     """
     a, b = (vec1 / np.linalg.norm(vec1)), (vec2 / np.linalg.norm(vec2))
     c = np.dot(a, b)
@@ -554,13 +619,15 @@ def _camera_vector(elev: float, azim: float) -> np.ndarray:
 
 
 def draw_sphere_horizon(ax, cam_elev: float, cam_azim: float,
-                        line_width: float = 1.0) -> None:
+                        line_width: float = 1.0, zorder: float = 2) -> None:
     """Draw the silhouette circle of the sphere as seen from the camera.
 
     :param ax: a 3-D matplotlib axis.
     :param cam_elev: camera elevation in degrees.
     :param cam_azim: camera azimuth in degrees.
     :param line_width: stroke width of the silhouette circle.
+    :param zorder: draw order (raised above the surface when ``computed_zorder``
+        is disabled, so the border sits on top of the filled patch).
     """
     cam = _camera_vector(cam_elev, cam_azim)
     u = (np.array([-cam[1], cam[0], 0]) if abs(cam[0]) > 0.1 or abs(cam[1]) > 0.1
@@ -572,13 +639,13 @@ def draw_sphere_horizon(ax, cam_elev: float, cam_azim: float,
         1.001 * (np.cos(t) * u[0] + np.sin(t) * v[0]),
         1.001 * (np.cos(t) * u[1] + np.sin(t) * v[1]),
         1.001 * (np.cos(t) * u[2] + np.sin(t) * v[2]),
-        color="black", linewidth=line_width, alpha=0.8, zorder=2,
+        color="black", linewidth=line_width, alpha=0.8, zorder=zorder,
     )
 
 
 def plot_hyperplanes_on_sphere(ax, shard, spec: ProjectionSpec,
                                cam_elev: float, cam_azim: float,
-                               line_width: float = 1.0) -> None:
+                               line_width: float = 1.0, zorder: float = 5) -> None:
     """Draw the great circles where the shard's bounding hyperplanes meet the sphere.
 
     Each hyperplane normal (a row of ``shard.A``) is projected onto the three
@@ -591,6 +658,7 @@ def plot_hyperplanes_on_sphere(ax, shard, spec: ProjectionSpec,
     :param cam_elev: camera elevation in degrees.
     :param cam_azim: camera azimuth in degrees.
     :param line_width: stroke width of the great circles.
+    :param zorder: draw order for the great circles.
     """
     if shard.A is None:
         return
@@ -612,7 +680,7 @@ def plot_hyperplanes_on_sphere(ax, shard, spec: ProjectionSpec,
         pts = np.vstack([cx, cy, cz]).T
         hidden = pts.dot(cam) < -0.1
         cx[hidden], cy[hidden], cz[hidden] = np.nan, np.nan, np.nan
-        ax.plot(cx, cy, cz, color="black", linewidth=line_width, alpha=0.85, zorder=5)
+        ax.plot(cx, cy, cz, color="black", linewidth=line_width, alpha=0.85, zorder=zorder)
 
 
 # ===========================================================================
@@ -646,13 +714,13 @@ def render_shard_surface(
     fill_cone: bool = False,
     smooth_sigma: float = 1.5,
 ) -> None:
-    """Interpolate and draw one shard's δ field as a coloured patch on the sphere.
+    r"""Interpolate and draw one shard's δ field as a coloured patch on the sphere.
 
     Pipeline: rotate the best direction to the equator for a well-conditioned
     local ``griddata``, **linearly** interpolate δ (this is naturally bounded by
-    the convex hull of the sampled directions — ``griddata`` returns ``NaN``
+    the convex hull of the sampled directions - ``griddata`` returns ``NaN``
     outside it, so no extrapolation), smooth, restore to the global frame, clip
-    to the shard cone (``A·v ≤ 0``), then ``plot_surface`` with per-face colours.
+    to the shard cone (``A\cdot v ≤ 0``), then ``plot_surface`` with per-face colours.
 
     The patch boundary is therefore ``hull(samples) ∩ cone``: clean and honest.
     With dense data the hull reaches the great circles (the classic look); with
@@ -673,9 +741,9 @@ def render_shard_surface(
     :param cmap: a matplotlib colormap.
     :param norm: a matplotlib ``Normalize`` shared across all spheres.
     :param grid_res: interpolation grid resolution per axis.
-    :param cone_tol: tolerance for the ``A·v ≤ 0`` cone-membership trim.
+    :param cone_tol: tolerance for the ``A\cdot v ≤ 0`` cone-membership trim.
     :param fill_cone: extrapolate (nearest) to fill the whole cone beyond the
-        sample hull.  Off by default — only meaningful for densely-sampled shards.
+        sample hull.  Off by default - only meaningful for densely-sampled shards.
     :param smooth_sigma: NaN-aware Gaussian blur (in grid cells) applied to the
         interpolated field; smooths grid stair-steps without bleeding colour past
         the patch boundary.  ``0`` disables smoothing.
@@ -691,7 +759,7 @@ def render_shard_surface(
         np.min(dp) - 0.05:np.max(dp) + 0.05:grid_res * 1j,
     ]
 
-    # Linear interpolation — NaN outside the convex hull of the samples (no
+    # Linear interpolation - NaN outside the convex hull of the samples (no
     # extrapolation).  This hull is the honest, clean patch boundary.
     grid_delta = griddata((dt, dp), deltas, (gt, gp), method="linear")
 
@@ -730,7 +798,7 @@ def render_shard_surface(
     colors = cmap(norm(grid_delta))
     colors[np.isnan(grid_delta), 3] = 0.0
     sx, sy, sz = (grid_pts[:, i].reshape(grid_res, grid_res) for i in range(3))
-    # antialiased=False: ~3× faster rasterisation of the dense surface, with no
+    # antialiased=False: ~3x faster rasterisation of the dense surface, with no
     # visible difference (adjacent quads share colours; the only real edge is the
     # transparent patch boundary).  rcount/ccount = grid_res so every grid cell
     # is drawn (matplotlib would otherwise downsample to 50).
@@ -744,7 +812,7 @@ def render_shard_scatter(
     ax,
     shard,
     unit_xyz: np.ndarray,
-    deltas: np.ndarray,
+    values: np.ndarray,
     identified: np.ndarray,
     cmap,
     norm,
@@ -759,13 +827,14 @@ def render_shard_scatter(
     :param ax: a 3-D matplotlib axis (already created).
     :param shard: the shard (unused; kept for signature symmetry).
     :param unit_xyz: ``(N, 3)`` unit-sphere projection of the samples.
-    :param deltas: ``(N,)`` δ per sample (``NaN`` where not identified / missing).
+    :param values: ``(N,)`` colour value per sample (δ or the chosen attribute;
+        ``NaN`` where missing/non-finite).
     :param identified: ``(N,)`` boolean identification flags.
-    :param cmap: a matplotlib colormap (for δ when marking).
+    :param cmap: a matplotlib colormap (for the value when marking).
     :param norm: a matplotlib ``Normalize`` shared across all spheres.
-    :param mark_identified: if ``True``, colour identified samples by δ and draw
-        the non-identified ones as faint grey; if ``False``, draw every sample in
-        a single neutral colour (just the sampling geometry, no distinction).
+    :param mark_identified: if ``True``, colour identified samples by *values* and
+        draw the non-identified ones as faint grey; if ``False``, draw every
+        sample in a single neutral colour (just the sampling geometry).
     """
     if unit_xyz.shape[0] == 0:
         return
@@ -781,15 +850,15 @@ def render_shard_scatter(
     if other.any():
         ax.scatter(pts[other, 0], pts[other, 1], pts[other, 2], color="#bdbdbd",
                    s=7, alpha=0.6, depthshade=False, zorder=6)
-    show = ident & ~np.isnan(deltas)
+    show = ident & ~np.isnan(values)
     if show.any():
-        ax.scatter(pts[show, 0], pts[show, 1], pts[show, 2], c=deltas[show],
+        ax.scatter(pts[show, 0], pts[show, 1], pts[show, 2], c=values[show],
                    cmap=cmap, norm=norm, s=16, alpha=0.95, depthshade=False,
                    edgecolor="none", zorder=7)
 
 
 def _draw_reference_grid(ax) -> None:
-    """Draw a faint static lat/long wireframe (world-z up, 10° spacing)."""
+    """Draw a faint static lat/long wireframe (world-z up, 10 spacing)."""
     u = np.linspace(0, 2 * np.pi, 37)
     v = np.linspace(0, np.pi, 19)
     ax.plot_surface(
@@ -858,7 +927,7 @@ def _make_norm(values: np.ndarray, step: Optional[float]):
         step = _nice_step(hi - lo)
     vmin = np.floor(lo / step) * step
     vmax = np.ceil(hi / step) * step
-    if vmin == vmax:  # constant field — widen so the colorbar is valid
+    if vmin == vmax:  # constant field - widen so the colorbar is valid
         vmin, vmax = vmin - step, vmax + step
     return plt.Normalize(vmin=vmin, vmax=vmax), vmin, vmax, step
 
@@ -908,7 +977,7 @@ def generate_spheres(
     """Render the attribute-on-sphere projection(s) for a set of shards.
 
     By default the irrationality measure δ is drawn (classic behaviour).  Pass a
-    *value_fn* to colour the sphere by any other trajectory attribute instead —
+    *value_fn* to colour the sphere by any other trajectory attribute instead -
     e.g. ``field_value("limit_value")``, ``extended_metric_value("digits_per_step")``,
     or ``sympy_attribute_value("asymptotics", {"n": 1e6})`` for a string-formatted
     sympy attribute reduced to a number by substitution.
@@ -921,7 +990,7 @@ def generate_spheres(
         old script); ``False`` → all shards on a single shared sphere.
     :param mode: ``"surface"`` (default) draws the interpolated δ field; ``"scatter"``
         draws the sampled trajectory directions as points.
-    :param mark_identified: scatter mode only — if ``True``, colour identified
+    :param mark_identified: scatter mode only - if ``True``, colour identified
         trajectories by δ and draw non-identified ones faint grey; if ``False``,
         draw every sample in one neutral colour (sampling geometry only).
     :param spec: projection spec; defaults to the identity ``(0, 1, 2)`` spec for
@@ -941,13 +1010,13 @@ def generate_spheres(
     :param grid_res: surface tessellation per axis.  Lower it (e.g. 150) for a
         responsive interactive window; higher (e.g. 400) for a final figure.
     :param fill_cone: extrapolate δ to fill the whole shard cone.  **Off by
-        default** — the patch is bounded by the convex hull of the sampled
+        default** - the patch is bounded by the convex hull of the sampled
         directions (honest, no extrapolation).  Turn on only when trajectories
         densely cover the cone, otherwise empty corners get sharp Voronoi wedges.
     :param smooth_sigma: NaN-aware Gaussian smoothing (grid cells) of the δ
         field; ``0`` disables it.
     :param line_width: stroke width of the great-circle / horizon lines.
-    :param zoom: ``set_box_aspect`` zoom — larger draws the spheres bigger (which
+    :param zoom: ``set_box_aspect`` zoom - larger draws the spheres bigger (which
         also makes the border lines look thinner relative to the sphere).
     :param path_root: optional second ``EXPORT_SEARCH_RESULTS`` dir whose
         trajectories are drawn as an ordered overlay path per shard.
@@ -996,18 +1065,19 @@ def generate_spheres(
                 continue
             per_shard.append((shard, unit_xyz, values[mask], ("surface", values[mask])))
         else:  # scatter
-            directions, deltas, identified = load_shard_samples(shard, constant, results_root)
+            directions, vals, identified = load_shard_samples(
+                shard, value_fn, constant, results_root)
             if directions.shape[0] == 0:
                 continue
             unit_xyz, mask = spec.project(directions, subspace_tol)
             if unit_xyz.shape[0] == 0:
                 continue
-            d, ident = deltas[mask], identified[mask]
+            v, ident = vals[mask], identified[mask]
             # Camera centres on identified samples (fall back to all if none).
-            cam_scalar = np.where(ident, d, np.nan)
+            cam_scalar = np.where(ident, v, np.nan)
             if not np.isfinite(cam_scalar).any():
-                cam_scalar = np.nan_to_num(d, nan=0.0)
-            per_shard.append((shard, unit_xyz, cam_scalar, ("scatter", d, ident)))
+                cam_scalar = np.nan_to_num(v, nan=0.0)
+            per_shard.append((shard, unit_xyz, cam_scalar, ("scatter", v, ident)))
 
     if skipped_unidentified:
         print(f"Skipped {skipped_unidentified} shard(s) with no identified "
@@ -1017,14 +1087,27 @@ def generate_spheres(
         raise RuntimeError("No shard had enough in-subspace trajectories to plot.")
     print(f"Plotting {len(per_shard)} shard(s).")
 
-    # Colour scale from all finite δ values across shards (identified ones in
-    # scatter mode; the interpolated values in surface mode).
-    all_values = np.concatenate([
-        c[1] if c[0] == "surface" else c[1][np.isfinite(c[1])]
-        for _, _, _, c in per_shard
-    ])
+    # Colour scale from the values actually drawn coloured: the interpolated
+    # field (surface), or the coloured scatter points (identified & finite when
+    # marking, else every finite sample).
+    chunks = []
+    for _, _, _, c in per_shard:
+        if c[0] == "surface":
+            chunks.append(c[1])
+        else:
+            _, v, ident = c
+            sel = (ident & np.isfinite(v)) if mark_identified else np.isfinite(v)
+            chunks.append(v[sel])
+    all_values = np.concatenate(chunks) if chunks else np.empty((0,))
     if all_values.size == 0:
-        all_values = np.array([0.0, 1.0])  # nothing identified — neutral scale
+        print(f"WARNING: no finite values for {value_label!r} on any drawn "
+              f"trajectory - the spheres will have no coloured data.  The "
+              f"attribute may be absent/None for these records (e.g. not computed "
+              f"in this run), or only present on non-identified trajectories.")
+        all_values = np.array([0.0, 1.0])  # nothing coloured - neutral scale
+    else:
+        print(f"{all_values.size} coloured value(s); "
+              f"range [{all_values.min():.3g}, {all_values.max():.3g}].")
     norm, vmin, vmax, value_step = _make_norm(all_values, value_step)
 
     def _resolve_path(shard) -> np.ndarray:
@@ -1046,7 +1129,11 @@ def generate_spheres(
                                  mark_identified=mark_identified)
 
     print(f'generating {"individual spheres" if one_sphere_per_shard else "a single shared sphere"}...')
-    layout_kwargs = dict(line_width=line_width, zoom=zoom)
+    # In surface mode the border great circles should sit on top of the filled
+    # patch; matplotlib's default depth-sort (``computed_zorder``) can paint the
+    # surface over them, so the layout disables it and draws the lines above.
+    # Scatter mode keeps depth ordering so the points stay on top of the lines.
+    layout_kwargs = dict(line_width=line_width, zoom=zoom, lines_on_top=(mode == "surface"))
     if one_sphere_per_shard:
         fig = _generate_atlas(per_shard, spec, cmap, norm, subspace_tol, draw_grid,
                               _resolve_path, _draw_content, max_atlas_cols, **layout_kwargs)
@@ -1061,32 +1148,60 @@ def generate_spheres(
     return fig
 
 
+# Draw order used when the border lines must sit on top of the filled surface
+# (``computed_zorder=False``): reference grid < surface (zorder 5) < lines.
+_LINE_ZORDER_ON_TOP = 12
+
+
+def _line_zorders(lines_on_top: bool) -> Tuple[float, float]:
+    """Return ``(horizon_zorder, hyperplane_zorder)`` for the chosen mode.
+
+    When *lines_on_top* the caller has set ``computed_zorder=False``, so the
+    lines need an explicit zorder above the surface (5); otherwise the defaults
+    keep matplotlib's depth ordering (scatter points stay on top of the lines).
+    """
+    if lines_on_top:
+        return _LINE_ZORDER_ON_TOP, _LINE_ZORDER_ON_TOP
+    return 2, 5
+
+
+def _setup_sphere_ax(ax, zoom: float, lines_on_top: bool) -> None:
+    """Apply the common 3-D axis setup, disabling depth-sort when needed."""
+    ax.set_proj_type("persp")
+    ax.set_box_aspect((1, 1, 1), zoom=zoom)
+    if lines_on_top:
+        # Honour manual zorder so the border lines paint over the surface patch
+        # instead of being depth-sorted behind it.
+        ax.computed_zorder = False
+
+
 def _generate_atlas(per_shard, spec, cmap, norm, tol, draw_grid, resolve_path,
                     draw_content, max_cols: int = 6, *,
-                    line_width: float = 1.0, zoom: float = 1.4):
-    """Render one sphere per shard, wrapping into a ``rows × cols`` grid.
+                    line_width: float = 1.0, zoom: float = 1.4,
+                    lines_on_top: bool = True):
+    """Render one sphere per shard, wrapping into a ``rows x cols`` grid.
 
     A single row of N spheres becomes impractically wide for large N (and can
     exhaust the X server's pixmap limit), so spheres wrap onto multiple rows
     capped at *max_cols* columns.  ``draw_content(ax, shard, unit_xyz, content)``
     draws the per-shard δ surface or scatter.
     """
+    hz, pz = _line_zorders(lines_on_top)
     n = len(per_shard)
     cols = max(1, min(max_cols, n))
     rows = int(np.ceil(n / cols))
     fig = plt.figure(figsize=(4.2 * cols + 1.5, 4.2 * rows), dpi=200)
     for idx, (shard, unit_xyz, cam_scalar, content) in enumerate(per_shard):
         ax = fig.add_subplot(rows, cols, idx + 1, projection="3d")
-        ax.set_proj_type("persp")
-        ax.set_box_aspect((1, 1, 1), zoom=zoom)
+        _setup_sphere_ax(ax, zoom, lines_on_top)
 
         draw_content(ax, shard, unit_xyz, content)
         if draw_grid:
             _draw_reference_grid(ax)
 
         elev, azim, _ = _best_camera(unit_xyz, cam_scalar)
-        draw_sphere_horizon(ax, elev, azim, line_width)
-        plot_hyperplanes_on_sphere(ax, shard, spec, elev, azim, line_width)
+        draw_sphere_horizon(ax, elev, azim, line_width, hz)
+        plot_hyperplanes_on_sphere(ax, shard, spec, elev, azim, line_width, pz)
         draw_overlay_path(ax, shard, resolve_path(shard), spec, tol)
 
         ax.view_init(elev=elev, azim=azim)
@@ -1098,12 +1213,13 @@ def _generate_atlas(per_shard, spec, cmap, norm, tol, draw_grid, resolve_path,
 
 
 def _generate_single(per_shard, spec, cmap, norm, tol, draw_grid, resolve_path,
-                     draw_content, *, line_width: float = 1.0, zoom: float = 1.4):
+                     draw_content, *, line_width: float = 1.0, zoom: float = 1.4,
+                     lines_on_top: bool = True):
     """Render every shard on one shared sphere (single global camera)."""
+    hz, pz = _line_zorders(lines_on_top)
     fig = plt.figure(figsize=(6.0, 5.0), dpi=300)
     ax = fig.add_subplot(1, 1, 1, projection="3d")
-    ax.set_proj_type("persp")
-    ax.set_box_aspect((1, 1, 1), zoom=zoom)
+    _setup_sphere_ax(ax, zoom, lines_on_top)
 
     # Global camera = direction of the best δ across all shards.
     global_xyz = np.concatenate([u for _, u, _, _ in per_shard])
@@ -1112,11 +1228,11 @@ def _generate_single(per_shard, spec, cmap, norm, tol, draw_grid, resolve_path,
 
     if draw_grid:
         _draw_reference_grid(ax)
-    draw_sphere_horizon(ax, elev, azim, line_width)
+    draw_sphere_horizon(ax, elev, azim, line_width, hz)
 
     for shard, unit_xyz, _cam, content in per_shard:
         draw_content(ax, shard, unit_xyz, content)
-        plot_hyperplanes_on_sphere(ax, shard, spec, elev, azim, line_width)
+        plot_hyperplanes_on_sphere(ax, shard, spec, elev, azim, line_width, pz)
         draw_overlay_path(ax, shard, resolve_path(shard), spec, tol)
 
     ax.view_init(elev=elev, azim=azim)
@@ -1137,7 +1253,7 @@ _DEFAULT_RESULTS = str(_HERE / ".." / "examples" / "search results")
 def _resolve_constant(name: str, value_str: Optional[str]) -> Constant:
     """Resolve a constant by name, registering it if not already known.
 
-    Looks first in the registry (importing the ready-made constants so e/π/…
+    Looks first in the registry (importing the ready-made constants so e/π/...
     are available).  Falls back to ``--constant-value`` as a sympy expression,
     with a built-in shortcut for ``log-2`` (the example data's constant).
 
@@ -1147,7 +1263,7 @@ def _resolve_constant(name: str, value_str: Optional[str]) -> Constant:
     :return: the resolved :class:`Constant`.
     """
     import sympy as sp
-    try:  # registers e, pi, euler_gamma, catalan, … into Constant.registry
+    try:  # registers e, pi, euler_gamma, catalan, ... into Constant.registry
         import dreamer.utils.constants.ready_made_consts  # noqa: F401
     except Exception:
         pass
@@ -1179,11 +1295,11 @@ def _parse_subs(text: Optional[str]) -> Dict[str, float]:
 
 
 def _parse_layout(text: Optional[str]) -> Optional[ProjectionSpec]:
-    """Parse a ``--layout`` string into a :class:`ProjectionSpec` (or ``None``).
+    r"""Parse a ``--layout`` string into a :class:`ProjectionSpec` (or ``None``).
 
     Tokens are comma-separated, one per CMF coordinate: ``x`` / ``y`` / ``z`` for
     the three free sphere axes, and ``a:b:c`` for a dependent coordinate equal to
-    ``a·x + b·y + c·z``.  Example (4-D, ``(x, y, z, x − y)``): ``x,y,z,1:-1:0``.
+    ``a\cdot x + b\cdot y + c\cdot z``.  Example (4-D, ``(x, y, z, x − y)``): ``x,y,z,1:-1:0``.
 
     :param text: the layout string, or ``None`` for the identity 3-D spec.
     :return: the parsed spec, or ``None`` when *text* is empty.
@@ -1214,6 +1330,17 @@ def _resolve_value_fn(args) -> Tuple[Optional[ValueFn], Optional[str]]:
         subs = _parse_subs(args.subs)
         label = args.value_label or f"{args.sympy_attr}({args.subs or ''})"
         return sympy_attribute_value(args.sympy_attr, subs), label
+    if args.eigen_lognorm:
+        idx = args.eigen_lognorm - 1  # 1-based on the CLI (λ1, λ2) → 0-based
+        label = args.value_label or rf"$\log|\lambda_{args.eigen_lognorm}| / \|v\|$"
+        return eigenvalue_lognorm_value(idx), label
+    if args.numeric_convergence_rate:
+        label = args.value_label or rf"$(\log|\lambda_2| - \log|\lambda_1|) / \|v\|$"
+        return convergence_rate(neg=False), label
+    if args.neg_numeric_convergence_rate:
+        label = args.value_label or rf"$(\log|\lambda_1| - \log|\lambda_2|) / \|v\|$"
+        return convergence_rate(neg=True), label
+
     return None, args.value_label  # δ default
 
 
@@ -1264,7 +1391,7 @@ def _build_cli():
                         "(the Tk backend is very slow on dense 3-D surfaces).")
     p.add_argument("--fill-cone", action="store_true",
                    help="Extrapolate δ to fill the whole shard cone.  Default off "
-                        "(patch bounded by the data's convex hull — honest, no "
+                        "(patch bounded by the data's convex hull - honest, no "
                         "extrapolation).  Use only when the data densely covers "
                         "the cone, else empty corners get sharp Voronoi wedges.")
     p.add_argument("--smooth-sigma", type=float, default=1.5,
@@ -1283,6 +1410,15 @@ def _build_cli():
                      help="Colour by an extended_metrics key (e.g. digits_per_step).")
     val.add_argument("--sympy-attr", default=None,
                      help="Colour by a string-sympy attribute (e.g. asymptotics).")
+    val.add_argument("--eigen-lognorm", type=int, default=None, metavar="I",
+                     help="Colour by log|λ_I| / ||v|| (I is 1-based: 1=λ1, 2=λ2), "
+                          "from extended_metrics['eigenvalues'].")
+    val.add_argument("--numeric-convergence-rate", action="store_true",
+                     help="Colour by (log|λ2| - log|λ1|) / ||v||, the numeric convergence rate estimate derived from the top two "
+                          "eigenvalues.")
+    val.add_argument("--neg-numeric-convergence-rate", action="store_true",
+                     help="Colour by -(log|λ2| - log|λ1|) / ||v||, the numeric convergence rate estimate derived from the top two "
+                          "eigenvalues.")
     p.add_argument("--subs", default=None,
                    help="Substitutions for --sympy-attr, e.g. 'n=1e6'.")
     p.add_argument("--value-label", default=None, help="Colorbar label override.")
@@ -1323,7 +1459,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # The Tk interactive backend renders dense 3-D surfaces extremely slowly
     # (the window can stay blank for a long time).  Use a lighter tessellation
     # for on-screen viewing; 300 is plenty for a saved figure (the field is
-    # smooth — 400 doubles the save time for no visible gain).  --grid-res
+    # smooth - 400 doubles the save time for no visible gain).  --grid-res
     # overrides, e.g. 400 for a final publication image.
     interactive = not args.save and not args.no_show
     grid_res = args.grid_res if args.grid_res is not None else (150 if interactive else 300)

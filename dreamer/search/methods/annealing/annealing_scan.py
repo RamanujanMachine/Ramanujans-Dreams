@@ -21,7 +21,6 @@ Algorithm is faithful to ``context/resources/code/algos/annealing.py`` and
 """
 
 import math
-import random
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -33,6 +32,7 @@ from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
+from dreamer.utils.rand import derive_py_random
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
@@ -153,6 +153,13 @@ class SimulatedAnnealingSearch(SearchMethod):
         """
         if handler_cache is None:
             handler_cache = {}
+
+        # Per-(shard, method, constant) reproducible RNG for the Metropolis accept.
+        # Same GLOBAL_SEED + shard + constant => identical SA trajectory; different
+        # shards/constants get independent streams.  Nondeterministic when
+        # GLOBAL_SEED is None.  (Neighbour generation is deterministic; the seed
+        # reservoir comes from the already-seeded sampler.)
+        self._rng_py = derive_py_random(shard_id, "annealing", str(constant))
 
         shard: Shard = self.space
         if geom is None:
@@ -275,7 +282,7 @@ class SimulatedAnnealingSearch(SearchMethod):
                 iter_left -= 1
             else:
                 diff = new_delta - cur_delta
-                if random.random() < math.exp(diff / T):
+                if self._rng_py.random() < math.exp(diff / T):
                     cur_z = new_z
                     cur_delta = new_delta
                     accepted = True
