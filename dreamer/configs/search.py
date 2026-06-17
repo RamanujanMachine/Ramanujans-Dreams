@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Optional
 from .configurable import Configurable
 from typing import Tuple
 import math
@@ -50,6 +50,18 @@ def ga_population(dim: int) -> int:
 class SearchConfig(Configurable):
     """Configuration knobs for all search methods (GA, SA, Gradient Ascent,
     Small Angle) and the shared δ-evaluation / trajectory-sampling pipeline."""
+
+    GLOBAL_SEED: Optional[int] = field(
+        default=42,
+        metadata={"description": (
+            "Master RNG seed for ALL samplers and search methods (see "
+            "dreamer.utils.rand).  Every stochastic unit of work derives an "
+            "independent, reproducible stream from (GLOBAL_SEED, shard_id, "
+            "method[, constant]) via numpy.random.SeedSequence.  Set to None for "
+            "nondeterministic (OS-entropy) runs.  Propagated to worker processes "
+            "via config export, but randomness only ever runs in the main process."
+        )},
+    )
 
     PARALLEL_SEARCH: bool = field(default=True, metadata={"description": "Enable parallel trajectory evaluation where available."})
     SEARCH_VECTOR_CHUNK: int = field(
@@ -239,11 +251,11 @@ class SearchConfig(Configurable):
 
     # ============================== Shared trajectory-length cap (all search methods) ==============================
     SEARCH_MAX_TRAJ_LEN: float = field(
-        default=35.0,
+        default=60.0,
         metadata={"description": "Maximum real-space trajectory norm applied by all search methods (SA, GA, Gradient Ascent). Trajectories/neighbours/genomes exceeding this bound are skipped or resampled. Bounding trajectory length directly bounds trajectory_matrix() symbolic cost. Interpretation controlled by SEARCH_TRAJ_NORM."},
     )
     SEARCH_TRAJ_NORM: str = field(
-        default="linf",
+        default="l2",
         metadata={"description": "Norm used to measure trajectory length for the SEARCH_MAX_TRAJ_LEN cap, shared by all search methods. 'linf' = max absolute coordinate (tightest bound on trajectory_matrix cost), 'l1' = sum of abs coords (exact symbolic mult count), 'l2' = Euclidean norm."},
     )
 
@@ -283,8 +295,8 @@ class SearchConfig(Configurable):
         metadata={"description": "Numerical-stability epsilon in the RMSprop / Adam denominator."},
     )
     GRAD_MAX_STEPS: int = field(
-        default=50,
-        metadata={"description": "Maximum number of gradient-ascent steps per constant (the manual step budget)."},
+        default=1000,
+        metadata={"description": "Safety ceiling on gradient-ascent steps per constant. The ascent normally stops earlier when no improving lattice move exists (the snapped step cannot reach a new in-cone trajectory) or delta plateaus for GRAD_PATIENCE steps; this bound only guards against a pathologically long productive climb."},
     )
     GRAD_PATIENCE: int = field(
         default=3,
@@ -293,10 +305,6 @@ class SearchConfig(Configurable):
     GRAD_IMPROVE_THRESHOLD: float = field(
         default=1e-3,
         metadata={"description": "Minimum delta gain counted as an improvement during the ascent."},
-    )
-    GRAD_GRAD_TOL: float = field(
-        default=1e-4,
-        metadata={"description": "Convergence stop: terminate when the estimated gradient L2 norm falls below this (no better step to take)."},
     )
     GRAD_FD_ANGLE: float = field(
         default=0.1,
@@ -323,9 +331,66 @@ class SearchConfig(Configurable):
         metadata={"description": "Worker cap for evaluating the per-step forward-difference gradient probe batch. 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},
     )
 
+    # ===================== Hybrid SPSA + Adam Ascent settings =====================
+    # SPSA (Simultaneous Perturbation Stochastic Approximation) macro-navigation over
+    # the continuous flatland direction, fed into the same Adam optimizer used by
+    # Gradient Ascent, with a discrete 2D-orthogonal-neighbour micro-navigation
+    # fallback when the continuous search stalls on a lattice plateau / loops.
+    # Only TWO δ-evaluations per macro step (d ± c_k·Δ) regardless of dimension,
+    # versus D / 2D for forward / central differences.  See
+    # dreamer/search/methods/gradient_ascent/spsa_adam_ascent.py.
+    SPSA_C0: float = field(
+        default=0.2,
+        metadata={"description": "Initial SPSA perturbation magnitude c_0 (radians). Decays as c_k = c_0 / (k+1)^SPSA_GAMMA and is floored at the lattice min-angle (sin θ ≈ 1/L²) so the two probes never snap to the same integer trajectory (which would give a zero gradient)."},
+    )
+    SPSA_GAMMA: float = field(
+        default=0.101,
+        metadata={"description": "SPSA perturbation decay exponent γ in c_k = c_0 / (k+1)^γ (classic SPSA default 0.101). 0.0 keeps c_k constant at c_0 (still floored)."},
+    )
+    SPSA_LR: float = field(
+        default=0.5,
+        metadata={"description": "Learning rate (step scale) applied to the Adam update before it is added to the continuous direction and snapped to the lattice."},
+    )
+    SPSA_BETA1: float = field(
+        default=0.9,
+        metadata={"description": "Adam first-moment decay (beta1) for the SPSA macro-navigation. Adam momentum acts as a low-pass filter on the noisy SPSA gradient."},
+    )
+    SPSA_BETA2: float = field(
+        default=0.999,
+        metadata={"description": "Adam second-moment decay (beta2) for the SPSA macro-navigation."},
+    )
+    SPSA_EPSILON: float = field(
+        default=1e-8,
+        metadata={"description": "Numerical-stability epsilon in the Adam denominator for the SPSA macro-navigation."},
+    )
+    SPSA_MAX_STEPS: int = field(
+        default=1000,
+        metadata={"description": "Safety ceiling on SPSA macro-navigation steps per constant. The macro phase normally ends earlier on a resolution-derived stall (Adam step below the lattice min-angle, loop, out-of-cone, or unidentified probe); this bound only guards against a pathologically long productive climb. Either way the run always finishes with the discrete ±1-neighbour local-maximum certificate."},
+    )
+    SPSA_LOOP_WINDOW: int = field(
+        default=10,
+        metadata={"description": "Length of the visited-trajectory history window for loop detection. If Adam revisits an integer trajectory already in this window (momentum oscillating at a peak), a stall is forced and the discrete fallback fires."},
+    )
+    SPSA_PROBE_RETRIES: int = field(
+        default=4,
+        metadata={"description": "Number of fresh Rademacher Δ vectors tried when an SPSA probe (d ± c_k·Δ) cannot be realised in-cone or is not identified, before the macro step is treated as a stall and the discrete fallback fires."},
+    )
+    SPSA_IMPROVE_FALLBACK: float = field(
+        default=1e-3,
+        metadata={"description": "Minimum δ gain for an orthogonal neighbour to count as a *strict* improvement in the discrete fallback. A neighbour must beat the current δ by more than this to be accepted; otherwise the current point is declared the discrete local maximum."},
+    )
+    SPSA_RESERVOIR_SIZE: int = field(
+        default=10,
+        metadata={"description": "Number of initial candidate trajectories sampled for SPSA seed selection (shortest identified trajectory wins)."},
+    )
+    SPSA_NUM_EVAL_WORKERS: int = field(
+        default=0,
+        metadata={"description": "Worker cap for evaluating the 2D-orthogonal-neighbour batch in the discrete fallback. 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},
+    )
+
     # ============================== Raycaster settings ==============================
     MAX_TRAJECTORY_LENGTH: int = field(
-        default=70,
+        default=60,
         metadata={"description": "Upper bound for absolute trajectory coordinate values during search."},
     )
 

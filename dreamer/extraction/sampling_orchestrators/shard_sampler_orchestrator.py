@@ -5,7 +5,7 @@ import sympy as sp
 
 from dreamer.extraction.shard import Shard
 from dreamer.utils.caching import cached_property
-from dreamer.utils.rand import np
+from dreamer.utils.rand import np, derive_seed
 from ramanujantools import Position
 
 from dreamer.configs.search import search_config
@@ -16,7 +16,7 @@ from dreamer.extraction.sampling_orchestrators.sampling_orchestrator import Samp
 from dreamer.extraction.samplers.sphere_sampler import PrimitiveSphereSampler
 
 
-def _build_trajectory_sampler(a_matrix: np.ndarray, method: str | None = None):
+def _build_trajectory_sampler(a_matrix: np.ndarray, method: str | None = None, *, seed: int = -1):
     """Construct the trajectory sampler for the requested (or configured) method.
 
     The ``discrete`` / ``pt`` lattice walkers harvest primitive integer directions whose
@@ -28,17 +28,20 @@ def _build_trajectory_sampler(a_matrix: np.ndarray, method: str | None = None):
     :param method: explicit engine name (``raycast`` / ``discrete`` / ``pt``); when
         ``None`` the stage-default ``search_config.SAMPLING_METHOD`` is used.  The
         analysis stage passes ``analysis_config.SAMPLING_METHOD`` here so it can differ.
+    :param seed: per-(shard, method) RNG seed derived from ``search_config.GLOBAL_SEED``
+        (see :func:`dreamer.utils.rand.derive_seed`); ``< 0`` disables seeding
+        (nondeterministic), used when the master seed is ``None``.
     :return: a constructed :class:`Sampler` for the chosen method.
     :raises ValueError: if ``method`` is not one of ``raycast`` / ``discrete`` / ``pt``.
     """
     method = method if method is not None else search_config.SAMPLING_METHOD
     useful_norm = float(search_config.MAX_TRAJECTORY_LENGTH)
     if method == "raycast":
-        return RaycastPipelineSampler(a_matrix)
+        return RaycastPipelineSampler(a_matrix, seed=seed)
     if method == "discrete":
-        return DiscreteMCMCSampler(a_matrix, max_useful_norm=useful_norm)
+        return DiscreteMCMCSampler(a_matrix, max_useful_norm=useful_norm, rng_seed=seed)
     if method == "pt":
-        return ParallelTemperingSampler(a_matrix, max_useful_norm=useful_norm)
+        return ParallelTemperingSampler(a_matrix, max_useful_norm=useful_norm, rng_seed=seed)
     raise ValueError(
         f"Unknown SAMPLING_METHOD '{method}'. Expected 'raycast', 'discrete', or 'pt'."
     )
@@ -63,11 +66,22 @@ class ShardSamplingOrchestrator(SamplingOrchestrator):
         if not isinstance(self.searchable, Shard):
             raise ValueError(f"{self.__class__.__name__} can only be used with {Shard.__name__} objects.")
 
+        # Per-(shard, method) reproducible seed: same GLOBAL_SEED + shard + method
+        # always yields the same trajectory sample, while distinct shards/methods get
+        # independent streams.  ``derive_seed`` returns a nondeterministic seed when
+        # ``search_config.GLOBAL_SEED is None``.
+        method = sampling_method if sampling_method is not None else search_config.SAMPLING_METHOD
+        from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
+        _, shard_id, _ = derive_cmf_and_shard_ids(self.searchable)
+        seed = derive_seed(shard_id, method)
+
         a_matrix = self.searchable.A
         if a_matrix is None:
-            self.sampler = PrimitiveSphereSampler(len(self.searchable.symbols))
+            self.sampler = PrimitiveSphereSampler(len(self.searchable.symbols), seed=seed)
         else:
-            self.sampler = _build_trajectory_sampler(np.asarray(a_matrix, dtype=np.float64), sampling_method)
+            self.sampler = _build_trajectory_sampler(
+                np.asarray(a_matrix, dtype=np.float64), sampling_method, seed=seed
+            )
 
     def sample_trajectories(self, compute_n_samples: Callable[[int], int] | int, *, exact: bool = False) -> Set[Position]:
         # Local imports avoid a circular dependency (logger/trajectory_attributes

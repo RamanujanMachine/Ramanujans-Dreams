@@ -164,22 +164,47 @@ class Tier3PostProcessModV1(PostProcessModScheme):
             ).log()
             return
 
-        # Flat layout: EXPORT_SEARCH_RESULTS/<shard_id>.jsonl (no constant subdir).
-        jsonl_files = sorted(
-            f for f in os.listdir(dir_path)
-            if f.endswith('.' + Formats.JSONL.value)
-        )
-        if not jsonl_files:
+        # Restrict to shards that survived analysis (i.e. live in
+        # ``self.priorities``).  Extraction may have produced JSONLs for
+        # shards that didn't pass the identification threshold, but Tier-3
+        # attributes on those are wasted work — we only want to spend the
+        # compute budget on shards downstream stages actually care about.
+        # Duplicate shards (same id under multiple constants) are scanned
+        # once; the JSONL records carry per-constant attributes so all
+        # constants are still covered.
+        shard_paths: List[str] = []
+        seen_ids: set = set()
+        suffix = '.' + Formats.JSONL.value
+        for shards in self.priorities.values():
+            for shard in shards:
+                try:
+                    _, shard_id, _ = derive_cmf_and_shard_ids(shard)
+                except Exception as e:
+                    Logger(
+                        f"Skipping shard with unresolvable id during post-process: {e}",
+                        Logger.Levels.warning,
+                    ).log()
+                    continue
+                if shard_id in seen_ids:
+                    continue
+                seen_ids.add(shard_id)
+                path = os.path.join(dir_path, shard_id + suffix)
+                if not os.path.isfile(path):
+                    # Analyzer didn't write a JSONL for this shard — nothing
+                    # to patch.  Quiet skip (a missing file isn't an error).
+                    continue
+                shard_paths.append(path)
+
+        if not shard_paths:
             return
 
-        # One worker_pool per shard file (writer owns the file).
         for shard_jsonl in SmartTQDM(
-            jsonl_files,
+            shard_paths,
             desc='Post-process shards: ',
             **sys_config.TQDM_CONFIG,
         ):
             self._run_jsonl(
-                os.path.join(dir_path, shard_jsonl),
+                shard_jsonl,
                 num_workers=num_workers,
                 config_overrides=config_overrides,
             )

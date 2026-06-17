@@ -29,6 +29,7 @@ from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
+from dreamer.utils.rand import derive_py_random
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
 from dreamer.utils.ui.tqdm_config import SmartTQDM
@@ -56,12 +57,16 @@ class NoInitialPopulation(Exception):
 # Reference operators (translated from resources/code/algos/genetic.py)
 # ---------------------------------------------------------------------------
 
-def _crossover(z1: np.ndarray, z2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Single-point crossover over the flatland coordinate vector."""
+def _crossover(z1: np.ndarray, z2: np.ndarray, rng: random.Random) -> Tuple[np.ndarray, np.ndarray]:
+    """Single-point crossover over the flatland coordinate vector.
+
+    :param rng: seeded :class:`random.Random` (per-(shard, method, constant)) — see
+        :func:`dreamer.utils.rand.derive_py_random` — so the operator is reproducible.
+    """
     d = len(z1)
     if d < 2:
         return z1.copy(), z2.copy()
-    point = random.randint(1, d - 1)
+    point = rng.randint(1, d - 1)
     c1 = np.concatenate([z1[:point], z2[point:]])
     c2 = np.concatenate([z2[:point], z1[point:]])
     return c1, c2
@@ -74,6 +79,7 @@ def _mutate(
     mutation_prob: float,
     refine_prob: float,
     refine_coord_prob: float,
+    rng: random.Random,
 ) -> np.ndarray:
     """Mutate a flatland genome vector.
 
@@ -83,23 +89,25 @@ def _mutate(
       with ``refine_coord_prob``; guarantee ≥ 1 coord changes.
     * Coarse mode (otherwise): per-coord add ``randint(-max_step, max_step)``
       with ``mutation_prob``.
+
+    :param rng: seeded :class:`random.Random` for reproducibility.
     """
-    if random.random() < refine_prob:
+    if rng.random() < refine_prob:
         new_z = 2 * z.copy()
         changed = False
         for i in range(len(new_z)):
-            if random.random() < refine_coord_prob:
-                new_z[i] += random.choice([-1, 1])
+            if rng.random() < refine_coord_prob:
+                new_z[i] += rng.choice([-1, 1])
                 changed = True
         if not changed and len(new_z) > 0:
-            idx = random.randrange(len(new_z))
-            new_z[idx] += random.choice([-1, 1])
+            idx = rng.randrange(len(new_z))
+            new_z[idx] += rng.choice([-1, 1])
         return new_z
 
     new_z = z.copy()
     for i in range(len(new_z)):
-        if random.random() < mutation_prob:
-            new_z[i] += random.randint(-max_step, max_step)
+        if rng.random() < mutation_prob:
+            new_z[i] += rng.randint(-max_step, max_step)
     return new_z
 
 
@@ -177,6 +185,12 @@ class GeneticSearch(SearchMethod):
         if handler_cache is None:
             handler_cache = {}
 
+        # Per-(shard, method, constant) reproducible RNG for every GA operator
+        # (selection / crossover / mutation / population top-up).  Same GLOBAL_SEED
+        # + shard + constant => identical evolution; distinct shards/constants get
+        # independent streams (nondeterministic when GLOBAL_SEED is None).
+        self._rng_py = derive_py_random(shard_id, "genetic", str(constant))
+
         shard: Shard = self.space
         if geom is None:
             geom = FlatlandGeometry(shard)
@@ -250,12 +264,12 @@ class GeneticSearch(SearchMethod):
 
             # Reproduction until full.
             while len(next_pop) < pop_size:
-                p1 = random.choice(elites)
-                p2 = random.choice(elites)
+                p1 = self._rng_py.choice(elites)
+                p2 = self._rng_py.choice(elites)
 
                 # Single-point crossover (reference child asymmetry).
-                if random.random() < search_config.GA_CROSSOVER_PROB:
-                    c1, c2 = _crossover(p1, p2)
+                if self._rng_py.random() < search_config.GA_CROSSOVER_PROB:
+                    c1, c2 = _crossover(p1, p2, self._rng_py)
                 else:
                     c1, c2 = p1.copy(), p2.copy()
 
@@ -266,6 +280,7 @@ class GeneticSearch(SearchMethod):
                     mutation_prob=search_config.GA_MUTATION_PROB,
                     refine_prob=0.7,
                     refine_coord_prob=search_config.GA_REFINE_COORD_PROB,
+                    rng=self._rng_py,
                 )
                 c1 = self._repair(c1, geom)
                 next_pop.append(c1)
@@ -279,6 +294,7 @@ class GeneticSearch(SearchMethod):
                         mutation_prob=search_config.GA_MUTATION_PROB,
                         refine_prob=0.3,
                         refine_coord_prob=search_config.GA_REFINE_COORD_PROB,
+                        rng=self._rng_py,
                     )
                     c2 = self._repair(c2, geom)
                     next_pop.append(c2)
@@ -380,13 +396,14 @@ class GeneticSearch(SearchMethod):
             attempts += 1
             if not population:
                 break
-            base = random.choice(population).copy()
+            base = self._rng_py.choice(population).copy()
             cand = _mutate(
                 base,
                 max_step=1,
                 mutation_prob=0.5,
                 refine_prob=0.0,
                 refine_coord_prob=0.0,
+                rng=self._rng_py,
             )
             if self._valid_genome(cand, geom):
                 population.append(cand)
@@ -396,7 +413,7 @@ class GeneticSearch(SearchMethod):
 
         # Pad with copies if still short (will be repaired/mutated next gen).
         while len(population) < pop_size:
-            population.append(random.choice(population).copy())
+            population.append(self._rng_py.choice(population).copy())
 
         return population[:pop_size]
 

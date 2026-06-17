@@ -38,6 +38,22 @@ class AnalysisConfig(Configurable):
         default=-1,
         metadata={"description": "Minimum identified-trajectory ratio required to keep a shard; -1 disables filtering."},
     )
+    STORE_TRAJECTORIES_SEPARATELY: bool = field(
+        default=False,
+        metadata={
+            "description": (
+                "When True, the analysis stage writes its per-trajectory JSONL "
+                "records to a separate per-shard store under "
+                "sys_config.EXPORT_ANALYSIS_RESULTS (one <shard_id>.jsonl per "
+                "shard) instead of co-mingling them with the search results in "
+                "EXPORT_SEARCH_RESULTS. Cross-stage cache reuse is preserved: the "
+                "search stage still seeds its cache from the analysis store and "
+                "copies any reused record into EXPORT_SEARCH_RESULTS so the search "
+                "file stays self-contained. Default False keeps the legacy shared "
+                "layout."
+            )
+        },
+    )
 
     # ============================= Printing and error management =============================
     PRINT_FOR_EVERY_SEARCHABLE: bool = field(

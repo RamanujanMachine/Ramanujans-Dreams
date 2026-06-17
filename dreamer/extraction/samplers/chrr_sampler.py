@@ -98,11 +98,14 @@ def get_chrr_limits(idx, x, A_cols, b, current_Ax, R_sq) -> Tuple[float, float]:
 
 
 @njit(cache=True)
-def chrr_walker(A, A_cols, b, R_sq, start_point, n_desired, thinning, buf_out, max_steps):
+def chrr_walker(A, A_cols, b, R_sq, start_point, n_desired, thinning, buf_out, max_steps, rng_seed=-1):
     """
     A: (m, d)
     A_cols: (d, m) - Transposed A for fast column access
+    rng_seed: if >= 0, seeds numba's (serial) RNG for reproducibility.
     """
+    if rng_seed >= 0:
+        np.random.seed(rng_seed)
     ERROR_BOUND = 1e-8
     m, d = A.shape
     x = start_point.copy()
@@ -154,7 +157,7 @@ class CHRRSampler:
     Utility class for sampling primitive points in a cone intersecting a hypersphere.
     """
 
-    def __init__(self, A, b, R, thinning=3, start=None):
+    def __init__(self, A, b, R, thinning=3, start=None, *, seed: int = -1):
         """
         Continuous Hierarchical Random Walker Sampler inside a cone Ax < b intersecting ball with radius R.
         :param A: Matrix representing the cone
@@ -162,6 +165,9 @@ class CHRRSampler:
         :param R: Radius of the ball
         :param thinning: Measure of mixing - one of how many valid points to choose
         :param start: Starting point for the sampler.
+        :param seed: RNG seed for reproducibility (see :func:`dreamer.utils.rand.derive_seed`);
+            ``< 0`` uses OS entropy (nondeterministic).  Seeds both the continuous
+            start-point search and the (serial) walk kernel.
         """
         self.A = np.ascontiguousarray(A, dtype=np.float64)
         self.A_cols = np.ascontiguousarray(A.T, dtype=np.float64)
@@ -170,6 +176,8 @@ class CHRRSampler:
         self.R_sq = self.R ** 2
         self.thinning = thinning
         self.start = start
+        self.seed = int(seed)
+        self._rng = np.random.default_rng(seed if seed >= 0 else None)
 
     def find_start_point(self):
         """
@@ -182,7 +190,7 @@ class CHRRSampler:
         d = self.A.shape[1]
         for _ in range(10000):
             # Sample in a small box around origin or uniform in R
-            cand = np.random.uniform(-self.R / 10, self.R / 10, d)
+            cand = self._rng.uniform(-self.R / 10, self.R / 10, d)
             if np.linalg.norm(cand) > self.R:
                 continue
             if np.all(self.A @ cand < self.b):
@@ -216,7 +224,7 @@ class CHRRSampler:
             found_now, _ = chrr_walker(
                 self.A, self.A_cols, self.b, self.R_sq,
                 start_pt, n_samples, self.thinning,
-                buf, max_steps_per_round
+                buf, max_steps_per_round, self.seed
             )
 
             total_found += found_now

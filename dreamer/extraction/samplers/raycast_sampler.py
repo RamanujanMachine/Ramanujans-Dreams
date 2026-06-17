@@ -11,9 +11,18 @@ import math
 
 
 class RaycastPipelineSampler(Sampler):
-    def __init__(self, A_prime):
+    def __init__(self, A_prime, *, seed: int = -1):
+        """
+        :param A_prime: ``(rows, d_orig)`` constraint matrix of the shard.
+        :param seed: RNG seed for reproducibility (see
+            :func:`dreamer.utils.rand.derive_seed`); ``< 0`` uses OS entropy
+            (nondeterministic).  Seeds both the NumPy parts (cone-fraction dart
+            throw, uniformity check, final shuffle) and the guide-ray walk kernel.
+        """
         self.A_prime = A_prime
         self.d_orig: int = int(A_prime.shape[1])
+        self._seed = int(seed)
+        self._rng = np.random.default_rng(seed if seed >= 0 else None)
 
         Logger("Initializing Sampler: Conditioning...", Logger.Levels.debug).log()
         conditioner = HyperSpaceConditioner(self.A_prime, max_beta=10, defect_tolerance=5.0)
@@ -21,7 +30,8 @@ class RaycastPipelineSampler(Sampler):
         self.d_flat = int(self.Z_reduced.shape[1])
         self.fraction = float(self._estimate_cone_fraction(
             self.B_reduced, self.d_flat,
-            samples=min(500_000, max(10_000, 10 ** self.d_flat)))
+            samples=min(500_000, max(10_000, 10 ** self.d_flat)),
+            rng=self._rng)
         )
         Logger(
             f"Shard Estimated Volume: {self.fraction * 100:.6f}% in {self.d_flat}D sampling space.",
@@ -31,18 +41,22 @@ class RaycastPipelineSampler(Sampler):
         super().__init__(self.d_flat)
 
     @staticmethod
-    def _estimate_cone_fraction(B: np.ndarray, d_flat: int, samples: int = 500_000) -> float:
+    def _estimate_cone_fraction(B: np.ndarray, d_flat: int, samples: int = 500_000, rng=None) -> float:
         """
         Gaussian Measure Dart Throw.
         :param B: Bounds matrix
         :param d_flat: dimension of the flatland space
         :param samples: number of samples - darts to throw.
+        :param rng: optional :class:`numpy.random.Generator` for reproducibility;
+            ``None`` uses a fresh OS-entropy generator (nondeterministic).
         """
         if len(B) == 0:
             return 1.0
 
+        if rng is None:
+            rng = np.random.default_rng()
         # Pure Gaussian distribution (Spherically symmetric)
-        darts = np.random.randn(samples, d_flat)
+        darts = rng.standard_normal((samples, d_flat))
         darts /= np.linalg.norm(darts, axis=1, keepdims=True)
 
         valid_count = 0
@@ -70,15 +84,19 @@ class RaycastPipelineSampler(Sampler):
         return R_max
 
     @staticmethod
-    def _verify_uniformity(rays, fraction: float, d_flat: int) -> None:
+    def _verify_uniformity(rays, fraction: float, d_flat: int, rng=None) -> None:
         """
         Check the generated rays angular uniformity.
         :param rays: The generated rays
         :param fraction: The fraction of space the cone takes
         :param d_flat: The dimension of the sample space
+        :param rng: optional :class:`numpy.random.Generator` for the diagnostic
+            subsample; ``None`` uses a fresh OS-entropy generator.
         """
         if len(rays) < 2:
             return
+        if rng is None:
+            rng = np.random.default_rng()
 
         # 1. Calculate the dynamic theoretical threshold
         surface_dim = max(1.0, float(d_flat - 1))
@@ -89,7 +107,7 @@ class RaycastPipelineSampler(Sampler):
         threshold_degrees = theoretical_gap * 0.5
 
         sample_size = min(2000, len(rays))
-        sample = rays[np.random.choice(len(rays), sample_size, replace=False)]
+        sample = rays[rng.choice(len(rays), sample_size, replace=False)]
 
         # Normalize and compute cosine similarity matrix
         norms = np.linalg.norm(sample, axis=1, keepdims=True)
@@ -177,7 +195,7 @@ class RaycastPipelineSampler(Sampler):
             Logger.Levels.debug
         ).log()
         Logger("[Pipeline] Initializing Stage 2: Universal Raycaster...", Logger.Levels.debug).log()
-        sampler = RayCastingSamplingMethod(Z_reduced, B_reduced, self.d_orig, guidance_method)
+        sampler = RayCastingSamplingMethod(Z_reduced, B_reduced, self.d_orig, guidance_method, rng_seed=self._seed)
 
         # In exact mode we keep the internal shoot quota strict.
         guide_rays_to_shoot = int(target_rays * 3)
@@ -208,7 +226,7 @@ class RaycastPipelineSampler(Sampler):
             filtered_lengths = lengths[within_limit]
             sorted_indices = np.argsort(filtered_lengths)
             best_rays = filtered_rays[sorted_indices][:target_rays]
-            np.random.shuffle(best_rays)
+            self._rng.shuffle(best_rays)
             final_rays = best_rays
             return final_rays
 
@@ -260,5 +278,5 @@ class RaycastPipelineSampler(Sampler):
         else:
             Logger(f"\tSearch radius used: {current_R_max:.2f}", Logger.Levels.debug)
 
-        self._verify_uniformity(final_rays, fraction, d_flat)
+        self._verify_uniformity(final_rays, fraction, d_flat, rng=self._rng)
         return final_rays
