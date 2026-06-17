@@ -295,8 +295,8 @@ class SearchConfig(Configurable):
         metadata={"description": "Numerical-stability epsilon in the RMSprop / Adam denominator."},
     )
     GRAD_MAX_STEPS: int = field(
-        default=50,
-        metadata={"description": "Maximum number of gradient-ascent steps per constant (the manual step budget)."},
+        default=1000,
+        metadata={"description": "Safety ceiling on gradient-ascent steps per constant. The ascent normally stops earlier when no improving lattice move exists (the snapped step cannot reach a new in-cone trajectory) or delta plateaus for GRAD_PATIENCE steps; this bound only guards against a pathologically long productive climb."},
     )
     GRAD_PATIENCE: int = field(
         default=3,
@@ -305,10 +305,6 @@ class SearchConfig(Configurable):
     GRAD_IMPROVE_THRESHOLD: float = field(
         default=1e-3,
         metadata={"description": "Minimum delta gain counted as an improvement during the ascent."},
-    )
-    GRAD_GRAD_TOL: float = field(
-        default=1e-4,
-        metadata={"description": "Convergence stop: terminate when the estimated gradient L2 norm falls below this (no better step to take)."},
     )
     GRAD_FD_ANGLE: float = field(
         default=0.1,
@@ -368,8 +364,8 @@ class SearchConfig(Configurable):
         metadata={"description": "Numerical-stability epsilon in the Adam denominator for the SPSA macro-navigation."},
     )
     SPSA_MAX_STEPS: int = field(
-        default=100,
-        metadata={"description": "Maximum number of SPSA macro-navigation steps per constant before the search is forced into the discrete fallback / terminates."},
+        default=1000,
+        metadata={"description": "Safety ceiling on SPSA macro-navigation steps per constant. The macro phase normally ends earlier on a resolution-derived stall (Adam step below the lattice min-angle, loop, out-of-cone, or unidentified probe); this bound only guards against a pathologically long productive climb. Either way the run always finishes with the discrete ±1-neighbour local-maximum certificate."},
     )
     SPSA_LOOP_WINDOW: int = field(
         default=10,

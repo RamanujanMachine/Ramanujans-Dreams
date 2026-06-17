@@ -365,28 +365,85 @@ class TestSeedSelection:
 # ---------------------------------------------------------------------------
 
 class TestConvergenceStop:
-    def test_vanishing_gradient_stops(self, whole_space_shard, monkeypatch):
-        """When the estimated gradient norm is below GRAD_GRAD_TOL the ascent stops."""
+    def test_no_improving_move_stops(self, whole_space_shard, monkeypatch):
+        """A constant-delta landscape has no improving lattice move, so the ascent
+        stops via the no-move break (zero gradient -> zero Adam step -> snap leaves
+        ``z`` unchanged), not via any manual gradient-magnitude threshold.
+
+        Termination is resolution-driven: ``GRAD_GRAD_TOL`` was removed, and
+        ``GRAD_MAX_STEPS`` is only a safety ceiling — it must not be the reason the
+        loop ends here (it stops on the very first step)."""
         import dreamer.search.methods.gradient_ascent.grad_ascent_scan as gs
+        import dreamer.search.methods.flatland.discrete_local_max as dlm
         from dreamer.extraction.samplers import ShardSamplingOrchestrator
 
         method = GradientAscentSearch(whole_space_shard, e, use_LIReC=False)
 
         # Seed identifies; every evaluation returns a constant delta -> zero gradient.
-        monkeypatch.setattr(gs, "evaluate_in_flatland", lambda z, **kw: (0.5, True))
+        eval_count = [0]
+
+        def fake_eval(z, **kw):
+            eval_count[0] += 1
+            return 0.5, True
+
+        # The ascent evaluates via the gs binding; the always-on local-maximum
+        # certificate evaluates via the shared-module binding.
+        monkeypatch.setattr(gs, "evaluate_in_flatland", fake_eval)
+        monkeypatch.setattr(dlm, "evaluate_in_flatland", fake_eval)
         monkeypatch.setattr(
             ShardSamplingOrchestrator, "sample_trajectories",
             lambda self, n: {Position({s: sp.Integer(1) if i == 0 else sp.Integer(0)
                                        for i, s in enumerate(whole_space_shard.symbols)})},
         )
-        monkeypatch.setattr(config.search, "GRAD_MAX_STEPS", 100, raising=False)
+        # A large safety ceiling: the run must end via the no-move break long before
+        # exhausting it (proving termination is not the step budget).
+        monkeypatch.setattr(config.search, "GRAD_MAX_STEPS", 1000, raising=False)
         monkeypatch.setattr(config.search, "GRAD_RESERVOIR_SIZE", 1, raising=False)
-        monkeypatch.setattr(config.search, "GRAD_GRAD_TOL", 1e-6, raising=False)
 
-        # Constant delta => forward differences are exactly 0 => stop on step 1.
         method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",
                    sink=lambda x: None, seen_trajectories={})
         assert method.best_delta == pytest.approx(0.5)
+        # The no-move break fires on the first step: seed + one zero-gradient probe
+        # pass + the one-sweep local-max certificate.  Far below GRAD_MAX_STEPS
+        # (1000) worth of evaluations, proving termination is resolution-driven.
+        assert eval_count[0] < 20
+
+    def test_certificate_climbs_neighbour_continuous_phase_missed(self, whole_space_shard, monkeypatch):
+        """The final discrete certificate moves to an improving ±1 neighbour even
+        when the continuous ascent stopped (here: a delta spike one step away that
+        the zero-gradient continuous phase cannot see)."""
+        import dreamer.search.methods.gradient_ascent.grad_ascent_scan as gs
+        import dreamer.search.methods.flatland.discrete_local_max as dlm
+        from dreamer.extraction.samplers import ShardSamplingOrchestrator
+
+        method = GradientAscentSearch(whole_space_shard, e, use_LIReC=False)
+
+        # Flat everywhere (delta 0) except a spike at the +e1 neighbour of the seed
+        # (1,0,...) -> (1,1,0,...) — a genuinely distinct ray (not collinear with
+        # the seed).  The continuous gradient is ~0 (every angle probe snaps back to
+        # the seed), so the ascent no-move-stops at the seed; only the discrete
+        # ±1-neighbour certificate reaches the spike.
+        def fake_eval(z, **kw):
+            z = np.asarray(z)
+            spike = z[0] == 1 and z[1] == 1 and not np.any(z[2:])
+            return (1.0 if spike else 0.0), True
+
+        monkeypatch.setattr(gs, "evaluate_in_flatland", fake_eval)
+        monkeypatch.setattr(dlm, "evaluate_in_flatland", fake_eval)
+        monkeypatch.setattr(
+            ShardSamplingOrchestrator, "sample_trajectories",
+            lambda self, n: {Position({s: sp.Integer(1) if i == 0 else sp.Integer(0)
+                                       for i, s in enumerate(whole_space_shard.symbols)})},
+        )
+        monkeypatch.setattr(config.search, "GRAD_RESERVOIR_SIZE", 1, raising=False)
+        # Improvement threshold below the spike so the move counts as strict.
+        monkeypatch.setattr(config.search, "GRAD_IMPROVE_THRESHOLD", 1e-6, raising=False)
+
+        method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",
+                   sink=lambda x: None, seen_trajectories={})
+        # Without the certificate this would be 0.0 (seed delta); the certificate
+        # climbs to the neighbouring spike.
+        assert method.best_delta == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------

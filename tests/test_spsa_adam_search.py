@@ -30,6 +30,7 @@ from dreamer.search.methods.gradient_ascent.spsa_adam_ascent import (
     NoInitialIdentification,
 )
 import dreamer.search.methods.gradient_ascent.spsa_adam_ascent as spsa
+import dreamer.search.methods.flatland.discrete_local_max as dlm
 
 search_config = config.search
 
@@ -129,7 +130,7 @@ class TestSpsaGradient:
 
 
 # ---------------------------------------------------------------------------
-# 3. Orthogonal neighbours
+# 3. Orthogonal neighbours (shared discrete local-max module)
 # ---------------------------------------------------------------------------
 
 class TestOrthogonalNeighbours:
@@ -137,7 +138,7 @@ class TestOrthogonalNeighbours:
         """On the x>=0,y>=0 cone, the -1 neighbours that leave the cone are dropped."""
         geom = FlatlandGeometry(simple_shard)
         z = np.array([2, 2], dtype=np.int64)[: geom.d_flat]
-        nbrs = HybridSPSASearch._orthogonal_neighbours(z, geom, max_norm=100.0, traj_norm="linf")
+        nbrs = dlm.orthogonal_neighbours(z, geom, max_norm=100.0, traj_norm="linf")
         # Each returned neighbour is inside the cone and differs from z in one coord by 1.
         for n in nbrs:
             assert geom.is_inside(n)
@@ -147,49 +148,50 @@ class TestOrthogonalNeighbours:
         """A -1 step that produces the zero vector is rejected (not a trajectory)."""
         geom = FlatlandGeometry(whole_space_shard)
         z = np.zeros(geom.d_flat, dtype=np.int64); z[0] = 1
-        nbrs = HybridSPSASearch._orthogonal_neighbours(z, geom, max_norm=100.0, traj_norm="linf")
+        nbrs = dlm.orthogonal_neighbours(z, geom, max_norm=100.0, traj_norm="linf")
         assert all(np.any(n) for n in nbrs)
 
     def test_norm_cap_excludes_long_neighbours(self, whole_space_shard):
         geom = FlatlandGeometry(whole_space_shard)
         z = np.zeros(geom.d_flat, dtype=np.int64); z[0] = 3
-        nbrs = HybridSPSASearch._orthogonal_neighbours(z, geom, max_norm=3.0, traj_norm="linf")
+        nbrs = dlm.orthogonal_neighbours(z, geom, max_norm=3.0, traj_norm="linf")
         # The +1 step to [4, ...] exceeds the linf cap of 3 and is excluded.
         assert all(geom.traj_norm(n, "linf") <= 3.0 for n in nbrs)
 
 
 # ---------------------------------------------------------------------------
-# 4. Discrete hill-climb (micro-navigation)
+# 4. Discrete hill-climb / local-maximum certificate (shared module)
 # ---------------------------------------------------------------------------
 
 class TestDiscreteHillClimb:
     def test_climbs_to_local_max_and_stops(self, whole_space_shard, monkeypatch):
         """delta peaks at z[0]=3: the climb walks 1->2->3 then stops (no improver)."""
-        method = HybridSPSASearch(whole_space_shard, e, use_LIReC=False)
         geom = FlatlandGeometry(whole_space_shard)
 
         # Concave landscape in the first coordinate, peak at 3, others neutral.
         def fake_eval(z, **kw):
             z0 = float(np.asarray(z)[0])
             return -abs(z0 - 3.0), True
-        monkeypatch.setattr(spsa, "evaluate_in_flatland", fake_eval)
+        # The shared hill-climb evaluates via its OWN module binding.
+        monkeypatch.setattr(dlm, "evaluate_in_flatland", fake_eval)
 
         start = np.zeros(geom.d_flat, dtype=np.int64); start[0] = 1
-        z_final, delta_final = method._discrete_hill_climb(
-            start, -2.0, geom, _ctx(whole_space_shard, geom), "sid", e, max_norm=100.0, pool=None,
+        z_final, delta_final = dlm.discrete_hill_climb(
+            start, -2.0, geom=geom, eval_ctx=_ctx(whole_space_shard, geom),
+            max_norm=100.0, traj_norm="linf", improve_threshold=1e-9, pool=None,
         )
         assert int(z_final[0]) == 3
         assert delta_final == pytest.approx(0.0)
 
     def test_terminates_immediately_at_local_max(self, whole_space_shard, monkeypatch):
         """A flat landscape: no neighbour strictly improves -> no move."""
-        method = HybridSPSASearch(whole_space_shard, e, use_LIReC=False)
         geom = FlatlandGeometry(whole_space_shard)
-        monkeypatch.setattr(spsa, "evaluate_in_flatland", lambda z, **kw: (0.5, True))
+        monkeypatch.setattr(dlm, "evaluate_in_flatland", lambda z, **kw: (0.5, True))
 
         start = np.zeros(geom.d_flat, dtype=np.int64); start[0] = 2
-        z_final, delta_final = method._discrete_hill_climb(
-            start, 0.5, geom, _ctx(whole_space_shard, geom), "sid", e, max_norm=100.0, pool=None,
+        z_final, delta_final = dlm.discrete_hill_climb(
+            start, 0.5, geom=geom, eval_ctx=_ctx(whole_space_shard, geom),
+            max_norm=100.0, traj_norm="linf", improve_threshold=1e-9, pool=None,
         )
         np.testing.assert_array_equal(z_final, start)
         assert delta_final == pytest.approx(0.5)
@@ -239,10 +241,14 @@ class TestSeedSelection:
 class TestEndToEndStallFallback:
     def test_flat_landscape_stalls_then_terminates(self, whole_space_shard, symbols, monkeypatch):
         """A constant-delta (zero-gradient) landscape: SPSA produces a zero Adam
-        step (< min_angle) -> stall -> discrete fallback finds no improver -> done."""
+        step (< min_angle) -> stall -> discrete certificate finds no improver -> done."""
         from dreamer.extraction.samplers import ShardSamplingOrchestrator
         method = HybridSPSASearch(whole_space_shard, e, use_LIReC=False)
-        monkeypatch.setattr(spsa, "evaluate_in_flatland", lambda z, **kw: (0.42, True))
+        const_eval = lambda z, **kw: (0.42, True)
+        # The macro phase evaluates via the spsa-module binding; the always-on
+        # discrete certificate evaluates via the shared-module binding.
+        monkeypatch.setattr(spsa, "evaluate_in_flatland", const_eval)
+        monkeypatch.setattr(dlm, "evaluate_in_flatland", const_eval)
         monkeypatch.setattr(ShardSamplingOrchestrator, "sample_trajectories",
                             lambda self, n: {Position({symbols[0]: sp.Integer(1),
                                                        symbols[1]: sp.Integer(0)})})
@@ -252,3 +258,5 @@ class TestEndToEndStallFallback:
         method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",
                    sink=lambda x: None, seen_trajectories={})
         assert method.best_delta == pytest.approx(0.42)
+        # The discrete certificate ran (constant landscape -> stall -> fallback).
+        assert method.used_discrete_fallback is True

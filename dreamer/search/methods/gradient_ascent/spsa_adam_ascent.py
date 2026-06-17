@@ -41,14 +41,19 @@ flip to a *distinct* lattice direction is roughly ``sin θ ≈ 1/L²``.  We enfo
   visited integer trajectories; revisiting one (Adam oscillating at a peak under
   accumulated momentum) forces a stall.
 
-Micro-navigation (discrete fallback)
-------------------------------------
-On a stall or loop we **drop Adam** (``reset()``) and switch to evaluating the
-``2D`` minimal integer neighbours of the current trajectory (one coordinate
-``±1``).  Neighbours are routed through the shard-cone boundary filter
-(``A·v ≤ 0``) so invalid shards are never walked.  We greedily move to the
-strictly-best neighbour and repeat; when no orthogonal neighbour improves δ we
-have reached the **true discrete local maximum** and terminate.
+Micro-navigation (discrete local-maximum certificate)
+-----------------------------------------------------
+The macro phase **always** finishes with the shared discrete ±1-neighbour
+hill-climb (:func:`flatland.discrete_local_max.discrete_hill_climb`): Adam state
+is dropped (``reset()``) and we evaluate the ``2D`` minimal integer neighbours of
+the current trajectory (one coordinate ``±1``), routed through the shard-cone
+boundary filter (``A·v ≤ 0``) so invalid shards are never walked, greedily moving
+to the strictly-best neighbour until none improves δ — the **true discrete local
+maximum** at the lattice resolution.  When the macro phase stalled (plateau /
+loop / unidentified) this is the *fallback* that escapes the plateau; when it
+merely exhausted its (safety) step budget while still moving, this *confirms* the
+result is a genuine ±1 local max rather than wherever the budget cut off.  The
+same routine is the local-maximum certificate used by Gradient Ascent.
 
 Output uses the shared :func:`evaluate_in_flatland` Tier-1 DTO pipeline (sink /
 walk-reuse cache), identical to the other flatland search methods.
@@ -63,9 +68,9 @@ from ramanujantools import Position
 from dreamer.configs import config
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
+from dreamer.search.methods.flatland.discrete_local_max import discrete_hill_climb
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
-from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.search.methods.gradient_ascent.lattice import snap_to_trajectory
 from dreamer.search.methods.gradient_ascent.optimizers import Adam
 from dreamer.utils.constants.constant import Constant
@@ -308,20 +313,38 @@ class HybridSPSASearch(SearchMethod):
             if delta_new > best_delta:
                 best_delta = delta_new
 
-        # --- Micro-navigation: discrete orthogonal-neighbour fallback -------
-        if stalled:
-            self.used_discrete_fallback = True
-            Logger(
-                f"Transition: Adam/SPSA macro-navigation -> 2D-neighbour discrete "
-                f"fallback — shard {shard_id}, constant {constant.name} "
-                f"(D={geom.d_flat}, {2 * geom.d_flat} neighbours).",
+        # --- Micro-navigation: discrete local-maximum certificate -----------
+        # The discrete ±1-neighbour hill-climb ALWAYS runs as the final step,
+        # regardless of how the macro phase ended.  When the macro phase *stalled*
+        # (plateau / loop / unidentified) it is the fallback that escapes the
+        # lattice plateau; when the macro phase merely ran out its SAFETY step
+        # budget while still moving, it confirms the result is a genuine ±1 local
+        # maximum (the lattice resolution is exhausted) instead of wherever the
+        # budget happened to cut off.  Adam state is dropped first either way.
+        self.used_discrete_fallback = stalled
+        Logger(
+            (f"Transition: Adam/SPSA macro-navigation -> 2D-neighbour discrete "
+             f"fallback — shard {shard_id}, constant {constant.name} "
+             f"(D={geom.d_flat}, {2 * geom.d_flat} neighbours).")
+            if stalled else
+            (f"SPSA macro budget reached — shard {shard_id}, constant "
+             f"{constant.name}: confirming discrete local maximum via the "
+             f"{2 * geom.d_flat} ±1 neighbours."),
+            Logger.Levels.info,
+        ).log()
+        optimizer.reset()  # completely drop Adam state before the discrete phase.
+        cur_z, cur_delta = discrete_hill_climb(
+            cur_z, cur_delta,
+            geom=geom, eval_ctx=eval_ctx, max_norm=max_norm,
+            traj_norm=cfg.SEARCH_TRAJ_NORM, improve_threshold=cfg.SPSA_IMPROVE_FALLBACK,
+            pool=pool,
+            on_local_max=lambda z, dlt: Logger(
+                f"Discrete local maximum reached — shard {shard_id}, constant "
+                f"{constant.name}: δ={dlt:.6g} (no improving ±1 neighbour).",
                 Logger.Levels.info,
-            ).log()
-            optimizer.reset()  # completely drop Adam state at the handoff.
-            cur_z, cur_delta = self._discrete_hill_climb(
-                cur_z, cur_delta, geom, eval_ctx, shard_id, constant, max_norm, pool
-            )
-            best_delta = max(best_delta, cur_delta)
+            ).log(),
+        )
+        best_delta = max(best_delta, cur_delta)
 
         self.best_delta = best_delta
 
@@ -387,117 +410,6 @@ class HybridSPSASearch(SearchMethod):
             return g.astype(np.float64)
 
         return None
-
-    # ------------------------------------------------------------------
-    # Micro-navigation internals (discrete 2D-neighbour fallback)
-    # ------------------------------------------------------------------
-
-    def _discrete_hill_climb(
-        self,
-        cur_z: np.ndarray,
-        cur_delta: float,
-        geom: FlatlandGeometry,
-        eval_ctx: dict,
-        shard_id: str,
-        constant: Constant,
-        max_norm: float,
-        pool=None,
-    ) -> Tuple[np.ndarray, float]:
-        """Greedy ascent over the ``2D`` minimal integer neighbours until a local max.
-
-        Repeatedly evaluates the orthogonal neighbours of ``cur_z`` (each
-        coordinate ``±1``) that pass the shard-cone boundary filter and the norm
-        cap, and moves to the strictly-best one.  When no neighbour yields a
-        strictly larger δ, ``cur_z`` is the true discrete local maximum and the
-        search terminates.
-
-        :param cur_z: Current (best so far) integer flatland trajectory.
-        :param cur_delta: δ at ``cur_z``.
-        :param geom: Flatland geometry (provides the cone filter + norm).
-        :param eval_ctx: Evaluation context for :func:`evaluate_in_flatland`.
-        :param shard_id: Structural shard id (logging).
-        :param constant: The constant being searched (logging).
-        :param max_norm: Trajectory norm cap.
-        :param pool: Optional per-shard process pool for the neighbour batch.
-        :return: ``(z, delta)`` at the discrete local maximum.
-        """
-        cfg = search_config
-        traj_norm = cfg.SEARCH_TRAJ_NORM
-
-        while True:
-            # All 2D orthogonal ±1 neighbours (raw step, not GCD-reduced: we want
-            # the *minimal* integer move, faithful to the discrete lattice).
-            neighbours = self._orthogonal_neighbours(cur_z, geom, max_norm, traj_norm)
-            if not neighbours:
-                break  # boxed in by the cone / norm cap — current point is maximal.
-
-            results = self._evaluate_neighbours(neighbours, eval_ctx, pool)
-
-            best_z, best_delta = cur_z, cur_delta
-            for z_n, (delta_n, identified_n) in zip(neighbours, results):
-                if identified_n and delta_n > best_delta + cfg.SPSA_IMPROVE_FALLBACK:
-                    best_z, best_delta = z_n, delta_n
-
-            if best_delta <= cur_delta + cfg.SPSA_IMPROVE_FALLBACK:
-                # No strictly-better orthogonal neighbour -> discrete local maximum.
-                Logger(
-                    f"Discrete local maximum reached — shard {shard_id}, constant "
-                    f"{constant.name}: δ={cur_delta:.6g} (no improving ±1 neighbour).",
-                    Logger.Levels.info,
-                ).log()
-                break
-
-            cur_z, cur_delta = best_z, best_delta
-
-        return cur_z, cur_delta
-
-    @staticmethod
-    def _orthogonal_neighbours(
-        z: np.ndarray,
-        geom: FlatlandGeometry,
-        max_norm: float,
-        traj_norm: str,
-    ) -> List[np.ndarray]:
-        """Return the in-cone, length-capped ``±1`` orthogonal neighbours of ``z``.
-
-        Builds the ``2D`` candidates (one coordinate ``±1``), then keeps only those
-        that lie inside the shard cone (``A·v ≤ 0`` via ``is_inside_many``) and
-        within the real-space norm cap — so invalid shards are never walked.
-
-        :param z: Current integer flatland trajectory.
-        :param geom: Flatland geometry (cone filter + norm).
-        :param max_norm: Trajectory norm cap.
-        :param traj_norm: Norm used for the length cap (``SEARCH_TRAJ_NORM``).
-        :return: List of admissible neighbour vectors (possibly empty).
-        """
-        z = np.asarray(z, dtype=np.int64)
-        d_flat = geom.d_flat
-        cands = np.repeat(z[None, :], 2 * d_flat, axis=0)
-        for i in range(d_flat):
-            cands[2 * i, i] += 1
-            cands[2 * i + 1, i] -= 1
-
-        inside = geom.is_inside_many(cands)
-        within = geom.traj_norm_many(cands, traj_norm) <= max_norm
-        keep = inside & within
-        return [cands[j] for j in np.nonzero(keep)[0]]
-
-    @staticmethod
-    def _evaluate_neighbours(
-        neighbours: List[np.ndarray],
-        eval_ctx: dict,
-        pool=None,
-    ) -> List[Tuple[float, bool]]:
-        """Evaluate a neighbour batch, optionally across a per-shard process pool.
-
-        :param neighbours: Admissible neighbour vectors.
-        :param eval_ctx: Evaluation context for :func:`evaluate_in_flatland`.
-        :param pool: Optional persistent per-shard process pool.
-        :return: ``(delta, identified)`` per neighbour, in input order.
-        """
-        if pool is not None and len(neighbours) > 1:
-            return evaluate_batch(neighbours, eval_ctx=eval_ctx, pool=pool)
-        return [evaluate_in_flatland(z, **eval_ctx) for z in neighbours]
 
     # ------------------------------------------------------------------
     # Seeding

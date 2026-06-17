@@ -17,9 +17,22 @@ Design choices:
   realize + evaluate, and form ``g_i = (delta_i - base_delta) / angle``.
 * Optimizer variants (vanilla / momentum / RMSprop / Adam) are selected via the
   :mod:`optimizers` strategy and ``GRAD_VARIANT``.
-* **Convergence stop:** the ascent terminates when the gradient is too small to
-  act on, the snapped step cannot move, patience is exhausted, or the step
-  budget is spent — it never spins on a local optimum.
+* **Convergence stop (resolution-driven):** ``delta`` realized through
+  :func:`snap_to_trajectory` is *piecewise-constant* on the integer lattice, so a
+  small estimated gradient norm is not a reliable "near optimum" signal (and Adam
+  rescales the step regardless of gradient magnitude).  The ascent therefore runs
+  until it can no longer make an **improving lattice move** at the current
+  resolution — the snapped step cannot reach a new in-cone trajectory
+  (``z_new == cur_z`` / ``None``) or ``delta`` plateaus for ``GRAD_PATIENCE``
+  steps.  ``GRAD_MAX_STEPS`` is only a safety ceiling.  It never spins on a local
+  optimum.  The lattice resolution itself is set by ``SEARCH_MAX_TRAJ_LEN``.
+* **Local-maximum certificate:** the ascent always finishes with the shared
+  discrete ±1-neighbour hill-climb
+  (:func:`flatland.discrete_local_max.discrete_hill_climb`).  Adam combines the
+  per-axis probes into a single step, so the continuous loop can stop where a
+  coordinate-axis neighbour still improves δ; the certificate climbs any such
+  neighbour and guarantees the returned trajectory is a genuine discrete local
+  maximum at the resolution.
 * **Non-identified handling (three-stage):** skip the offending probe; after
   ``GRAD_SKIP_LIMIT`` unproductive steps, length-double; after
   ``GRAD_MAX_DOUBLINGS`` doublings, *diffract* off the wall by drawing a random
@@ -36,12 +49,14 @@ from ramanujantools import Position
 from dreamer.configs import config
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
+from dreamer.search.methods.flatland.discrete_local_max import discrete_hill_climb
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.search.methods.gradient_ascent.lattice import rotate_toward, snap_to_trajectory
 from dreamer.search.methods.gradient_ascent.optimizers import optimizer_for
 from dreamer.utils.constants.constant import Constant
+from dreamer.utils.logger import Logger
 from dreamer.utils.rand import derive_rng
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
@@ -217,10 +232,6 @@ class GradientAscentSearch(SearchMethod):
                 optimizer.reset()
                 continue
 
-            # --- Convergence stop: gradient too small to act on ---
-            if float(np.linalg.norm(grad)) < cfg.GRAD_GRAD_TOL:
-                break
-
             # --- 2. Optimizer update + lattice realization (backtrack into cone) ---
             update = optimizer.step(grad)
             z_new, d_new = self._stepped_direction(d, update, geom, cfg.GRAD_LR, max_norm)
@@ -256,6 +267,27 @@ class GradientAscentSearch(SearchMethod):
             no_improve = 0 if improved else no_improve + 1
             if no_improve >= cfg.GRAD_PATIENCE:
                 break
+
+        # --- Discrete local-maximum certificate -----------------------------
+        # The continuous ascent stops on a resolution-derived signal (no snapped
+        # move / δ plateau), but Adam combines the per-axis probes into a single
+        # step direction, so it can stop at a point where a coordinate-axis ±1
+        # neighbour — not aligned with that step — still improves δ.  Finish with
+        # the shared discrete hill-climb so GA returns a genuine ±1 local maximum
+        # at the lattice resolution (the honest "resolution exhausted" stop),
+        # climbing any improving neighbour the continuous phase left on the table.
+        cur_z, cur_delta = discrete_hill_climb(
+            cur_z, cur_delta,
+            geom=geom, eval_ctx=eval_ctx, max_norm=max_norm,
+            traj_norm=cfg.SEARCH_TRAJ_NORM, improve_threshold=cfg.GRAD_IMPROVE_THRESHOLD,
+            pool=pool,
+            on_local_max=lambda z, dlt: Logger(
+                f"Discrete local maximum reached — shard {shard_id}, constant "
+                f"{constant.name}: δ={dlt:.6g} (no improving ±1 neighbour).",
+                Logger.Levels.info,
+            ).log(),
+        )
+        best_delta = max(best_delta, cur_delta)
 
         self.best_delta = best_delta
 

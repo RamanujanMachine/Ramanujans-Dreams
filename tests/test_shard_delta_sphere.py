@@ -188,7 +188,8 @@ class TestCliParsers:
     @staticmethod
     def _args(**kw):
         base = dict(field=None, metric=None, sympy_attr=None, eigen_lognorm=None,
-                    subs=None, value_label=None)
+                    subs=None, value_label=None,
+                    numeric_convergence_rate=None, neg_numeric_convergence_rate=None)
         base.update(kw)
         return SimpleNamespace(**base)
 

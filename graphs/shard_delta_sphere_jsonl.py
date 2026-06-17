@@ -687,14 +687,18 @@ def plot_hyperplanes_on_sphere(ax, shard, spec: ProjectionSpec,
 # Core surface rendering
 # ===========================================================================
 
-def _best_camera(unit_xyz: np.ndarray, deltas: np.ndarray) -> Tuple[float, float, np.ndarray]:
-    """Camera (elev, azim) pointing at the highest-δ direction.
+def _best_camera(unit_xyz: np.ndarray, deltas: np.ndarray,
+                 center_on_min: bool = False) -> Tuple[float, float, np.ndarray]:
+    """Camera (elev, azim) pointing at the extreme-value direction.
 
     :param unit_xyz: ``(N, 3)`` unit-sphere points.
-    :param deltas: ``(N,)`` δ values.
+    :param deltas: ``(N,)`` values.
+    :param center_on_min: aim at the **lowest**-value direction instead of the
+        highest (the default).
     :return: ``(elev_deg, azim_deg, v_best)``.
     """
-    v_best = unit_xyz[int(np.nanargmax(deltas))]
+    idx = np.nanargmin(deltas) if center_on_min else np.nanargmax(deltas)
+    v_best = unit_xyz[int(idx)]
     elev = float(np.degrees(np.arcsin(np.clip(v_best[2], -1.0, 1.0))))
     azim = float(np.degrees(np.arctan2(v_best[1], v_best[0])))
     return elev, azim, v_best
@@ -932,19 +936,51 @@ def _make_norm(values: np.ndarray, step: Optional[float]):
     return plt.Normalize(vmin=vmin, vmax=vmax), vmin, vmax, step
 
 
-def _add_colorbar(fig, cmap, norm, vmin: float, vmax: float,
-                  step: float, label: str) -> None:
-    """Add the shared vertical colorbar on the right of the figure.
+# Colorbar placement per side: the colorbar axes rectangle (figure fraction),
+# the bar orientation, and the margins the spheres should occupy so they don't
+# overlap the bar.  ``wspace``/``hspace`` set by the layout are preserved (these
+# margins only set left/right/top/bottom).
+_COLORBAR_LAYOUT = {
+    "right":  dict(rect=[0.88, 0.12, 0.018, 0.76], orientation="vertical",
+                   margins=dict(left=0.02, right=0.86, top=0.97, bottom=0.03)),
+    "left":   dict(rect=[0.05, 0.12, 0.018, 0.76], orientation="vertical",
+                   margins=dict(left=0.15, right=0.99, top=0.97, bottom=0.03)),
+    "top":    dict(rect=[0.18, 0.91, 0.64, 0.02], orientation="horizontal",
+                   margins=dict(left=0.02, right=0.98, top=0.86, bottom=0.03)),
+    "bottom": dict(rect=[0.18, 0.07, 0.64, 0.02], orientation="horizontal",
+                   margins=dict(left=0.02, right=0.98, top=0.97, bottom=0.13)),
+}
+COLORBAR_POSITIONS = tuple(_COLORBAR_LAYOUT)
 
-    :param label: the colorbar axis label (e.g. the δ label or an attribute name).
+
+def _add_colorbar(fig, cmap, norm, vmin: float, vmax: float,
+                  step: float, label: str, position: str = "right") -> None:
+    """Add the shared colorbar (with its label) on the chosen side of the figure.
+
+    :param label: the colorbar label (the δ label or an attribute name).
     :param step: spacing between colorbar ticks.
+    :param position: one of ``"right"`` (default), ``"left"``, ``"top"``,
+        ``"bottom"`` - left/right are vertical, top/bottom horizontal.  The
+        spheres' margins are adjusted to make room for the bar on that side.
     """
-    cbar_ax = fig.add_axes([0.87, 0.12, 0.018, 0.76])
-    cbar = fig.colorbar(plt.cm.ScalarMappable(cmap=cmap, norm=norm), cax=cbar_ax)
+    cfg = _COLORBAR_LAYOUT.get(position)
+    if cfg is None:
+        raise ValueError(
+            f"colorbar position must be one of {COLORBAR_POSITIONS}, got {position!r}.")
+
+    # Re-flow the spheres to leave room on the chosen side (keeps wspace/hspace).
+    fig.subplots_adjust(**cfg["margins"])
+
+    cbar_ax = fig.add_axes(cfg["rect"])
+    horizontal = cfg["orientation"] == "horizontal"
+    cbar = fig.colorbar(plt.cm.ScalarMappable(cmap=cmap, norm=norm), cax=cbar_ax,
+                        orientation=cfg["orientation"])
     ticks = np.arange(vmin, vmax + step * 0.05, step)
     cbar.set_ticks(ticks)
     decimals = max(0, int(np.ceil(-np.log10(step)))) if step < 1 else 1
-    cbar.ax.set_yticklabels([f"{t:.{decimals}f}" for t in ticks], fontsize=13)
+    labels = [f"{t:.{decimals}f}" for t in ticks]
+    (cbar.ax.set_xticklabels if horizontal else cbar.ax.set_yticklabels)(
+        labels, fontsize=13)
     cbar.set_label(label, fontsize=16, labelpad=15)
 
 
@@ -968,6 +1004,8 @@ def generate_spheres(
     smooth_sigma: float = 1.5,
     line_width: float = 1.0,
     zoom: float = 1.4,
+    center_on_min: bool = False,
+    colorbar_position: str = "right",
     path_root: Optional[str] = None,
     explicit_paths: Optional[Dict[str, np.ndarray]] = None,
     draw_grid: bool = True,
@@ -1018,6 +1056,10 @@ def generate_spheres(
     :param line_width: stroke width of the great-circle / horizon lines.
     :param zoom: ``set_box_aspect`` zoom - larger draws the spheres bigger (which
         also makes the border lines look thinner relative to the sphere).
+    :param center_on_min: aim the camera at the lowest-value direction instead of
+        the highest (the default).
+    :param colorbar_position: where the colorbar (and its label) sits relative to
+        the spheres - ``"right"`` (default), ``"left"``, ``"top"`` or ``"bottom"``.
     :param path_root: optional second ``EXPORT_SEARCH_RESULTS`` dir whose
         trajectories are drawn as an ordered overlay path per shard.
     :param explicit_paths: optional ``{shard_id: (K, D) directions}`` overriding /
@@ -1133,7 +1175,8 @@ def generate_spheres(
     # patch; matplotlib's default depth-sort (``computed_zorder``) can paint the
     # surface over them, so the layout disables it and draws the lines above.
     # Scatter mode keeps depth ordering so the points stay on top of the lines.
-    layout_kwargs = dict(line_width=line_width, zoom=zoom, lines_on_top=(mode == "surface"))
+    layout_kwargs = dict(line_width=line_width, zoom=zoom,
+                         lines_on_top=(mode == "surface"), center_on_min=center_on_min)
     if one_sphere_per_shard:
         fig = _generate_atlas(per_shard, spec, cmap, norm, subspace_tol, draw_grid,
                               _resolve_path, _draw_content, max_atlas_cols, **layout_kwargs)
@@ -1141,7 +1184,8 @@ def generate_spheres(
         fig = _generate_single(per_shard, spec, cmap, norm, subspace_tol, draw_grid,
                                _resolve_path, _draw_content, **layout_kwargs)
 
-    _add_colorbar(fig, cmap, norm, vmin, vmax, value_step, value_label)
+    _add_colorbar(fig, cmap, norm, vmin, vmax, value_step, value_label,
+                  colorbar_position)
     print(f'Done!')
     if show:
         plt.show()
@@ -1178,7 +1222,7 @@ def _setup_sphere_ax(ax, zoom: float, lines_on_top: bool) -> None:
 def _generate_atlas(per_shard, spec, cmap, norm, tol, draw_grid, resolve_path,
                     draw_content, max_cols: int = 6, *,
                     line_width: float = 1.0, zoom: float = 1.4,
-                    lines_on_top: bool = True):
+                    lines_on_top: bool = True, center_on_min: bool = False):
     """Render one sphere per shard, wrapping into a ``rows x cols`` grid.
 
     A single row of N spheres becomes impractically wide for large N (and can
@@ -1199,7 +1243,7 @@ def _generate_atlas(per_shard, spec, cmap, norm, tol, draw_grid, resolve_path,
         if draw_grid:
             _draw_reference_grid(ax)
 
-        elev, azim, _ = _best_camera(unit_xyz, cam_scalar)
+        elev, azim, _ = _best_camera(unit_xyz, cam_scalar, center_on_min)
         draw_sphere_horizon(ax, elev, azim, line_width, hz)
         plot_hyperplanes_on_sphere(ax, shard, spec, elev, azim, line_width, pz)
         draw_overlay_path(ax, shard, resolve_path(shard), spec, tol)
@@ -1214,17 +1258,17 @@ def _generate_atlas(per_shard, spec, cmap, norm, tol, draw_grid, resolve_path,
 
 def _generate_single(per_shard, spec, cmap, norm, tol, draw_grid, resolve_path,
                      draw_content, *, line_width: float = 1.0, zoom: float = 1.4,
-                     lines_on_top: bool = True):
+                     lines_on_top: bool = True, center_on_min: bool = False):
     """Render every shard on one shared sphere (single global camera)."""
     hz, pz = _line_zorders(lines_on_top)
     fig = plt.figure(figsize=(6.0, 5.0), dpi=300)
     ax = fig.add_subplot(1, 1, 1, projection="3d")
     _setup_sphere_ax(ax, zoom, lines_on_top)
 
-    # Global camera = direction of the best δ across all shards.
+    # Global camera = direction of the extreme value across all shards.
     global_xyz = np.concatenate([u for _, u, _, _ in per_shard])
     global_scalar = np.concatenate([s for _, _, s, _ in per_shard])
-    elev, azim, _ = _best_camera(global_xyz, global_scalar)
+    elev, azim, _ = _best_camera(global_xyz, global_scalar, center_on_min)
 
     if draw_grid:
         _draw_reference_grid(ax)
@@ -1383,6 +1427,12 @@ def _build_cli():
                    help="Stroke width of the great-circle / horizon lines.")
     p.add_argument("--zoom", type=float, default=1.4,
                    help="Sphere zoom; larger = bigger spheres / thinner-looking borders.")
+    p.add_argument("--center-min", action="store_true",
+                   help="Centre the view on the minimum-value direction instead of "
+                        "the maximum (the default).")
+    p.add_argument("--colorbar", choices=COLORBAR_POSITIONS, default="right",
+                   help="Where the colorbar (and its label) sits relative to the "
+                        "spheres.")
     p.add_argument("--max-cols", type=int, default=6,
                    help="Max spheres per row in the atlas (wraps onto more rows).")
     p.add_argument("--grid-res", type=int, default=None,
@@ -1486,6 +1536,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         smooth_sigma=args.smooth_sigma,
         line_width=args.line_width,
         zoom=args.zoom,
+        center_on_min=args.center_min,
+        colorbar_position=args.colorbar,
         path_root=args.path_root,
         cmap_name=args.cmap,
         show=False,

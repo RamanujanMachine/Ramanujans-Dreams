@@ -52,6 +52,7 @@ from dreamer.utils.storage.trajectory_attributes import (
 )
 from dreamer.utils.multi_processing import load_seen_trajectories
 from dreamer.search.methods.hedgehog_scan import SerialSearcher
+import math
 
 analysis_config = config.analysis
 
@@ -128,6 +129,8 @@ class AnalyzerModV1(AnalyzerModScheme):
                 Logger.Levels.message,
             ).log()
 
+            shard_width = int(math.log10(len(shards))) + 1
+
             for i, shard in enumerate(shards):
                 cmf_id, shard_id, encoding_str = derive_cmf_and_shard_ids(shard)
 
@@ -156,12 +159,12 @@ class AnalyzerModV1(AnalyzerModScheme):
                             bd = per_const_best[c]
                             bd_str = f'{bd:.4f}' if bd is not None else 'N/A'
                             Logger(
-                                f"Shard {i+1} in {cmf_id} - searching {c.name}: best_delta={bd_str}",
+                                f"Shard {i+1:0{shard_width}d} in {cmf_id} - searching {c.name}: best_delta={bd_str} [identified: ✅]",
                                 Logger.Levels.info,
                             ).log()
                         else:
                             Logger(
-                                f"Shard {i+1} in {cmf_id} - searching {c.name}: not identified",
+                                f"Shard {i+1:0{shard_width}d} in {cmf_id} - searching {c.name}: {' ':<17} [identified: ❌]",
                                 Logger.Levels.info,
                             ).log()
 
