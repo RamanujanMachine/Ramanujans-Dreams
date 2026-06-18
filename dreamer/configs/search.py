@@ -21,7 +21,7 @@ def depth_from_len(traj_len, dim) -> int:
     :param dim: CMF dimensionality.
     :return: Walk depth, capped at 1500.
     """
-    return min(round(1500 / max(traj_len / math.sqrt(dim), 1)), 1500)
+    return max(round(2000 / max(traj_len / math.sqrt(dim), 1)), 1000)
 
 # def ga_generations(dim: int) -> int:
 #     return 15 + 4 * dim
