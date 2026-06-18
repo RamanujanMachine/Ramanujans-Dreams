@@ -49,6 +49,16 @@ class SystemConfig(Configurable):
         default=None,
         metadata={"description": "Optional directory path for persisting analyzed shard priorities."},
     )
+    EXPORT_GRAPHS: str = field(
+        default='graphs.tempdir',
+        metadata={
+            "description": (
+                "Directory the post-process graphing stage writes figures and "
+                "tables to (delta-sequence plots, delta histograms, bumpiness "
+                "tables). Only used when GraphConfig enables at least one graph."
+            )
+        },
+    )
     EXPORT_SEARCH_RESULTS: str = field(
         default='search_results.tempdir',
         metadata={"description": "Directory used by search stage to save discovered results and metadata."},

@@ -1438,7 +1438,7 @@ class TestMergeOnRead:
         )
 
         patch = {"trajectory_id": "t1", "extended_metrics": {}}
-        out = compute_tier3_for_item((handler.trajectory_matrix(), e.value_sympy, patch))
+        out = compute_tier3_for_item((handler.trajectory_matrix(), e.value_sympy, patch, None))
 
         assert out is patch  # same dict, mutated in place
         # kamidelta either computed successfully or recorded as an error;

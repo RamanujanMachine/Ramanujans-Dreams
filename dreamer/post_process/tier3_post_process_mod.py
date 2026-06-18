@@ -30,10 +30,10 @@ empty — no JSONL is read, no subprocesses created.
 """
 
 import os
-from typing import Dict, List, Optional, Tuple
+from collections import defaultdict
+from typing import Dict, List, Optional, Set, Tuple
 
 import sympy as sp
-from ramanujantools import Position
 
 from dreamer.configs import config
 from dreamer.configs.system import sys_config
@@ -47,8 +47,18 @@ from dreamer.utils.multi_processing import (
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.schemes.post_process_scheme import PostProcessModScheme
 from dreamer.utils.schemes.searchable import Searchable
-from dreamer.utils.storage import Formats, Importer
+from dreamer.utils.storage import Formats
 from dreamer.utils.storage.attribute_registry import attribute_name, compute_attributes
+from dreamer.utils.storage.handler_reconstruction import (
+    build_cmf_lookup_from_priorities,
+    reconstruct_positions,
+)
+from dreamer.utils.storage.predicate_specs import (
+    TopNSelector,
+    iter_top_n_selectors,
+    parse_predicate_spec,
+)
+from dreamer.utils.storage.record_metrics import METRIC_EXTRACTORS
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     derive_cmf_and_shard_ids,
@@ -65,11 +75,15 @@ post_process_config = config.post_process
 def compute_tier3_for_item(item):
     """Per-item worker for the post-process stage.
 
-    *item* is ``(trajectory_matrix, constant, patch_dict)`` where *constant*
-    is the sympy expression for the target constant (e.g. ``sp.log(2)``).
-    Constant context is required by attributes that compare against the
-    limit (``delta_sequence``, ``limit``); pass ``None`` when none is
-    available — those attributes will then be skipped with an error entry.
+    *item* is ``(trajectory_matrix, constant, patch_dict, context)`` where
+    *constant* is the sympy expression for the target constant (e.g.
+    ``sp.log(2)``).  Constant context is required by attributes that compare
+    against the limit (``delta_sequence``, ``limit``); pass ``None`` when none
+    is available — those attributes will then be skipped with an error entry.
+    *context* is the shard/CMF predicate context (``{"trajectory_id": ...,
+    "top_n_sets": {...}}``) threaded into ``compute_attributes`` so shard-level
+    gates (``top N highest <metric> in shard|cmf``) fire; ``None`` for the
+    legacy no-context path.
 
     Reads ``post_process.TIER3_ATTRIBUTES`` from the (subprocess-local)
     config and computes every entry not already present in
@@ -79,7 +93,7 @@ def compute_tier3_for_item(item):
     """
     from dreamer.configs import config
 
-    traj_matrix, constant, patch = item
+    traj_matrix, constant, patch, context = item
     attrs_to_compute = config.post_process.TIER3_ATTRIBUTES
     extended_metrics = patch.setdefault("extended_metrics", {})
     # Specs may be bare strings or ``(name, predicate)`` tuples; filter by
@@ -93,7 +107,7 @@ def compute_tier3_for_item(item):
         try:
             handler = TrajectoryAttributesHandler(traj_matrix, constant=constant)
             extended_metrics.update(
-                compute_attributes(handler, missing, on_error="store")
+                compute_attributes(handler, missing, on_error="store", context=context)
             )
         except Exception as e:
             tid = patch.get("trajectory_id", "?")
@@ -140,10 +154,14 @@ class Tier3PostProcessModV1(PostProcessModScheme):
 
     @CatchErrorInModule(with_trace=sys_config.MODULE_ERROR_SHOW_TRACE, fatal=False)
     def execute(self) -> None:
-        if not post_process_config.TIER3_ATTRIBUTES:
-            # No work configured — stay completely silent and skip.
-            return
+        # Two independent sub-stages: Tier-3 attribute computation and graphing.
+        # Either can be enabled alone (e.g. graphs over already-computed JSONL
+        # with no new attributes).  Compute first so graphs see fresh metrics.
+        if post_process_config.TIER3_ATTRIBUTES:
+            self._compute_attributes_stage()
+        self._graphing_stage()
 
+    def _compute_attributes_stage(self) -> None:
         Logger(
             Logger.buffer_print(
                 sys_config.LOGGING_BUFFER_SIZE,
@@ -198,6 +216,15 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         if not shard_paths:
             return
 
+        # Phase 1 — ranking.  Precompute, for every "top N … in shard|cmf"
+        # selector referenced in the config, the set of trajectory ids that
+        # qualify.  Reads only stored JSONL metric values (no re-walk); skipped
+        # entirely when no top-N selector is configured.
+        selectors = iter_top_n_selectors(post_process_config.TIER3_ATTRIBUTES)
+        top_n_sets = self._compute_top_n_sets(selectors) if selectors else {}
+
+        # Phase 2 — compute.  One pass per shard JSONL, gating each trajectory's
+        # attributes with the precomputed top-N membership via ``context``.
         for shard_jsonl in SmartTQDM(
             shard_paths,
             desc='Post-process shards: ',
@@ -207,7 +234,16 @@ class Tier3PostProcessModV1(PostProcessModScheme):
                 shard_jsonl,
                 num_workers=num_workers,
                 config_overrides=config_overrides,
+                top_n_sets=top_n_sets,
             )
+
+    def _graphing_stage(self) -> None:
+        """Run the configured post-process graphs (no-op when none enabled)."""
+        if not config.graph.any_enabled():
+            return
+        # Imported lazily so matplotlib is only loaded when graphing is on.
+        from dreamer.graphing import Grapher
+        Grapher(self.priorities).generate()
 
     # ------------------------------------------------------------------
     # Per-file pipeline
@@ -219,11 +255,15 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         *,
         num_workers: int,
         config_overrides: dict,
+        top_n_sets: Optional[Dict[str, Set[str]]] = None,
     ) -> None:
         """Run the producer → worker_pool pipeline for one shard JSONL.
-        
+
         Skips entirely if every trajectory is already fully covered (no
         ``push`` calls → no ``worker_pool`` is created, no subprocess spawn).
+
+        :param top_n_sets: precomputed ``{selector.key: {trajectory_id}}`` from
+            Phase 1; used to gate (and pre-skip) top-N attributes per trajectory.
         """
         merged = load_seen_trajectories(jsonl_path)
         if not merged:
@@ -245,7 +285,7 @@ class Tier3PostProcessModV1(PostProcessModScheme):
             output_path=jsonl_path,
             config_overrides=config_overrides,
         ) as push:
-            self._produce(merged, desired, push)
+            self._produce(merged, desired, push, top_n_sets or {})
 
     # ------------------------------------------------------------------
     # Producer
@@ -256,15 +296,22 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         merged: Dict[str, dict],
         desired: set,
         sink,
+        top_n_sets: Dict[str, Set[str]],
     ) -> None:
-        """Emit ``(traj_matrix, patch)`` for every trajectory missing Tier-3 attrs.
+        """Emit ``(traj_matrix, constant, patch, context)`` for every trajectory
+        missing Tier-3 attrs *that can actually be computed*.
 
         Trajectories whose CMF cannot be resolved are logged and skipped.
+        Trajectories whose only-missing attributes are all gated off by a
+        ``top N … in shard|cmf`` selector (this trajectory is not in the
+        qualifying set) are **pre-skipped** — context alone settles them, so we
+        avoid building a handler for the (usually large) non-selected majority.
 
         The loop is wrapped in a tqdm bar — Tier-3 attributes (asymptotics,
         delta_sequence, …) can be minutes-per-trajectory, so without a
         progress indicator a long shard looks indistinguishable from a hang.
         """
+        resolved_specs = self._resolved_specs()
         items = [
             (tid, record)
             for tid, record in merged.items()
@@ -278,6 +325,13 @@ class Tier3PostProcessModV1(PostProcessModScheme):
             existing = set((record.get("extended_metrics") or {}).keys())
             missing = desired - existing
             if not missing:
+                continue
+
+            # Cheap pre-skip: if every missing attribute is gated off for this
+            # trajectory by a top-N selector, nothing will be computed — don't
+            # build the handler.  Handler-only / unconditional specs always
+            # survive here (they need the handler to decide).
+            if not self._survives_top_n(missing, tid, top_n_sets, resolved_specs):
                 continue
 
             cmf_name = record.get("cmf_id")
@@ -322,7 +376,142 @@ class Tier3PostProcessModV1(PostProcessModScheme):
                 continue
 
             patch = {"trajectory_id": tid, "extended_metrics": {}}
-            sink((handler.trajectory_matrix(), constant_sympy, patch))
+            context = self._build_context(tid, top_n_sets, resolved_specs)
+            sink((handler.trajectory_matrix(), constant_sympy, patch, context))
+
+    # ------------------------------------------------------------------
+    # Ranking (Phase 1) + predicate context
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolved_specs() -> List[Tuple[str, object]]:
+        """Resolve each configured Tier-3 spec to ``(attr_name, predicate)``.
+
+        ``predicate`` is ``None`` for an unconditional (bare-string) attribute,
+        a :class:`TopNSelector` for a shard/CMF gate, or another callable for a
+        handler-only predicate.  Resolution failures are treated as ``None`` so
+        the worker (not the producer) surfaces a misconfigured predicate.
+        """
+        out: List[Tuple[str, object]] = []
+        for spec in post_process_config.TIER3_ATTRIBUTES:
+            if isinstance(spec, str):
+                out.append((spec, None))
+                continue
+            name, pred_ref = spec
+            try:
+                out.append((name, parse_predicate_spec(pred_ref)))
+            except (KeyError, ValueError, TypeError):
+                out.append((name, None))
+        return out
+
+    @staticmethod
+    def _survives_top_n(
+        missing: Set[str],
+        tid: str,
+        top_n_sets: Dict[str, Set[str]],
+        resolved_specs: List[Tuple[str, object]],
+    ) -> bool:
+        """Return True if at least one *missing* attribute can still be computed
+        for ``tid`` after applying the context-only top-N gates."""
+        for name, predicate in resolved_specs:
+            if name not in missing:
+                continue
+            if isinstance(predicate, TopNSelector):
+                if tid in top_n_sets.get(predicate.key, set()):
+                    return True
+            else:
+                # Unconditional or handler-only predicate — can't decide here.
+                return True
+        return False
+
+    @staticmethod
+    def _build_context(
+        tid: str,
+        top_n_sets: Dict[str, Set[str]],
+        resolved_specs: List[Tuple[str, object]],
+    ) -> dict:
+        """Build the per-trajectory predicate context for the worker.
+
+        Only carries the membership the worker needs: for each referenced
+        top-N selector, a singleton ``{tid}`` when the trajectory qualifies
+        else an empty set — so the (possibly large) full id-set is never
+        shipped to subprocesses.
+        """
+        per_selector: Dict[str, Set[str]] = {}
+        for _name, predicate in resolved_specs:
+            if isinstance(predicate, TopNSelector):
+                qualifies = tid in top_n_sets.get(predicate.key, set())
+                per_selector[predicate.key] = {tid} if qualifies else set()
+        return {"trajectory_id": tid, "top_n_sets": per_selector}
+
+    def _compute_top_n_sets(
+        self,
+        selectors: List[TopNSelector],
+    ) -> Dict[str, Set[str]]:
+        """Phase-1 ranking: ``{selector.key: {trajectory_id}}`` over the
+        configured top-N selectors.
+
+        Rankings are computed per ``(constant, CMF)`` group (the metric for
+        ``delta`` is per-constant), reading only stored JSONL values via
+        :data:`record_metrics.METRIC_EXTRACTORS`.  A ``shard``-scoped selector
+        ranks within each shard; a ``cmf``-scoped one pools every shard of the
+        CMF.  Qualifying ids are unioned across constants, so a trajectory that
+        is top-N under any searched constant passes the gate.  Peak memory is
+        bounded to one CMF's records (loaded, ranked, then discarded).
+        """
+        sets: Dict[str, Set[str]] = {sel.key: set() for sel in selectors}
+        shard_scope = [s for s in selectors if s.scope == "shard"]
+        cmf_scope = [s for s in selectors if s.scope == "cmf"]
+        suffix = '.' + Formats.JSONL.value
+        dir_path = sys_config.EXPORT_SEARCH_RESULTS
+
+        for constant, shards in self.priorities.items():
+            const_name = getattr(constant, "name", None)
+            by_cmf: Dict[str, List[str]] = defaultdict(list)
+            for shard in shards:
+                try:
+                    cmf_id, shard_id, _ = derive_cmf_and_shard_ids(shard)
+                except Exception:
+                    continue
+                path = os.path.join(dir_path, shard_id + suffix)
+                if os.path.isfile(path):
+                    by_cmf[cmf_id].append(path)
+
+            for paths in by_cmf.values():
+                shard_records = {p: load_seen_trajectories(p) for p in paths}
+                for sel in shard_scope:
+                    for recs in shard_records.values():
+                        self._rank_into(sets[sel.key], recs, sel, const_name)
+                if cmf_scope:
+                    pooled: Dict[str, dict] = {}
+                    for recs in shard_records.values():
+                        pooled.update(recs)
+                    for sel in cmf_scope:
+                        self._rank_into(sets[sel.key], pooled, sel, const_name)
+        return sets
+
+    @staticmethod
+    def _rank_into(
+        target: Set[str],
+        records: Dict[str, dict],
+        selector: TopNSelector,
+        const_name: Optional[str],
+    ) -> None:
+        """Rank *records* by the selector's metric and add the top-N ids to *target*."""
+        extractor = METRIC_EXTRACTORS.get(selector.metric)
+        if extractor is None:
+            return
+        scored: List[Tuple[float, str]] = []
+        for tid, rec in records.items():
+            value = extractor(rec, const_name)
+            if value is None:
+                continue
+            scored.append((value, tid))
+        if not scored:
+            return
+        scored.sort(key=lambda vt: vt[0], reverse=selector.highest)
+        for _value, tid in scored[: selector.n]:
+            target.add(tid)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -332,23 +521,12 @@ class Tier3PostProcessModV1(PostProcessModScheme):
     def _build_cmf_lookup(
         priorities: Dict[Constant, List[Searchable]],
     ) -> Dict[str, object]:
-        """Return ``{cmf_name: CMF}`` from in-memory priorities.
+        """Return ``{cmf_name: CMF}`` from in-memory priorities (disk fallback).
 
-        If priorities is empty (e.g. post-process is being run standalone),
-        fall back to loading CMFs from ``sys_config.EXPORT_CMFS`` if set.
+        Thin wrapper over the shared
+        :func:`dreamer.utils.storage.handler_reconstruction.build_cmf_lookup_from_priorities`.
         """
-        lookup: Dict[str, object] = {}
-        for searchables in priorities.values():
-            for s in searchables:
-                cmf_name = getattr(s, 'cmf_name', None)
-                cmf = getattr(s, 'cmf', None)
-                if cmf_name and cmf is not None and cmf_name not in lookup:
-                    lookup[cmf_name] = cmf
-
-        if lookup:
-            return lookup
-
-        return Tier3PostProcessModV1._load_cmfs_from_disk()
+        return build_cmf_lookup_from_priorities(priorities)
 
     @staticmethod
     def _build_shard_lookup(
@@ -371,74 +549,10 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         return lookup
 
     @staticmethod
-    def _load_cmfs_from_disk() -> Dict[str, object]:
-        """Best-effort load of CMFs from ``sys_config.EXPORT_CMFS``.
-
-        Returns ``{}`` if the path is not configured or no usable files are
-        found.  Producer-side errors will be logged on a per-trajectory
-        basis when the lookup fails to resolve a name.
-        """
-        root = sys_config.EXPORT_CMFS
-        if not root or not os.path.isdir(root):
-            return {}
-
-        lookup: Dict[str, object] = {}
-        for const_dir in os.listdir(root):
-            const_path = os.path.join(root, const_dir)
-            if not os.path.isdir(const_path):
-                continue
-            for f_name in os.listdir(const_path):
-                file_path = os.path.join(const_path, f_name)
-                try:
-                    data = Importer.imprt(file_path)
-                except Exception:
-                    continue
-                for item in Tier3PostProcessModV1._iter_cmf_data(data):
-                    cmf_name = getattr(item, 'cmf_name', None)
-                    cmf = getattr(item, 'cmf', None)
-                    if cmf_name and cmf is not None:
-                        lookup.setdefault(cmf_name, cmf)
-        return lookup
-
-    @staticmethod
-    def _iter_cmf_data(data):
-        """Yield CMFData-shaped objects from a (possibly nested) imported payload."""
-        if data is None:
-            return
-        if hasattr(data, 'cmf') and hasattr(data, 'cmf_name'):
-            yield data
-            return
-        if isinstance(data, dict):
-            for v in data.values():
-                yield from Tier3PostProcessModV1._iter_cmf_data(v)
-        elif isinstance(data, (list, tuple, set)):
-            for v in data:
-                yield from Tier3PostProcessModV1._iter_cmf_data(v)
-
-    @staticmethod
     def _reconstruct_positions(cmf, record: dict):
         """Rebuild ``(start, direction)`` ``Position`` objects from JSONL fields.
 
-        Tuples in the record are stored in ``cmf.matrices.keys()`` order,
-        matching ``_position_to_tuple`` at write time.  Integers stored as
-        Python ``int`` are wrapped back into ``sp.Integer``; any non-integer
-        slot (rare — only when ``_position_to_tuple`` fell back to ``str``)
-        is parsed via ``sp.sympify`` so symbolic shifts survive the round-trip.
+        Thin wrapper over the shared
+        :func:`dreamer.utils.storage.handler_reconstruction.reconstruct_positions`.
         """
-        symbols = list(cmf.matrices.keys())
-
-        def _to_position(values) -> Position:
-            if values is None or len(values) != len(symbols):
-                raise ValueError(
-                    f"Position has {len(values) if values is not None else 0} entries; "
-                    f"CMF expects {len(symbols)}."
-                )
-            mapping: Dict[object, object] = {}
-            for sym, v in zip(symbols, values):
-                if isinstance(v, int):
-                    mapping[sym] = sp.Integer(v)
-                else:
-                    mapping[sym] = sp.sympify(v)
-            return Position(mapping)
-
-        return _to_position(record.get("start_point")), _to_position(record.get("direction"))
+        return reconstruct_positions(cmf, record)

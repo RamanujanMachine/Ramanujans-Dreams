@@ -230,17 +230,15 @@ def attribute_name(spec: AttributeSpec) -> str:
 def _resolve_predicate(pred: Union[str, Predicate]) -> Predicate:
     """Resolve a predicate reference to a callable.
 
-    Strings are looked up in :data:`PREDICATES`; callables are returned
-    as-is.  Raises ``KeyError`` on unknown names so misspelled configs fail
-    loudly.
+    Delegates to :func:`dreamer.utils.storage.predicate_specs.parse_predicate_spec`,
+    which understands the declarative grammar (``"max_degree below N"``,
+    ``"top N highest <metric> in shard|cmf"``) and falls back to the named
+    :data:`PREDICATES` registry for plain keys (``"if_identified"``, ...).
+    Callables are returned as-is.  Raises ``KeyError`` on unknown names/metrics
+    so misspelled configs fail loudly.
     """
-    if callable(pred):
-        return pred
-    if pred not in PREDICATES:
-        raise KeyError(
-            f"Unknown predicate '{pred}'. Registered: {sorted(PREDICATES)}"
-        )
-    return PREDICATES[pred]
+    from dreamer.utils.storage.predicate_specs import parse_predicate_spec
+    return parse_predicate_spec(pred)
 
 
 def _predicate_arity(pred: Predicate) -> int:

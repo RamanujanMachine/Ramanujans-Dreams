@@ -3,6 +3,7 @@ from .database import db_config
 from .analysis import analysis_config
 from .search import search_config
 from .post_process import post_process_config
+from .graph import graph_config
 from .extraction import extraction_config
 from .logging import logging_config
 from typing import Dict, List, Any
@@ -18,11 +19,12 @@ class ConfigManager:
     analysis = analysis_config
     search = search_config
     post_process = post_process_config
+    graph = graph_config
     logging = logging_config
 
     SECTION_ORDER = (
         "system", "database", "extraction", "analysis",
-        "search", "post_process", "logging",
+        "search", "post_process", "graph", "logging",
     )
 
     def configure(self, **overrides):
@@ -60,6 +62,7 @@ class ConfigManager:
             'analysis': self.analysis.get_configurations(),
             'search': self.search.get_configurations(),
             'post_process': self.post_process.get_configurations(),
+            'graph': self.graph.get_configurations(),
             'logging': self.logging.get_configurations(),
         }
 
@@ -71,6 +74,7 @@ class ConfigManager:
             'analysis': self.analysis.export_configurations(),
             'search': self.search.export_configurations(),
             'post_process': self.post_process.export_configurations(),
+            'graph': self.graph.export_configurations(),
             'logging': self.logging.export_configurations(),
         }
 
@@ -86,6 +90,7 @@ class ConfigManager:
             'analysis': self.analysis.get_configuration_descriptions(),
             'search': self.search.get_configuration_descriptions(),
             'post_process': self.post_process.get_configuration_descriptions(),
+            'graph': self.graph.get_configuration_descriptions(),
             'logging': self.logging.get_configuration_descriptions(),
         }
 
@@ -101,6 +106,7 @@ class ConfigManager:
             'analysis': self.analysis.export_configurations_with_metadata(),
             'search': self.search.export_configurations_with_metadata(),
             'post_process': self.post_process.export_configurations_with_metadata(),
+            'graph': self.graph.export_configurations_with_metadata(),
             'logging': self.logging.export_configurations_with_metadata(),
         }
 
