@@ -21,7 +21,7 @@ def depth_from_len(traj_len, dim) -> int:
     :param dim: CMF dimensionality.
     :return: Walk depth, capped at 1500.
     """
-    return max(round(2000 / max(traj_len / math.sqrt(dim), 1)), 1000)
+    return max(min(round(1500 / max(traj_len / math.sqrt(dim), 1)), 1500), 1000)
 
 # def ga_generations(dim: int) -> int:
 #     return 15 + 4 * dim
@@ -376,7 +376,7 @@ class SearchConfig(Configurable):
         metadata={"description": "Number of fresh Rademacher Δ vectors tried when an SPSA probe (d ± c_k·Δ) cannot be realised in-cone or is not identified, before the macro step is treated as a stall and the discrete fallback fires."},
     )
     SPSA_IMPROVE_FALLBACK: float = field(
-        default=1e-3,
+        default=1e-5,
         metadata={"description": "Minimum δ gain for an orthogonal neighbour to count as a *strict* improvement in the discrete fallback. A neighbour must beat the current δ by more than this to be accepted; otherwise the current point is declared the discrete local maximum."},
     )
     SPSA_RESERVOIR_SIZE: int = field(
