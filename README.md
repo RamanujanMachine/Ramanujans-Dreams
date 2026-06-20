@@ -178,15 +178,13 @@ from dreamer import analysis, search, extraction, loading, post_process
 # Optional reconfigure
 config.configure(...)
 
-my_system = System(
+System(
     function_sources=[loading.pFq(log(2), 2, 1, -1)],    # Set up the loading stage - provide inspiration functions
     extractor=extraction.extractor.ShardExtractorMod,    # Choose an extraction module
     analyzers=[analysis.AnalyzerModV1],                  # Choose an analysis module(s)
     searcher=search.SearcherModV1,                       # Choose the search module
     post_processor=post_process.Tier3PostProcessModV1,   # Optional: Tier-3 attributes + graphs (see Post-processing configuration)
-)
-
-my_system.run(constants=[log(2)])
+).run(constants=[log(2)])
 ```
 
 Advanced options are:
