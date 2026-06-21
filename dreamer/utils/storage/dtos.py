@@ -91,7 +91,7 @@ class ShardDTO:
     dimension: int                          # number of free (non-redundant) variables
     found_constants: List[str]
     # --- optional fields (computed lazily or not yet available) ---
-    interior_point: Optional[Tuple[int, ...]] = None
+    interior_point: Optional[Tuple[int | str, ...]] = None  # str for rational coords (e.g. "7/2")
     orthogonality_defect: Optional[float] = None  # LLL-based; None when fpylll unavailable
 
     def to_json_line(self) -> str:

@@ -388,8 +388,11 @@ class ShardExtractor(ExtractionScheme):
                 return None
             point = None
             if dto.interior_point is not None:
+                # ``sympify`` (not ``int``) so a stored rational coordinate like
+                # "7/2" (from a rational shift) is restored to its exact value;
+                # plain ints round-trip unchanged.
                 point = Position(
-                    {sym: int(v) for sym, v in zip(symbols, dto.interior_point)}
+                    {sym: sp.sympify(v) for sym, v in zip(symbols, dto.interior_point)}
                 )
             out[enc] = point
         return out

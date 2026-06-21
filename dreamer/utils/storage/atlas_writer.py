@@ -33,6 +33,7 @@ from dreamer.extraction.shard import Shard
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.storage.dtos import CmfDTO, CmfFamilyDTO, ShardDTO
 from dreamer.utils.storage.trajectory_attributes import (
+    _pq_to_jsonsafe,
     _stable_id,
     derive_cmf_and_shard_ids,
 )
@@ -185,10 +186,11 @@ def build_shard_dto(shard: Shard) -> ShardDTO:
 
     interior_point = None
     if shard.start_coord is not None:
-        try:
-            interior_point = tuple(int(v) for v in shard.start_coord.values())
-        except (TypeError, ValueError):
-            interior_point = tuple(str(v) for v in shard.start_coord.values())
+        # Use ``_pq_to_jsonsafe`` (int when integer, else str): a rational shift
+        # makes start coordinates like ``7/2``, and ``int(Rational(7, 2))``
+        # returns ``3`` *without raising*, so a plain ``int()`` would silently
+        # truncate the fraction.  Strings round-trip through ``sympify``.
+        interior_point = tuple(_pq_to_jsonsafe(v) for v in shard.start_coord.values())
 
     orthogonality_defect = _compute_orthogonality_defect(
         shard.A if shard.A is not None else None

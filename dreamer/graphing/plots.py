@@ -30,7 +30,7 @@ def plot_delta_sequence(
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=120)
+    fig.savefig(out_path, dpi=400)
     plt.close(fig)
 
 
@@ -50,5 +50,5 @@ def plot_histogram(
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=120)
+    fig.savefig(out_path, dpi=400)
     plt.close(fig)

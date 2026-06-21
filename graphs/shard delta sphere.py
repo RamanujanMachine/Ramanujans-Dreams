@@ -209,7 +209,7 @@ def generate_shard_atlas1(matched_pairs):
 
     plt.style.use('seaborn-v0_8-paper')
     # Reduced vertical height since horizontal colorbar is gone
-    fig = plt.figure(figsize=(3.5 * cols + 1.5, 4.5), dpi=300)
+    fig = plt.figure(figsize=(3.5 * cols + 1.5, 4.5), dpi=400)
 
     all_deltas = np.concatenate([df['delta'].dropna().values for _, df in matched_pairs])
     true_min = np.nanmin(all_deltas)
@@ -360,7 +360,7 @@ def generate_shard_atlas2(matched_pairs):
     n_shards = len(matched_pairs)
 
     # ── Figure: spheres slightly shorter than colorbar ────────────────────
-    fig = plt.figure(figsize=(4.2 * n_shards + 1.5, 4.2), dpi=300)
+    fig = plt.figure(figsize=(4.2 * n_shards + 1.5, 4.2), dpi=400)
 
     all_deltas = np.concatenate([df['delta'].dropna().values for _, df in matched_pairs])
     norm = plt.Normalize(vmin=np.floor(np.nanmin(all_deltas) / 0.2) * 0.2,

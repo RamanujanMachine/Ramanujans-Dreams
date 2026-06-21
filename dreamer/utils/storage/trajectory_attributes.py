@@ -36,16 +36,17 @@ def _stable_id(*parts: str, length: int = 16) -> str:
 
 
 def _position_to_tuple(pos) -> tuple:
-    """Convert a ramanujantools.Position (dict-like, may hold sympy Integers)
-    to a plain tuple of JSON-serializable ints (or str fallback).
+    """Convert a ramanujantools.Position (dict-like) to a plain tuple of
+    JSON-serializable values.
+
+    Integer coordinates become ``int``; non-integer coordinates (e.g. a
+    ``sympy.Rational`` like ``7/2`` arising from a rational shift) become a
+    ``str`` that round-trips cleanly through ``sympify``.  Using
+    :func:`_pq_to_jsonsafe` here is important: ``int(sympy.Rational(7, 2))``
+    returns ``3`` *without raising*, so a naive ``int()`` would silently
+    truncate fractional start points to whole numbers.
     """
-    out = []
-    for v in pos.values():
-        try:
-            out.append(int(v))
-        except (TypeError, ValueError):
-            out.append(str(v))
-    return tuple(out)
+    return tuple(_pq_to_jsonsafe(v) for v in pos.values())
 
 
 def _pq_to_jsonsafe(v) -> object:

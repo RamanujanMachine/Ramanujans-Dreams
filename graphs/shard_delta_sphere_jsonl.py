@@ -954,7 +954,8 @@ COLORBAR_POSITIONS = tuple(_COLORBAR_LAYOUT)
 
 
 def _add_colorbar(fig, cmap, norm, vmin: float, vmax: float,
-                  step: float, label: str, position: str = "right") -> None:
+                  step: float, label: str, position: str = "right",
+                  label_size: float = 20, tick_size: float = 14) -> None:
     """Add the shared colorbar (with its label) on the chosen side of the figure.
 
     :param label: the colorbar label (the δ label or an attribute name).
@@ -962,6 +963,8 @@ def _add_colorbar(fig, cmap, norm, vmin: float, vmax: float,
     :param position: one of ``"right"`` (default), ``"left"``, ``"top"``,
         ``"bottom"`` - left/right are vertical, top/bottom horizontal.  The
         spheres' margins are adjusted to make room for the bar on that side.
+    :param label_size: font size of the colorbar label.
+    :param tick_size: font size of the colorbar tick labels.
     """
     cfg = _COLORBAR_LAYOUT.get(position)
     if cfg is None:
@@ -980,8 +983,8 @@ def _add_colorbar(fig, cmap, norm, vmin: float, vmax: float,
     decimals = max(0, int(np.ceil(-np.log10(step)))) if step < 1 else 1
     labels = [f"{t:.{decimals}f}" for t in ticks]
     (cbar.ax.set_xticklabels if horizontal else cbar.ax.set_yticklabels)(
-        labels, fontsize=13)
-    cbar.set_label(label, fontsize=16, labelpad=15)
+        labels, fontsize=tick_size)
+    cbar.set_label(label, fontsize=label_size, labelpad=15)
 
 
 def generate_spheres(
@@ -1006,6 +1009,8 @@ def generate_spheres(
     zoom: float = 1.4,
     center_on_min: bool = False,
     colorbar_position: str = "right",
+    colorbar_label_size: float = 20,
+    dpi: Optional[int] = None,
     path_root: Optional[str] = None,
     explicit_paths: Optional[Dict[str, np.ndarray]] = None,
     draw_grid: bool = True,
@@ -1060,6 +1065,10 @@ def generate_spheres(
         the highest (the default).
     :param colorbar_position: where the colorbar (and its label) sits relative to
         the spheres - ``"right"`` (default), ``"left"``, ``"top"`` or ``"bottom"``.
+    :param colorbar_label_size: font size of the colorbar label.
+    :param dpi: output resolution (dots per inch).  ``None`` keeps the per-layout
+        defaults (200 for the atlas, 300 for a single sphere); raise it (e.g. 400)
+        for a higher-resolution image.
     :param path_root: optional second ``EXPORT_SEARCH_RESULTS`` dir whose
         trajectories are drawn as an ordered overlay path per shard.
     :param explicit_paths: optional ``{shard_id: (K, D) directions}`` overriding /
@@ -1176,7 +1185,8 @@ def generate_spheres(
     # surface over them, so the layout disables it and draws the lines above.
     # Scatter mode keeps depth ordering so the points stay on top of the lines.
     layout_kwargs = dict(line_width=line_width, zoom=zoom,
-                         lines_on_top=(mode == "surface"), center_on_min=center_on_min)
+                         lines_on_top=(mode == "surface"), center_on_min=center_on_min,
+                         dpi=dpi)
     if one_sphere_per_shard:
         fig = _generate_atlas(per_shard, spec, cmap, norm, subspace_tol, draw_grid,
                               _resolve_path, _draw_content, max_atlas_cols, **layout_kwargs)
@@ -1185,7 +1195,7 @@ def generate_spheres(
                                _resolve_path, _draw_content, **layout_kwargs)
 
     _add_colorbar(fig, cmap, norm, vmin, vmax, value_step, value_label,
-                  colorbar_position)
+                  colorbar_position, colorbar_label_size)
     print(f'Done!')
     if show:
         plt.show()
@@ -1222,7 +1232,8 @@ def _setup_sphere_ax(ax, zoom: float, lines_on_top: bool) -> None:
 def _generate_atlas(per_shard, spec, cmap, norm, tol, draw_grid, resolve_path,
                     draw_content, max_cols: int = 6, *,
                     line_width: float = 1.0, zoom: float = 1.4,
-                    lines_on_top: bool = True, center_on_min: bool = False):
+                    lines_on_top: bool = True, center_on_min: bool = False,
+                    dpi: Optional[int] = None):
     """Render one sphere per shard, wrapping into a ``rows x cols`` grid.
 
     A single row of N spheres becomes impractically wide for large N (and can
@@ -1234,7 +1245,7 @@ def _generate_atlas(per_shard, spec, cmap, norm, tol, draw_grid, resolve_path,
     n = len(per_shard)
     cols = max(1, min(max_cols, n))
     rows = int(np.ceil(n / cols))
-    fig = plt.figure(figsize=(4.2 * cols + 1.5, 4.2 * rows), dpi=200)
+    fig = plt.figure(figsize=(4.2 * cols + 1.5, 4.2 * rows), dpi=dpi or 400)
     for idx, (shard, unit_xyz, cam_scalar, content) in enumerate(per_shard):
         ax = fig.add_subplot(rows, cols, idx + 1, projection="3d")
         _setup_sphere_ax(ax, zoom, lines_on_top)
@@ -1258,10 +1269,11 @@ def _generate_atlas(per_shard, spec, cmap, norm, tol, draw_grid, resolve_path,
 
 def _generate_single(per_shard, spec, cmap, norm, tol, draw_grid, resolve_path,
                      draw_content, *, line_width: float = 1.0, zoom: float = 1.4,
-                     lines_on_top: bool = True, center_on_min: bool = False):
+                     lines_on_top: bool = True, center_on_min: bool = False,
+                     dpi: Optional[int] = None):
     """Render every shard on one shared sphere (single global camera)."""
     hz, pz = _line_zorders(lines_on_top)
-    fig = plt.figure(figsize=(6.0, 5.0), dpi=300)
+    fig = plt.figure(figsize=(6.0, 5.0), dpi=dpi or 400)
     ax = fig.add_subplot(1, 1, 1, projection="3d")
     _setup_sphere_ax(ax, zoom, lines_on_top)
 
@@ -1433,6 +1445,11 @@ def _build_cli():
     p.add_argument("--colorbar", choices=COLORBAR_POSITIONS, default="right",
                    help="Where the colorbar (and its label) sits relative to the "
                         "spheres.")
+    p.add_argument("--label-size", type=float, default=20,
+                   help="Font size of the colorbar label.")
+    p.add_argument("--dpi", type=int, default=None,
+                   help="Output resolution in DPI (default 400); raise for a "
+                        "higher-resolution image.")
     p.add_argument("--max-cols", type=int, default=6,
                    help="Max spheres per row in the atlas (wraps onto more rows).")
     p.add_argument("--grid-res", type=int, default=None,
@@ -1538,6 +1555,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         zoom=args.zoom,
         center_on_min=args.center_min,
         colorbar_position=args.colorbar,
+        colorbar_label_size=args.label_size,
+        dpi=args.dpi,
         path_root=args.path_root,
         cmap_name=args.cmap,
         show=False,
