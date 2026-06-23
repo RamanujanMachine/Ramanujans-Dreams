@@ -1930,6 +1930,43 @@ class TestAnalyzerDedup:
             "Analyzer must always call sample_pairs, even with a populated cache"
         )
 
+    def test_analyzer_includes_selected_trajectory(
+        self, simple_shard, symbols, tmp_path, monkeypatch,
+    ):
+        """A shard's ``selected_trajectory`` is analyzed (walked + recorded) even
+        when the sampler draws nothing."""
+        from dreamer.analysis.analyzers.serial_scan.analyzer_mod import AnalyzerModV1
+        from dreamer.configs.system import sys_config
+        from dreamer.configs.analysis import analysis_config
+        from dreamer.search.methods.hedgehog_scan import SerialSearcher
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
+
+        # Attach a user-supplied trajectory; pin the sampler to draw nothing so the
+        # only trajectory analyzed is the injected one.
+        traj = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        simple_shard.selected_trajectory = traj
+        monkeypatch.setattr(
+            SerialSearcher, "sample_pairs", lambda self_, *a, **k: [],
+        )
+
+        _cmf_id, shard_id, enc_str = derive_cmf_and_shard_ids(simple_shard)
+        start = simple_shard.get_interior_point()
+        expected_tid = derive_trajectory_id(
+            shard_id, simple_shard.cmf_name, enc_str,
+            tuple(int(v) for v in start.values()),
+            tuple(int(v) for v in traj.values()),
+        )
+
+        AnalyzerModV1({e: [simple_shard]}).execute()
+
+        jsonl_path = tmp_path / f"{shard_id}.jsonl"
+        assert jsonl_path.exists()
+        ids = {json.loads(line)["trajectory_id"]
+               for line in jsonl_path.read_text().strip().splitlines()}
+        assert expected_tid in ids
+
     def test_analyzer_skips_walks_for_cached_trajectories(
         self, simple_shard, tmp_path, monkeypatch,
     ):

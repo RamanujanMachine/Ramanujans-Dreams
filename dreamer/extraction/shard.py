@@ -27,7 +27,8 @@ class Shard(Searchable, JSONable):
                  interior_point: Optional[Position] = None,
                  use_inv_t: Optional[bool] = None,
                  cmf_name: str = 'UnknownCMF',
-                 hyperplanes_already_shifted: bool = False
+                 hyperplanes_already_shifted: bool = False,
+                 selected_trajectory: Optional[Position] = None
                  ):
         """
         :param cmf: The CMF this shard is a part of
@@ -38,6 +39,12 @@ class Shard(Searchable, JSONable):
         :param interior_point: A point within the shard
         :param use_inv_t: Whether to use inverse transpose when preforming walk or not
         :param cmf_name: The name of the CMF
+        :param selected_trajectory: An optional user-supplied trajectory direction
+            (real-space ``Position`` over the CMF symbols) associated with this shard.
+            When present it is the analysis/search seed for the shard: the analysis
+            stage evaluates it alongside the sampled trajectories and the search methods
+            use it as the initial optimiser seed (instead of a reservoir-sampled seed).
+            Kept in-memory only (not serialised to the shard DTO/cache).
         :param hyperplanes_already_shifted: When True, ``hyperplanes`` are
             already in shifted coordinates, so the (expensive, sympy)
             per-hyperplane ``apply_shift`` is skipped.  The shift is the
@@ -64,17 +71,21 @@ class Shard(Searchable, JSONable):
                 shifted_hyperplanes = [hp.apply_shift(shift) for hp in hyperplanes]
             self.A, self.b, self.symbols = self.generate_matrices(shifted_hyperplanes, encoding)
         self.start_coord = interior_point
+        self.selected_trajectory = selected_trajectory
         self.is_whole_space = self.A is None or self.b is None
 
     @classmethod
     def from_cmf_data(cls, cmf_data: CMFData, constants: Union[Constant, List[Constant]],
                       hyperplanes: List[Hyperplane], encoding: List[int],
                       interior_point: Optional[Position] = None, *args,
-                      hyperplanes_already_shifted: bool = False, **kwargs) -> 'Shard':
+                      hyperplanes_already_shifted: bool = False,
+                      selected_trajectory: Optional[Position] = None,
+                      **kwargs) -> 'Shard':
         return cls(
             cmf_data.cmf, constants, hyperplanes, encoding, cmf_data.shift,
             interior_point, cmf_data.use_inv_t, cmf_data.cmf_name,
             hyperplanes_already_shifted=hyperplanes_already_shifted,
+            selected_trajectory=selected_trajectory,
         )
 
     @classmethod
@@ -125,6 +136,7 @@ class Shard(Searchable, JSONable):
         return cls.from_cmf_data(
             cmf_data, constants, hps, encoding, start,
             hyperplanes_already_shifted=False,
+            selected_trajectory=Position({s: sp.sympify(trajectory[s]) for s in symbols}),
         )
 
     @classmethod

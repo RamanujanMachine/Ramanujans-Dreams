@@ -318,6 +318,28 @@ class TestFromStartAndTrajectory:
         with pytest.raises(ValueError, match=r"lies on hyperplane"):
             Shard.from_start_and_trajectory(cmf_data, const_e, start, traj, hyperplanes=hps)
 
+    def test_trajectory_is_retained_on_shard(self, simple_cmf, const_e, symbols):
+        """The supplied trajectory is stored on the shard for downstream seeding."""
+        s0, s1 = symbols
+        hps = [Hyperplane(s0, symbols), Hyperplane(s1, symbols), Hyperplane(s0 + s1 - 10, symbols)]
+        cmf_data = CMFData(cmf=simple_cmf, shift=_point(symbols, [0, 0]))
+        start = _point(symbols, [3, 3])
+        traj = _point(symbols, [1, 2])
+
+        shard = Shard.from_start_and_trajectory(cmf_data, const_e, start, traj, hyperplanes=hps)
+
+        assert shard.selected_trajectory is not None
+        assert shard.selected_trajectory[s0] == 1
+        assert shard.selected_trajectory[s1] == 2
+
+    def test_selected_trajectory_defaults_to_none(self, simple_cmf, const_e, symbols):
+        """A shard built without a trajectory carries ``selected_trajectory is None``."""
+        s0, s1 = symbols
+        hps = [Hyperplane(s0, symbols), Hyperplane(s1, symbols), Hyperplane(s0 + s1 - 10, symbols)]
+        cmf_data = CMFData(cmf=simple_cmf, shift=_point(symbols, [0, 0]))
+        shard = Shard.from_cmf_data(cmf_data, const_e, hps, [1, 1, -1], _point(symbols, [3, 3]))
+        assert shard.selected_trajectory is None
+
     def test_default_hyperplane_extraction_matches_explicit(self, simple_cmf, const_e, symbols):
         """Default path (extract_cmf_hyperplanes) agrees with the explicit-hyperplanes path."""
         from dreamer.extraction.extractor import extract_cmf_hyperplanes

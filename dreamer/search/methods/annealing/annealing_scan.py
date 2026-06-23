@@ -31,6 +31,7 @@ from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
+from dreamer.search.methods.flatland.seed import resolve_injected_seed
 from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.utils.rand import derive_py_random
 from dreamer.utils.constants.constant import Constant
@@ -123,6 +124,7 @@ class SimulatedAnnealingSearch(SearchMethod):
         geom: Optional[FlatlandGeometry] = None,
         start=None,
         pool=None,
+        initial_trajectory: Optional[Position] = None,
     ) -> None:
         """
         Run SA for a single constant, emitting Tier-1 DTOs to *sink*.
@@ -149,6 +151,12 @@ class SimulatedAnnealingSearch(SearchMethod):
         :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`;
             each step's neighbour batch is walked across worker processes.  ``None``
             evaluates serially.
+        :param initial_trajectory: Optional user-supplied seed direction.  Defaults
+            to the shard's ``selected_trajectory``.  When valid (a non-zero recession
+            direction) it seeds SA instead of the reservoir (bypassing the
+            valid-neighbour guard — the user chose it explicitly; the reseed/stop
+            logic handles an immediate stall).  An invalid one falls back to
+            reservoir seeding (see :func:`resolve_injected_seed`).
         :raises NoInitialIdentification: if no reservoir seed identifies *constant*.
         """
         if handler_cache is None:
@@ -191,7 +199,14 @@ class SimulatedAnnealingSearch(SearchMethod):
         max_traj_len = search_config.SEARCH_MAX_TRAJ_LEN
         traj_norm_name = search_config.SEARCH_TRAJ_NORM
 
-        cur_z = self._select_seed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
+        if initial_trajectory is None:
+            initial_trajectory = getattr(shard, "selected_trajectory", None)
+        cur_z = resolve_injected_seed(
+            geom, initial_trajectory, shard_id, constant,
+            identify_fn=lambda z: evaluate_in_flatland(z, **eval_ctx)[1],
+        )
+        if cur_z is None:
+            cur_z = self._select_seed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
         cur_delta, _ = evaluate_in_flatland(cur_z, **eval_ctx)
         best_delta = cur_delta
 

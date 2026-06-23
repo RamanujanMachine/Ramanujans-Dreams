@@ -250,6 +250,10 @@ class ShardExtractor(ExtractionScheme):
 
         symbols = list(hps)[0].symbols
         shard_encodings: Dict[Tuple[int, ...], Position] = dict()
+        # A user-supplied trajectory is kept (in-memory) on the shard so the analysis
+        # and search stages can use it as their seed.  Paired 1:1 with the encoding
+        # (last write wins, matching ``shard_encodings``); empty unless trajectories given.
+        shard_trajectories: Dict[Tuple[int, ...], Optional[Position]] = dict()
         selected = [] if self.cmf_data.selected_points is None else self.cmf_data.selected_points
 
         if self.cmf_data.only_selected:
@@ -326,6 +330,12 @@ class ShardExtractor(ExtractionScheme):
 
                 # Keep the user's start point verbatim as the shard's interior/start point.
                 shard_encodings[tuple(enc)] = Position(point_dict)
+                # Retain the trajectory (a shift-invariant direction) so the analysis
+                # and search stages can use it as their seed.
+                if traj is not None:
+                    shard_trajectories[tuple(enc)] = Position(
+                        {sym: sp.sympify(step) for sym, step in zip(symbols, traj)}
+                    )
 
         Logger(
             f'In CMF no. {call_number}: found {len(hps)} hyperplanes and {len(shard_encodings)} shards ',
@@ -342,6 +352,7 @@ class ShardExtractor(ExtractionScheme):
             shards.append(Shard.from_cmf_data(
                 self.cmf_data, self._constants, shifted_hps, enc, shard_encodings[enc],
                 hyperplanes_already_shifted=True,
+                selected_trajectory=shard_trajectories.get(enc),
             ))
         return shards
 

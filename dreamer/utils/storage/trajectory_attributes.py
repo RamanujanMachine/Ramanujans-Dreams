@@ -453,6 +453,7 @@ class TrajectoryAttributesHandler:
         attributes (linear_recurrence, companion, eigenvalues, kamidelta,
         gcd_slope) all operate on raw ``M``.
         """
+        # TODO: inverse only after walk - not use symbolic.
         if self.walk_type() == 1:
             self._traj = self._traj.inv().T
         return self._traj
@@ -507,7 +508,7 @@ class TrajectoryAttributesHandler:
             #     tmat = tmat.applyfunc(sp.cancel)
             # elif hasattr(tmat, 'matrix'):
             #     tmat.matrix = tmat.matrix.applyfunc(sp.cancel)
-            return LinearRecurrence(tmat)
+            return LinearRecurrence(tmat) # TODO: This must use the initial values somehow! talk to Kalisch
         return self._get("linear_recurrence", _build)
 
     # ==================================================================
@@ -599,7 +600,8 @@ class TrajectoryAttributesHandler:
         characteristic roots. For polynomial coefficients, these are
         the leading-term roots that govern asymptotic growth.
         """
-        return self._get("sorted_eigenvalues", lambda: self.companion().sorted_eigenvals())
+        # TODO: we can find eigenvlaues using Coboundary and substitute infty and then extract eigenvlaues! Superfast!
+        return self._get("sorted_eigenvalues", lambda: self.trajectory_matrix().sorted_eigenvals())
 
     def eigenvalue_errors(self) -> list:
         """
@@ -717,6 +719,7 @@ class TrajectoryAttributesHandler:
             return compute()
         return self._get_utility(f"effective_walk_{depth}", compute)
 
+    # TODO: limit should be a column and not the actual float
     def _limits(self, depths: list) -> list:
         """
         Internal: get Limit objects at specified depths.
@@ -861,6 +864,7 @@ class TrajectoryAttributesHandler:
         Returns a list of predicted δ values (one per eigenvalue pair).
         For order-2 recurrences, this is a single-element list.
         """
+        # TODO: kamidelta should be computed between every two eigenvalues (bigger over the smaller one)
         def compute():
             # Copied implementation from Ramanujan-Tools - utilizing cache here.
             errors = self.eigenvalue_errors()
@@ -876,7 +880,7 @@ class TrajectoryAttributesHandler:
         Used internally by kamidelta, but also useful on its own.
         """
         # return self._get(f"gcd_slope_{depth}", lambda: self.trajectory_matrix().gcd_slope(depth))
-        return self._get(f"gcd_slope_{depth}", lambda: self.companion().gcd_slope(depth))
+        return self._get(f"gcd_slope_{depth}", lambda: self.trajectory_matrix().gcd_slope(depth))
 
     # ==================================================================
     #  CONVERGENCE RATE
@@ -913,6 +917,7 @@ class TrajectoryAttributesHandler:
         return all(diff < search_config.LIMIT_DIFF_ERROR_BOUND for diff in diffs), limits
 
     def precision_at(self, depth: Optional[int] = None) -> int:
+        # TODO: just compute the error (log())
         """
         Number of correct decimal digits at the given depth.
         Uses Limit.precision() which compares the last two walk steps.

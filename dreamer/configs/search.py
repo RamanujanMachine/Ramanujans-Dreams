@@ -217,7 +217,7 @@ class SearchConfig(Configurable):
         metadata={"description": "Minimum temperature threshold; annealing stops when T drops below this. Lower than T0/(MAX_ITERS+1) means Tmin acts as a safety net rather than the primary stop condition."},
     )
     ANNEAL_SCHEDULE: str = field(
-        default="linear",
+        default="log",
         metadata={"description": "Cooling schedule type: 'linear' (T0/(k+1)) or 'log' (T0/log(k+1))."},
     )
     ANNEAL_MAX_ITERS: int = field(

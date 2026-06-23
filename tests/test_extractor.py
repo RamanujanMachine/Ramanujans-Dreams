@@ -75,6 +75,10 @@ def test_selected_trajectory_resolves_boundary_start_point(monkeypatch):
     # The user's border start point is kept verbatim as the interior/start point.
     start = shards[0].get_interior_point()
     assert start[symbols[0]] == 0 and start[symbols[1]] == 2
+    # The trajectory is retained on the shard for downstream analysis/search seeding.
+    assert shards[0].selected_trajectory is not None
+    assert shards[0].selected_trajectory[symbols[0]] == 1
+    assert shards[0].selected_trajectory[symbols[1]] == 0
 
 
 def test_selected_trajectory_landing_on_hyperplane_raises(monkeypatch):
@@ -113,6 +117,8 @@ def test_selected_trajectory_none_entry_uses_start_point(monkeypatch):
     assert len(shards) == 1
     start = shards[0].get_interior_point()
     assert start[symbols[0]] == 3 and start[symbols[1]] == 3
+    # No trajectory was given for the surviving point -> none retained on the shard.
+    assert shards[0].selected_trajectory is None
 
 
 def test_selected_trajectory_length_mismatch_raises(monkeypatch):

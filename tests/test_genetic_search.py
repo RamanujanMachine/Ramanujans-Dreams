@@ -248,7 +248,7 @@ class TestGALoop:
         method = GeneticSearch(whole_space_shard, e, use_LIReC=False)
         init_pop = [np.array([i, 0], dtype=np.int64) for i in range(1, 5)]
         monkeypatch.setattr(method, "_init_population",
-                            lambda g, ps, sid, c: init_pop[:ps])
+                            lambda g, ps, sid, c, initial_trajectory=None: init_pop[:ps])
         monkeypatch.setattr(method, "_eval_genome", counting_eval)
 
         method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",
@@ -277,7 +277,7 @@ class TestGALoop:
         method = GeneticSearch(whole_space_shard, e, use_LIReC=False)
         init_pop = [np.array([1, 0], dtype=np.int64), np.array([0, 1], dtype=np.int64)]
         monkeypatch.setattr(method, "_init_population",
-                            lambda g, ps, sid, c: init_pop[:ps])
+                            lambda g, ps, sid, c, initial_trajectory=None: init_pop[:ps])
         monkeypatch.setattr(method, "_eval_genome", constant_eval)
 
         method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",
@@ -313,7 +313,7 @@ class TestGALoop:
 
         method = GeneticSearch(whole_space_shard, e, use_LIReC=False)
         monkeypatch.setattr(method, "_init_population",
-                            lambda g, ps, sid, c: init_pop[:ps])
+                            lambda g, ps, sid, c, initial_trajectory=None: init_pop[:ps])
         monkeypatch.setattr(method, "_eval_genome", tracking_eval)
 
         method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",

@@ -234,10 +234,18 @@ class AnalyzerModV1(AnalyzerModScheme):
             ).log()
             return {}
 
+        # Seed the user-supplied trajectory into the analysis set (first) so its δ is
+        # computed and recorded alongside the sampled ones.  It is paired with the
+        # shard's interior point, exactly like ``sample_pairs``.  Per-run dedup below
+        # avoids walking it twice if the sampler happened to draw the same direction.
+        if getattr(shard, "selected_trajectory", None) is not None:
+            pairs = [(shard.selected_trajectory, shard.get_interior_point())] + list(pairs)
+
         # Per-constant accumulators.
         total = 0
         identified_count: Dict[str, int] = defaultdict(int)
         best_delta: Dict[str, Optional[float]] = {c.name: None for c in shard.consts}
+        processed_tids: set = set()
 
         with open(jsonl_path, "a") as fout:
             for traj, start in SmartTQDM(
@@ -251,6 +259,12 @@ class AnalyzerModV1(AnalyzerModScheme):
                 tid = derive_trajectory_id(
                     shard_id, shard.cmf_name, encoding_str, start_t, dir_t,
                 )
+
+                # Skip a trajectory already handled in this run (e.g. the injected
+                # seed also drawn by the sampler) — count + write it only once.
+                if tid in processed_tids:
+                    continue
+                processed_tids.add(tid)
 
                 # Reuse a cached record only when it was computed under the same
                 # configuration — a changed walk depth / walk type / identification

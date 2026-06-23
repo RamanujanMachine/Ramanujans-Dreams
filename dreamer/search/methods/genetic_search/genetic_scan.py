@@ -26,6 +26,7 @@ from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
+from dreamer.search.methods.flatland.seed import resolve_injected_seed
 from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
@@ -162,6 +163,7 @@ class GeneticSearch(SearchMethod):
         geom: Optional[FlatlandGeometry] = None,
         start=None,
         pool=None,
+        initial_trajectory: Optional[Position] = None,
     ) -> None:
         """Run the GA for a single constant, emitting DTOs to *sink*.
 
@@ -180,6 +182,10 @@ class GeneticSearch(SearchMethod):
             ``None`` builds it here (standalone / single-constant path).
         :param start: Pre-fetched interior start :class:`Position` for the
             shard (also constant-independent).  ``None`` fetches it here.
+        :param initial_trajectory: Optional user-supplied seed direction.  Defaults
+            to the shard's ``selected_trajectory``.  When valid (a non-zero recession
+            direction) it is seeded into the initial population (the rest sampled as
+            usual); an invalid one is ignored (see :func:`resolve_injected_seed`).
         :raises NoInitialPopulation: if no in-cone seed genome can be built.
         """
         if handler_cache is None:
@@ -224,7 +230,11 @@ class GeneticSearch(SearchMethod):
         )
         pop_size = max(pop_size, 2)
 
-        population = self._init_population(geom, pop_size, shard_id, constant)
+        if initial_trajectory is None:
+            initial_trajectory = getattr(shard, "selected_trajectory", None)
+        population = self._init_population(
+            geom, pop_size, shard_id, constant, initial_trajectory=initial_trajectory
+        )
 
         # Evaluate initial population in parallel (Fix C).
         deltas = self._eval_population(population, eval_ctx, pool)
@@ -361,6 +371,7 @@ class GeneticSearch(SearchMethod):
         pop_size: int,
         shard_id: str,
         constant: Constant,
+        initial_trajectory: Optional[Position] = None,
     ) -> List[np.ndarray]:
         """
         Build an initial population of valid flatland genomes.
@@ -369,14 +380,23 @@ class GeneticSearch(SearchMethod):
         :param pop_size: Target population size.
         :param shard_id: Shard identifier (used in exception message).
         :param constant: Constant being optimised (used in exception message).
+        :param initial_trajectory: Optional user-supplied seed direction; when valid
+            it is inserted as the first genome (the rest are sampled), so the search
+            starts from the user's known-good direction.  Invalid/``None`` ⇒ ignored.
         :raises NoInitialPopulation: if no valid in-cone genome can be found.
         :return: List of ``pop_size`` valid flatland genomes.
         """
+        population: List[np.ndarray] = []
+
+        # Seed the user-supplied trajectory first (if it is a valid in-cone genome).
+        seed_z = resolve_injected_seed(geom, initial_trajectory, shard_id, constant)
+        if seed_z is not None:
+            population.append(np.array(seed_z))
+
         orchestrator = ShardSamplingOrchestrator(self.space)
         n_sample = max(pop_size * 3, 10)
         trajectories = orchestrator.sample_trajectories(n_sample)
 
-        population: List[np.ndarray] = []
         traj_list = list(trajectories)
         if traj_list:
             # Convert all sampled trajectories to flatland and validate them in

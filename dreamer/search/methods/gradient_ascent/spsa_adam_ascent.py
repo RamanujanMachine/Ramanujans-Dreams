@@ -71,6 +71,7 @@ from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.discrete_local_max import discrete_hill_climb
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
+from dreamer.search.methods.flatland.seed import resolve_injected_seed
 from dreamer.search.methods.gradient_ascent.lattice import snap_to_trajectory
 from dreamer.search.methods.gradient_ascent.optimizers import Adam
 from dreamer.utils.constants.constant import Constant
@@ -157,6 +158,7 @@ class HybridSPSASearch(SearchMethod):
         geom: Optional[FlatlandGeometry] = None,
         start=None,
         pool=None,
+        initial_trajectory: Optional[Position] = None,
     ) -> None:
         """Run the hybrid SPSA + Adam ascent for a single constant.
 
@@ -175,6 +177,10 @@ class HybridSPSASearch(SearchMethod):
         :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`;
             the discrete-fallback ``2D``-neighbour batch is walked across worker
             processes.  ``None`` evaluates serially.
+        :param initial_trajectory: Optional user-supplied seed direction.  Defaults
+            to the shard's ``selected_trajectory``.  When valid (a non-zero recession
+            direction) it seeds the optimiser instead of the reservoir; an invalid
+            one falls back to reservoir seeding (see :func:`resolve_injected_seed`).
         :raises NoInitialIdentification: If no reservoir seed identifies *constant*.
         """
         if handler_cache is None:
@@ -214,8 +220,16 @@ class HybridSPSASearch(SearchMethod):
         # (Constraints 2 & 3) are measured against this.
         min_angle = self._min_lattice_angle(max_norm)
 
-        # --- Seed: shortest identified reservoir trajectory ------------------
-        cur_z = self._select_seed(geom, eval_ctx, shard_id, constant)
+        # --- Seed: user-supplied trajectory if valid, else shortest identified
+        # reservoir trajectory --------------------------------------------------
+        if initial_trajectory is None:
+            initial_trajectory = getattr(shard, "selected_trajectory", None)
+        cur_z = resolve_injected_seed(
+            geom, initial_trajectory, shard_id, constant,
+            identify_fn=lambda z: evaluate_in_flatland(z, **eval_ctx)[1],
+        )
+        if cur_z is None:
+            cur_z = self._select_seed(geom, eval_ctx, shard_id, constant)
         cur_delta, _ = evaluate_in_flatland(cur_z, **eval_ctx)
         best_delta = cur_delta
         d = cur_z.astype(np.float64)  # continuous SPSA iterate (direction)
