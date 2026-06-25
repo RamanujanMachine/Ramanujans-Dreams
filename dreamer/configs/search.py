@@ -420,7 +420,7 @@ class SearchConfig(Configurable):
     )
 
     CONSTANT_NO_DIGITS_LOW_RES: int = field(
-        default=600,
+        default=1000,
         metadata={"description": "Number of digits to use for low-resolution constant values."},
     )
 

@@ -1103,12 +1103,12 @@ class TrajectoryAttributesHandler:
             estimated = estimated_expr.subs({sym: v for sym, v in zip(ext_syms, list(walk_values))})
             err = sp.Abs(estimated - self.constant())
             if sp.N(err, 15) > search_config.IDENTIFY_CHECK_THRESHOLD:
-                Logger(
-                    f'Unexpected - LIReC provided bad combination. '
-                    f'Could not approximate constant {self.constant()} with p/q. Error: {err}'
-                    f'Please contact developers.',
-                    Logger.Levels.warning
-                ).log()
+                # Logger(
+                #     f'Unexpected - LIReC provided bad combination. '
+                #     f'Could not approximate constant {self.constant()} with p/q. Error: {err}'
+                #     f'Please contact developers.',
+                #     Logger.Levels.warning
+                # ).log()
                 return None, walk_values
 
             if self._searchable:
