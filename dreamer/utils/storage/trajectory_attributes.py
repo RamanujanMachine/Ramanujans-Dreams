@@ -3,16 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import warnings
-from functools import lru_cache
+from functools import lru_cache, cached_property
 from typing import List, Optional, TYPE_CHECKING, Tuple
 
 import sympy as sp
-from sqlalchemy.engine import result
 from sympy.abc import n
 
 from LIReC.db.access import db
-from ramanujantools import LinearRecurrence, Matrix, Limit
+from ramanujantools import LinearRecurrence, Matrix, Limit, linear_recurrence
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.configs import config
@@ -346,6 +344,9 @@ class TrajectoryAttributesHandler:
     #  Construction
     # ------------------------------------------------------------------
 
+    CONSTANT_RESOLUTION = search_config.CONSTANT_NO_DIGITS_HIGH_RES
+    HIGH_RES_CONSTANT = None
+
     def __init__(
         self,
         traj_matrix: Matrix,
@@ -444,6 +445,12 @@ class TrajectoryAttributesHandler:
     #  TRAJECTORY MATRIX
     # ==================================================================
 
+    @cached_property
+    def symbolic_trajectory_matrix(self) -> Matrix:
+        if self.walk_type() == 1:
+            self._traj = self._traj.inv().T
+        return self._traj
+
     def trajectory_matrix(self) -> Matrix:
         """Raw d×d symbolic trajectory matrix M(n).
 
@@ -460,7 +467,7 @@ class TrajectoryAttributesHandler:
 
     def traj_size(self) -> int:
         """Dimension d of the trajectory matrix."""
-        return self.trajectory_matrix().shape[0]
+        return self._traj.shape[0]
 
     def _walked_matrix(self, depth: int) -> Optional[Matrix]:
         """Walk M to ``depth``, then apply ``inv().T`` when ``walk_type==1``.
@@ -473,7 +480,8 @@ class TrajectoryAttributesHandler:
         """
         def compute():
             try:
-                return self.trajectory_matrix().walk({n: 1}, depth, {n: 0})
+                walked = self._traj.walk({n: 1}, depth, {n: 0})
+                return walked if self.walk_type() == 2 else walked.inv().T
             except Exception as e:
                 Logger(
                     f'Walk failed at depth {depth}: {e}',
@@ -672,19 +680,9 @@ class TrajectoryAttributesHandler:
         depth = depth or self._depth
 
         def compute():
-            if walk_matrix is None:
-                walked = self._walked_matrix(depth)
-            else:
-                try:
-                    walked = walk_matrix
-                    if self.walk_type() == 1:
-                        walked = walked.inv().T
-                except Exception as e:
-                    Logger(
-                        f'inv().T transform failed: {e}',
-                        Logger.Levels.warning,
-                    ).log()
-                    walked = None
+            # walked = walk_matrix
+            # if walk_matrix is None:
+            walked = self._walked_matrix(depth)
             if walked is None:
                 return None
 
@@ -719,8 +717,7 @@ class TrajectoryAttributesHandler:
             return compute()
         return self._get_utility(f"effective_walk_{depth}", compute)
 
-    # TODO: limit should be a column and not the actual float
-    def _limits(self, depths: list) -> list:
+    def _limits(self, depths: list) -> list[Limit]:
         """
         Internal: get Limit objects at specified depths.
 
@@ -728,7 +725,14 @@ class TrajectoryAttributesHandler:
         on degenerate trajectories, etc.) — callers must handle this.
         """
         try:
-            return self.trajectory_matrix().limit({n: 1}, depths, {n: 0})
+            limits = self.trajectory_matrix().limit({n: 1}, depths, {n: 0})
+            if isinstance(limits, Limit):
+                limits = [limits]
+
+            if self.walk_type() == 1:
+                for i, l in enumerate(limits):
+                    limits[i].current = l.current.inv().T
+            return limits
         except Exception as e:
             Logger(
                 f'_limits walk failed at depths={depths}: {e}',
@@ -759,6 +763,7 @@ class TrajectoryAttributesHandler:
                 return float('nan')
         return self._get(f"limit_{depth}", compute)
 
+    # TODO: limit should be a column and not the actual float
     def limit_rational(self, depth: Optional[int] = None):
         """
         Limit as an exact sympy Rational p/q.
@@ -800,6 +805,63 @@ class TrajectoryAttributesHandler:
                 return float('-inf')
         return self._get(f"delta_{depth}", compute)
 
+    @classmethod
+    def __compute_delta(
+            cls, p: sp.Matrix, q: sp.Matrix, effective_walk_values: list, constant: sp.Expr
+    ) -> Tuple[bool, float | sp.Expr] :
+        """
+        Computes the delta value for evaluating an approximation using a rational estimator.
+        This method evaluates how closely a given symbolic constant matches an estimated value derived from
+        a set of input parameters. The delta computation is used to determine the level of approximation
+        and validate whether the result adheres to specified constraints such as the denominator limit.
+        If the approximation does not meet the defined criteria, the method iteratively improves the resolution
+        until a guardrail boundary is reached.
+
+        :param p: A symbolic representation of a row vector providing weights for numerator computation.
+        :param q: A symbolic representation of another row vector providing weights for denominator computation.
+        :param effective_walk_values: A list of values used to compute the weighted sum.
+        :param constant: The symbolic constant whose approximation is to be validated.
+
+        :returns:  Tuple[bool, float]: A tuple where the first element indicates whether a valid approximation was
+         achieved, and the second element is the computed delta value or negative infinity in case of failure.
+        """
+        walk_col = sp.Matrix(effective_walk_values)
+        numerator = p.dot(walk_col)
+        denom = q.dot(walk_col)
+        estimated = sp.Abs(sp.Rational(numerator, denom))
+        denom_int = sp.Abs(sp.denom(estimated))
+
+        if sp.Abs(denom_int) <= search_config.MIN_ESTIMATE_DENOMINATOR:
+            # probably didn't converge for some reason
+            Logger(f'Guardrail reached - not good enough approximation. Ignoring trajectory\n'
+                   f'Reason: Denominator <= {search_config.MIN_ESTIMATE_DENOMINATOR}',
+                   Logger.Levels.debug).log()
+            return False, float(f'-inf')
+        
+        if cls.HIGH_RES_CONSTANT is None:
+            cls.HIGH_RES_CONSTANT = constant.evalf(cls.CONSTANT_RESOLUTION)
+
+        while cls.CONSTANT_RESOLUTION <= search_config.MAX_CONSTANT_RESOLUTION:
+            err = sp.Abs(estimated - cls.HIGH_RES_CONSTANT)
+            # Match Searchable.calc_delta: use the integer denominator
+            # of the rational estimate for the delta formula, not the
+            # raw symbolic q·walk (which can be a fractional Rational).
+
+            delta = -1 - sp.log(err) / sp.log(denom_int)
+            if delta == sp.oo or delta == sp.zoo:
+                if cls.CONSTANT_RESOLUTION == search_config.MAX_CONSTANT_RESOLUTION:
+                    Logger(
+                        f'Guardrail reached - could not approximate with constant at resolution: '
+                        f'{search_config.MAX_CONSTANT_RESOLUTION}',
+                        Logger.Levels.debug,
+                    ).log()
+                    break
+                cls.CONSTANT_RESOLUTION = min(cls.CONSTANT_RESOLUTION * 2, search_config.MAX_CONSTANT_RESOLUTION)
+                cls.HIGH_RES_CONSTANT = constant.evalf(cls.CONSTANT_RESOLUTION)
+                continue
+            return True, delta
+        return False, float('-inf')
+
     def delta_sequence(self, depth: Optional[int | list] = None) -> list:
         """
         δ values at every step from 1 to depth.
@@ -812,42 +874,25 @@ class TrajectoryAttributesHandler:
             depth = list(range(1, depth + 1))
 
         def compute():
-            limits = self._limits(depth)
-            vectors = self._pq_vector(depth[-1])
+            vectors, effective_walk_values = self._pq_vector(depth[-1])
             if vectors is None:
                 return []
-            
             p, q = vectors
             p = sp.Matrix(p).T
             q = sp.Matrix(q).T
             deltas = []
-            high_res_constant = self.constant().evalf(search_config.CONSTANT_NO_DIGITS_HIGH_RES)
 
-            for limit in limits:    
-                walk_col = sp.Matrix(self._effective_walk_values(None, limit.current))
-                numerator = p.dot(walk_col)
-                denom = q.dot(walk_col)
-                estimated = sp.Abs(sp.Rational(numerator, denom))
-                err = sp.Abs(estimated - high_res_constant)
-                # Match Searchable.calc_delta: use the integer denominator
-                # of the rational estimate for the delta formula, not the
-                # raw symbolic q·walk (which can be a fractional Rational).
-                denom_int = sp.denom(estimated)
-                
-                if sp.Abs(denom_int) <= search_config.MIN_ESTIMATE_DENOMINATOR:
-                    # probably didn't converge for some reason
-                    deltas.append(float('-inf'))
-                    continue
-
-                delta = -1 - sp.log(err) / sp.log(denom_int)
-
-                # This part is not supposed to be reached at all, these are the final guardrails
-                if delta == sp.oo or delta == sp.zoo:
-                    deltas.append(float('-inf'))
-                    # Logger(f"Warning: Infinite delta estimate at step. Marking delta as -inf.", Logger.Levels.warning).log()
-                    continue
-
-                deltas.append(float(delta.evalf(10)))
+            if len(depth) > 1:
+                limits = self._limits(depth)
+                for l in limits:
+                    effective_walk_values = self._effective_walk_values(None, l.current)
+                    if effective_walk_values is None:
+                        continue
+                    success, delta = self.__compute_delta(p, q, effective_walk_values, self.constant())
+                    deltas.append(float(delta.evalf(10)) if success else delta)
+            else:
+                success, delta = self.__compute_delta(p, q, effective_walk_values, self.constant())
+                deltas.append(float(delta.evalf(10)) if success else delta)
             return deltas
         
         return self._get(f"delta_seq_{depth}", compute)
@@ -896,7 +941,7 @@ class TrajectoryAttributesHandler:
         depth = depth or self._depth
         limits = self._limits([round(coef * depth) for coef in search_config.DEPTH_CONVERGENCE_THRESHOLD])
         floats = []
-        vectors = self._pq_vector(depth)
+        vectors, _ = self._pq_vector(depth)
         if vectors is None:
             return False, limits
         p, q = vectors
@@ -996,7 +1041,7 @@ class TrajectoryAttributesHandler:
     #  PENDING IMPLEMENTATIONS  (stubs — user will fill in later)
     # ==================================================================
 
-    def _pq_vector(self, depth: Optional[int] = None) -> Optional[tuple[list, list]]:
+    def _pq_vector(self, depth: Optional[int] = None) -> Tuple[Tuple[list, list], list] | Tuple[None, None]:
         """Numerator and denominator projection vectors (p, q) such that constant = p·walk / q·walk."""
         depth = depth or self._depth
 
@@ -1006,7 +1051,7 @@ class TrajectoryAttributesHandler:
                 # Walk failed (singular matrix, ZeroDivisionError, …) — no
                 # identification possible.  ``identified()`` reads this as
                 # False; ``p_vector``/``q_vector`` propagate ``None``.
-                return None
+                return None, None
             low_res_constant = self.constant().evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES)
             walk_col = sp.Matrix(walk_values)
 
@@ -1025,18 +1070,20 @@ class TrajectoryAttributesHandler:
                     # Cache hit: matcher verified this (p, q) reconstructs the
                     # constant.  Returning a non-None result is itself the
                     # signal that identification succeeded (see ``identified``).
-                    return matched
+                    return matched, walk_values
             
             # Compute p, q using LIReC
             try:
-                res = db.identify([low_res_constant] + walk_values[1:])
+                res = db.identify(
+                    [low_res_constant] + [v.evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES) for v in walk_values[1:]]
+                )
             except Exception as e:
-                Logger(f'Error while identifing constnat. LIReC failed with: "{e}"', Logger.Levels.warning).log()
-                return None
+                Logger(f'Error while identifying constant. LIReC failed with: "{e}"', Logger.Levels.warning).log()
+                return None, walk_values
 
             # LIReC may also return an empty list when it cannot identify the constant
             if len(res) == 0:
-                return None
+                return None, walk_values
 
             # extract p, q from LIReC result
             res = res[0]
@@ -1054,25 +1101,30 @@ class TrajectoryAttributesHandler:
             q = [q_dict[sym] for sym in ext_syms]
 
             estimated = estimated_expr.subs({sym: v for sym, v in zip(ext_syms, list(walk_values))})
-            err = sp.Abs(estimated - self.constant().evalf(search_config.CONSTANT_NO_DIGITS_HIGH_RES))
+            err = sp.Abs(estimated - self.constant())
             if sp.N(err, 15) > search_config.IDENTIFY_CHECK_THRESHOLD:
-                d = len(walk_values)
-                return None
+                Logger(
+                    f'Unexpected - LIReC provided bad combination. '
+                    f'Could not approximate constant {self.constant()} with p/q. Error: {err}'
+                    f'Please contact developers.',
+                    Logger.Levels.warning
+                ).log()
+                return None, walk_values
 
             if self._searchable:
                 self._searchable.cache.append((tuple(p), tuple(q)))
-            return p, q
+            return (p, q), walk_values
 
         return self._get_utility("pq_vector", compute)
 
     def p_vector(self, depth: Optional[int] = None) -> list:
         """Projection vector p such that p·walk gives the numerator sequence."""
-        pq = self._pq_vector(depth or self._depth)
+        pq, _ = self._pq_vector(depth or self._depth)
         return pq[0] if pq is not None else None
 
     def q_vector(self, depth: Optional[int] = None) -> list:
         """Projection vector q such that q·walk gives the denominator sequence."""
-        pq = self._pq_vector(depth or self._depth)
+        pq, _ = self._pq_vector(depth or self._depth)
         return pq[1] if pq is not None else None
 
     # ==================================================================

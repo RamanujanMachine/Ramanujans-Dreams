@@ -1930,6 +1930,57 @@ class TestAnalyzerDedup:
             "Analyzer must always call sample_pairs, even with a populated cache"
         )
 
+    def test_analyzer_records_only_identified_found_constants(
+        self, simple_shard, symbols, tmp_path, monkeypatch,
+    ):
+        """The per-CMF shard JSONL lists a constant as found only when a trajectory
+        identified it (LIReC) — not every candidate constant."""
+        import dreamer.analysis.analyzers.serial_scan.analyzer_mod as am
+        from dreamer.configs.system import sys_config
+        from dreamer.configs.analysis import analysis_config
+        from dreamer.search.methods.hedgehog_scan import SerialSearcher
+        from dreamer.utils.storage.atlas_writer import write_shard_records
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        monkeypatch.setattr(sys_config, "EXPORT_CMFS", str(tmp_path))
+        monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
+        monkeypatch.setattr(analysis_config, "STORE_TRAJECTORIES_SEPARATELY", False)
+
+        traj = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        start = simple_shard.get_interior_point()
+        monkeypatch.setattr(
+            SerialSearcher, "sample_pairs", lambda self_, *a, **k: [(traj, start)],
+        )
+
+        # Deterministic identification: skip the real walk; e is identified.
+        monkeypatch.setattr(
+            am.TrajectoryAttributesHandler, "from_cmf",
+            classmethod(lambda cls, *a, **k: None),
+        )
+
+        class _FakeDTO:
+            delta_estimate = {e.name: 1.0}
+            identified = {e.name: True}
+
+            def to_json_line(self):
+                return json.dumps({
+                    "trajectory_id": "x",
+                    "delta_estimate": self.delta_estimate,
+                    "identified": self.identified,
+                })
+
+        monkeypatch.setattr(am, "build_trajectory_dto", lambda *a, **k: _FakeDTO())
+
+        # Extraction wrote the shard with no constants confirmed found.
+        write_shard_records(str(tmp_path), simple_shard.cmf_name, [simple_shard],
+                            found_constants=[])
+
+        am.AnalyzerModV1({e: [simple_shard]}).execute()
+
+        path = next(tmp_path.glob("*__shards.jsonl"))
+        rec = json.loads(path.read_text().splitlines()[0])
+        assert rec["found_constants"] == [e.name]
+
     def test_analyzer_includes_selected_trajectory(
         self, simple_shard, symbols, tmp_path, monkeypatch,
     ):
@@ -2745,6 +2796,50 @@ class TestAtlasWriter:
         restored = ShardDTO.from_dict(record)
         assert restored.shard_id == derive_cmf_and_shard_ids(simple_shard)[1]
         assert restored.cmf_id == simple_shard.cmf_name
+
+    def test_write_shard_records_empty_found_constants(self, tmp_path, simple_shard):
+        """Extraction writes shard records with no constants confirmed found yet."""
+        from dreamer.utils.storage.atlas_writer import write_shard_records
+
+        write_shard_records(str(tmp_path), simple_shard.cmf_name, [simple_shard],
+                            found_constants=[])
+        path = next(tmp_path.glob("*__shards.jsonl"))
+        record = json.loads(path.read_text().splitlines()[0])
+        assert record["found_constants"] == []
+
+    def test_update_shard_found_constants_additive(self, tmp_path, simple_shard):
+        """After analysis, only identified constants are recorded (additive union)."""
+        from dreamer.utils.storage.atlas_writer import (
+            write_shard_records, update_shard_found_constants,
+        )
+
+        write_shard_records(str(tmp_path), simple_shard.cmf_name, [simple_shard],
+                            found_constants=[])
+        _, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
+
+        updated = update_shard_found_constants(
+            str(tmp_path), simple_shard.cmf_name, {shard_id: [e.name]},
+        )
+        assert updated is True
+        path = next(tmp_path.glob("*__shards.jsonl"))
+        record = json.loads(path.read_text().splitlines()[0])
+        assert record["found_constants"] == [e.name]
+
+        # Idempotent: re-adding the same constant changes nothing.
+        assert update_shard_found_constants(
+            str(tmp_path), simple_shard.cmf_name, {shard_id: [e.name]},
+        ) is False
+
+    def test_update_shard_found_constants_unknown_shard_noop(self, tmp_path, simple_shard):
+        from dreamer.utils.storage.atlas_writer import (
+            write_shard_records, update_shard_found_constants,
+        )
+
+        write_shard_records(str(tmp_path), simple_shard.cmf_name, [simple_shard],
+                            found_constants=[])
+        assert update_shard_found_constants(
+            str(tmp_path), simple_shard.cmf_name, {"no-such-shard": [e.name]},
+        ) is False
 
     def test_update_cmf_hyperplanes_populates_existing_record(
         self, tmp_path, simple_cmf, zero_shift, symbols,

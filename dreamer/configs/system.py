@@ -98,7 +98,7 @@ class SystemConfig(Configurable):
         metadata={"description": "Number of background worker processes that compute Tier-2 trajectory attributes during search. When Tier-2 is active these (plus 1 writer/sink) are the cores reserved from TOTAL_CORES."},
     )
     WRITER_BATCH_SIZE: int = field(
-        default=100,
+        default=50,
         metadata={
             "description": (
                 "Number of records the JSONL writer accumulates before issuing "

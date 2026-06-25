@@ -26,6 +26,7 @@ import os
 from typing import Dict, Iterable, List, Optional, Set
 
 import numpy as np
+import sympy as sp
 from ramanujantools.cmf import CMF, pFq
 from ramanujantools import Position
 
@@ -150,8 +151,17 @@ def build_cmf_dto(
     )
 
 
-def build_shard_dto(shard: Shard) -> ShardDTO:
+def build_shard_dto(
+    shard: Shard, found_constants: Optional[List[str]] = None
+) -> ShardDTO:
     """Construct a ``ShardDTO`` from a live ``Shard`` instance.
+
+    :param found_constants: The constant names to record as *found* in this shard.
+        ``None`` (default) uses every constant the shard is searched for
+        (``shard.consts``) — appropriate for a self-contained DTO.  The extraction
+        stage instead passes ``[]`` (nothing confirmed yet); the analysis stage
+        later fills in only the constants an identified trajectory converged to,
+        via :func:`update_shard_found_constants`.
 
     ``shard_id`` is the stable SHA-256 hash of the canonical inequality
     system (see :func:`derive_cmf_and_shard_ids`) — this stays
@@ -202,7 +212,11 @@ def build_shard_dto(shard: Shard) -> ShardDTO:
         shard_encoding=encoding,
         dimensionality=dimensionality,
         dimension=dimension,
-        found_constants=[c.name for c in shard.consts],
+        found_constants=(
+            [c.name for c in shard.consts]
+            if found_constants is None
+            else list(found_constants)
+        ),
         interior_point=interior_point,
         orthogonality_defect=orthogonality_defect,
     )
@@ -339,6 +353,51 @@ def update_found_constants(
     return updated
 
 
+def update_shard_found_constants(
+    root: str,
+    cmf_name: str,
+    found_by_shard_id: Dict[str, Iterable[str]],
+) -> bool:
+    """Add identified constant names to per-shard records in ``<cmf>__shards.jsonl``.
+
+    The extraction stage writes each shard with ``found_constants=[]``; this is
+    called after analysis with ``{shard_id: [identified const names]}`` to record
+    only the constants an identified trajectory actually converged to (LIReC).
+
+    Additive and idempotent (union with any existing names), so repeated runs and
+    multi-constant runs accumulate rather than clobber.  Returns ``True`` if any
+    record was updated.
+    """
+    path = shard_records_path(root, cmf_name)
+    if not os.path.exists(path):
+        return False
+
+    with open(path, "r") as f:
+        lines = [ln for ln in (line.strip() for line in f) if ln]
+
+    updated = False
+    out_lines: List[str] = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            out_lines.append(line)
+            continue
+        sid = record.get("shard_id")
+        if sid in found_by_shard_id:
+            existing = set(record.get("found_constants") or [])
+            new_consts = {c for c in found_by_shard_id[sid] if c not in existing}
+            if new_consts:
+                record["found_constants"] = sorted(existing | new_consts)
+                updated = True
+        out_lines.append(json.dumps(record))
+
+    if updated:
+        with open(path, "w") as f:
+            f.write("\n".join(out_lines) + "\n")
+    return updated
+
+
 def update_cmf_hyperplanes(
     root: str,
     cmf_name: str,
@@ -413,14 +472,20 @@ def write_shard_records(
     root: str,
     cmf_name: str,
     shards: Iterable[Shard],
+    found_constants: Optional[List[str]] = None,
 ) -> int:
     """Write ShardDTOs for one CMF into ``<root>/<cmf>__shards.jsonl``.
 
     Returns the number of new records appended (existing ids are skipped).
+
+    :param found_constants: Forwarded to :func:`build_shard_dto` for every shard.
+        The extraction stage passes ``[]`` (no constant confirmed found until the
+        analysis stage identifies one); ``None`` keeps the shard's candidate
+        constants.
     """
     path = shard_records_path(root, cmf_name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    shard_dtos = [build_shard_dto(s) for s in shards]
+    shard_dtos = [build_shard_dto(s, found_constants) for s in shards]
     return append_dtos_jsonl(path, shard_dtos, "shard_id")
 
 
@@ -487,8 +552,11 @@ def reconstruct_shard_from_dto(
     interior_point: Optional[Position] = None
     if dto.interior_point is not None:
         symbols = list(cmf_data.cmf.matrices.keys())
+        # ``sympify`` (not ``int``): a rational shift makes coordinates like ``"3/2"``
+        # (stored as a string by ``_pq_to_jsonsafe``), which ``int()`` cannot parse.
+        # Matches the extractor's own DTO reconstruction and ``reconstruct_positions``.
         interior_point = Position(
-            {s: int(v) for s, v in zip(symbols, dto.interior_point)}
+            {s: sp.sympify(v) for s, v in zip(symbols, dto.interior_point)}
         )
 
     return Shard.from_cmf_data(

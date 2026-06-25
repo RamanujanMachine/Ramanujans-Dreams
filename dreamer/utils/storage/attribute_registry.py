@@ -119,7 +119,7 @@ ATTRIBUTE_REGISTRY: Dict[str, AttributeComputer] = {
     "p_vector":                    lambda h: _pq_jsonsafe_list(h.p_vector()),
     "q_vector":                    lambda h: _pq_jsonsafe_list(h.q_vector()),
     "traj_size":                   lambda h: int(h.traj_size()),
-    "limit_rational":              lambda h: str(h.limit_rational()),
+    # "limit_rational":              lambda h: str(h.limit_rational()),
 
     # ----- Tier-2 — heavier numerical / spectral / recurrence attributes. -----
     # ``order`` / ``formula`` / ``relation`` / ``coeff_degrees`` / ``recurrence_coeffs``

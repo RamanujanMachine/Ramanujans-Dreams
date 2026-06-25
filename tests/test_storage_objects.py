@@ -106,3 +106,34 @@ def test_build_shard_dto_roundtrips_rational_interior_point():
     assert sp.Rational(7, 2) in restored_vals
     assert sp.Integer(2) in restored_vals
 
+
+def test_reconstruct_shard_from_dto_rational_interior_point():
+    """reconstruct_shard_from_dto must parse a rational interior-point string
+    like '7/2' (regression: the no-extractor shard-reload path called int('7/2')
+    and crashed).  Mirrors the extractor's own sympify-based reconstruction."""
+    from dreamer.extraction.extractor import extract_cmf_hyperplanes
+    from dreamer.utils.storage.atlas_writer import (
+        build_shard_dto,
+        reconstruct_shard_from_dto,
+    )
+    from dreamer.utils.types import CMFData
+
+    cmf = rt_pFq(1, 1, sp.Integer(1))
+    symbols = list(cmf.matrices.keys())
+    shift = Position({symbols[0]: sp.Integer(0), symbols[1]: sp.Integer(0)})
+    cmf_data = CMFData(cmf=cmf, shift=shift)
+
+    # Build a shard whose encoding length matches the CMF's canonical hyperplanes
+    # (so reconstruction does not treat it as stale), with a rational interior point.
+    hps = extract_cmf_hyperplanes(cmf_data)
+    encoding = [1] * len(hps)
+    interior = Position({symbols[0]: sp.Rational(7, 2), symbols[1]: sp.Integer(2)})
+    shard = Shard.from_cmf_data(cmf_data, [e], hps, encoding, interior)
+    dto = build_shard_dto(shard)
+
+    restored = reconstruct_shard_from_dto(dto, cmf_data, [e])
+    assert restored is not None  # would be None only if the encoding were stale
+    ip = restored.get_interior_point()
+    assert ip[symbols[0]] == sp.Rational(7, 2)  # not truncated to 3 / no crash
+    assert ip[symbols[1]] == sp.Integer(2)
+

@@ -102,7 +102,6 @@ class SearchConfig(Configurable):
         default=1e-10,
         metadata={"description": "Tolerance used when deciding whether a searched trajectory identifies the constant."},
     )
-
     COMPUTE_EIGEN_VALUES: bool = field( # deprecated
         default=False,
         metadata={"description": "Compute eigenvalue diagnostics for trajectory matrices in search results."},
@@ -416,13 +415,18 @@ class SearchConfig(Configurable):
     )
 
     CONSTANT_NO_DIGITS_HIGH_RES: int = field(
-        default=50_000,
+        default=10_000,
         metadata={"description": "Number of digits to use for high-resolution constant values."},
     )
 
     CONSTANT_NO_DIGITS_LOW_RES: int = field(
-        default=1000, #600,
+        default=600,
         metadata={"description": "Number of digits to use for low-resolution constant values."},
+    )
+
+    MAX_CONSTANT_RESOLUTION: int = field(
+        default=100_000,
+        metadata={"description": "Maximum number of digits to use for constant values in delta computation."},
     )
 
 

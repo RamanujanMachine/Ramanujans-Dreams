@@ -46,7 +46,7 @@ class Formatter(ABC):
         else:
             self.consts = [const.name if isinstance(const, Constant) else const]
 
-        self.shifts = shifts
+        self.shifts = self._normalize_shifts(shifts)
         self.selected_start_points = selected_start_points
         self.selected_trajectories = selected_trajectories
         self.only_selected = only_selected
@@ -83,6 +83,39 @@ class Formatter(ABC):
             segment_str = '_'.join(segment_components)
             name_segments_concat.append(segment_str)
         self.cmf_name = '__'.join(name_segments_concat)
+
+    @staticmethod
+    def _normalize_shifts(shifts):
+        """Validate and coerce shifts to exact rational sympy numbers.
+
+        A coordinate shift must be a rational (an integer or an ``sp.Rational``):
+        a Python ``float`` (e.g. ``0.5``) is silently inexact and previously leaked
+        floats into the start-point coordinates, while an irrational/symbolic shift
+        is meaningless for a lattice walk.  Both now raise a clear, user-facing
+        error instead of corrupting the search.
+
+        Integers (Python ``int`` or ``sp.Integer``) and ``sp.Rational`` pass through
+        as their sympy form — name-stable (the serialized ``cmf_name`` is unchanged)
+        and consistent for downstream coordinate arithmetic.
+
+        :param shifts: The raw ``shifts`` argument (list, ``Position``, or ``None``).
+        :return: The normalised shifts (a list of sympy rationals when a list was
+            given; otherwise the input is returned unchanged).
+        :raises ValueError: If any list entry is not a rational number.
+        """
+        if not isinstance(shifts, list):
+            return shifts
+        normalized = []
+        for s in shifts:
+            val = sp.sympify(s)
+            if val.is_Float or not val.is_rational:
+                raise ValueError(
+                    f"Invalid shift {s!r}: shifts must be rational numbers "
+                    f"(an integer or sp.Rational). Pass e.g. sp.Rational(1, 2) "
+                    f"instead of a float like 0.5 or an irrational value."
+                )
+            normalized.append(val)
+        return normalized
 
     @property
     def const(self) -> str:

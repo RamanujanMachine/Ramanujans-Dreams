@@ -174,12 +174,16 @@ class ShardExtractorMod(ExtractionModScheme):
             for const in consts:
                 all_shards[const] += shards
 
-            # DB-ready ShardDTO records (flat file per CMF at root).
+            # DB-ready ShardDTO records (flat file per CMF at root).  ``found_constants``
+            # is written empty: a constant is recorded as found in a shard only after
+            # the analysis stage identifies a converging trajectory there
+            # (update_shard_found_constants).
             if sys_config.EXPORT_CMFS:
                 write_shard_records(
                     sys_config.EXPORT_CMFS,
                     cmd_data.cmf_name,
                     shards,
+                    found_constants=[],
                 )
                 update_cmf_hyperplanes(
                     sys_config.EXPORT_CMFS,

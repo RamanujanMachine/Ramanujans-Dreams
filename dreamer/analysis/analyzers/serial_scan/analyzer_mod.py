@@ -51,6 +51,7 @@ from dreamer.utils.storage.trajectory_attributes import (
     walk_depth_for,
 )
 from dreamer.utils.multi_processing import load_seen_trajectories
+from dreamer.utils.storage.atlas_writer import update_shard_found_constants
 from dreamer.search.methods.hedgehog_scan import SerialSearcher
 import math
 
@@ -114,6 +115,11 @@ class AnalyzerModV1(AnalyzerModScheme):
         # shard_id → Shard object (to build the sorted result later)
         shard_objects: Dict[str, Shard] = {}
 
+        # cmf_name → {shard_id: [identified constant names]} — populated by
+        # _analyze_shard, flushed to the shard JSONL after the loop so a constant
+        # is recorded as found in a shard only when a trajectory identified it.
+        self._found_constants_by_shard: Dict[str, Dict[str, List[str]]] = {}
+
         # Iterate in a deterministic order: all constants, then their shards.
         for constant, shards in SmartTQDM(
             self.cmf_data.items(),
@@ -167,6 +173,15 @@ class AnalyzerModV1(AnalyzerModScheme):
                                 f"Shard {i+1:0{shard_width}d} in {cmf_id} - searching {c.name}: {' ':<17} [identified: ❌]",
                                 Logger.Levels.info,
                             ).log()
+
+        # Persist the actually-found constants into the per-CMF shard JSONL so the
+        # cached records (and any no-extractor rerun) reflect only constants that an
+        # identified trajectory converged to — not every candidate constant.
+        if sys_config.EXPORT_CMFS:
+            for cmf_name, found_by_shard in self._found_constants_by_shard.items():
+                update_shard_found_constants(
+                    sys_config.EXPORT_CMFS, cmf_name, found_by_shard
+                )
 
         # Build per-constant priority lists from the analysis results.
         for const in all_constants:
@@ -346,7 +361,29 @@ class AnalyzerModV1(AnalyzerModScheme):
             Logger.Levels.debug,
         ).log()
 
+        # User-facing summary: which start point we searched from and how many of the
+        # sampled trajectories identified each constant (LIReC).
+        start_disp = _position_to_tuple(shard.get_interior_point())
+        pct_summary = ", ".join(
+            f"{c.name} {100.0 * identified_count[c.name] / total:.2f}% "
+            f"({identified_count[c.name]}/{total})"
+            if total else f"{c.name} N/A"
+            for c in shard.consts
+        )
+        Logger(
+            f"Shard {shard_id} — start point {start_disp}; "
+            f"identified trajectories: {pct_summary}",
+            Logger.Levels.info,
+        ).log()
+
         # Build the final result: only include constants that passed the threshold.
+        # A constant is "found" in this shard iff at least one trajectory identified
+        # it (LIReC), independent of the prioritisation threshold — recorded so the
+        # shard JSONL only lists genuinely-found constants.
+        self._found_constants_by_shard.setdefault(shard.cmf_name, {})[shard_id] = [
+            c.name for c in shard.consts if identified_count[c.name] > 0
+        ]
+
         result: Dict[Constant, Optional[float]] = {}
         for c in shard.consts:
             ident_pct = identified_count[c.name] / total if total else 0.0
