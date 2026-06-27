@@ -28,6 +28,7 @@ from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
+from dreamer.search.searchers.micro_climb_finalize import finalize_best_trajectories
 from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.utils.multi_processing import (
@@ -142,6 +143,23 @@ class HybridSPSAMod(SearcherModScheme):
                     except NoInitialIdentification as e:
                         Logger(str(e), Logger.Levels.warning).log()
                         continue
+
+            # Assurance endgame on the best-δ trajectory(ies): no-op unless
+            # ENABLE_MICRO_HILL_CLIMB.  Runs after the search pool has flushed the
+            # JSONL, while geom / start / eval_pool are still alive.
+            finalize_best_trajectories(
+                shard=shard,
+                identified_consts=identified_consts,
+                geom=geom,
+                start=start,
+                eval_pool=eval_pool,
+                cmf_id=cmf_id,
+                shard_id=shard_id,
+                shard_encoding_str=shard_encoding_str,
+                output_path=output_path,
+                num_workers=num_workers,
+                config_overrides=config_overrides,
+            )
         finally:
             if eval_pool is not None:
                 eval_pool.close()

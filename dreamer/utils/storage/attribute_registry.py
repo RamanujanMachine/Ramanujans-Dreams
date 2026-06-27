@@ -84,6 +84,22 @@ def _list_of_float(values) -> list[float]:
     return [float(v) for v in values]
 
 
+def _serialize_delta_prediction(pred) -> Optional[dict]:
+    """Convert a delta_prediction dict to a JSON-safe form.
+
+    The handler returns ``{"predicted_delta": float, "lambda_1": sympy_expr,
+    "lambda_2": sympy_expr}`` or ``None``.  Eigenvalue expressions are
+    stringified with limited precision via :func:`_numeric_str`.
+    """
+    if pred is None:
+        return None
+    return {
+        "predicted_delta": float(pred["predicted_delta"]),
+        "lambda_1": _numeric_str(pred["lambda_1"]),
+        "lambda_2": _numeric_str(pred["lambda_2"]),
+    }
+
+
 def _pq_jsonsafe_list(pq) -> list | None:
     """Convert a p/q coefficient list to JSON-safe form, or ``None`` when missing.
 
@@ -134,10 +150,12 @@ ATTRIBUTE_REGISTRY: Dict[str, AttributeComputer] = {
     "eigenvalue_errors":           lambda h: _list_of_str(h.eigenvalue_errors()),
     "spectral_gap":                lambda h: _opt_float(h.spectral_gap()),
     "companion_coboundary_rank":   lambda h: int(h.companion_coboundary_rank()),
-    "asymptotics":                 lambda h: _list_of_str(h.asymptotics()),
-    "convergence_class":           lambda h: h.convergence_class(),
-    "gcd_slope": lambda h: _opt_float(h.gcd_slope()),
-    "kamidelta":                   lambda h: _list_of_str(h.kamidelta()),
+    # "asymptotics":                 lambda h: _list_of_str(h.asymptotics()),
+    # "convergence_class":           lambda h: h.convergence_class(),
+    "gcd_slope":                   lambda h: _opt_float(h.gcd_slope()),
+    "delta_prediction":            lambda h: _serialize_delta_prediction(h.delta_prediction()),
+    "error_formula_ratio":         lambda h: _opt_float(h.error_formula_ratio()),
+    "error_at_depth":              lambda h: _opt_float(h.error_at_depth()),
 
     # ----- Tier-3 — symbolic / expensive attributes (post-process). -----
     "precision_at":                lambda h: int(h.precision_at()),
@@ -152,7 +170,9 @@ ATTRIBUTE_REGISTRY: Dict[str, AttributeComputer] = {
         h.delta_sequence(min(h._depth, 100))
     ),
     "digits_per_step":             lambda h: [[int(k), int(d)] for k, d in h.digits_per_step()],
-    "asymptotic_digits_per_step":  lambda h: _opt_float(h.asymptotic_digits_per_step()),
+    # asymptotic_digits_per_step replaced by digits_approximation (eigenvalue-based).
+    # "asymptotic_digits_per_step":  lambda h: _opt_float(h.asymptotic_digits_per_step()),
+    "digits_approximation":        lambda h: _opt_float(h.digits_approximation()),
 }
 
 

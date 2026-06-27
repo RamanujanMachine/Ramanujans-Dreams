@@ -33,6 +33,26 @@ def _stable_id(*parts: str, length: int = 16) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:length]
 
 
+def _mpc_to_sympy(value) -> sp.Expr:
+    """Convert an ``mpmath`` real/complex number to a sympy expression.
+
+    Real values (including ``mpf``) become a :class:`sympy.Float`; complex values
+    become ``re + im*I``.  ``mpmath.inf`` maps to :data:`sympy.oo`.  Used to keep
+    the coboundary eigenvalue path's return type identical to the symbolic
+    ``Matrix.sorted_eigenvals`` it replaces.
+    """
+    import mpmath as mp
+
+    if value == mp.inf:
+        return sp.oo
+    if value == -mp.inf:
+        return -sp.oo
+    im = mp.im(value)
+    if im == 0:
+        return sp.Float(str(mp.nstr(mp.re(value), 30)))
+    return sp.Float(str(mp.nstr(mp.re(value), 30))) + sp.Float(str(mp.nstr(im, 30))) * sp.I
+
+
 def _position_to_tuple(pos) -> tuple:
     """Convert a ramanujantools.Position (dict-like) to a plain tuple of
     JSON-serializable values.
@@ -302,7 +322,19 @@ def build_trajectory_dto(
             c_sympy = c
 
         delta, p, q, ided = handler.compute_for_constant(c_sympy)
-        delta_dict[c_name] = float(delta)
+
+        # When USE_DELTA_PREDICTION is enabled, delta_estimate stores the eigenvalue-
+        # based prediction rather than the walk-based delta.  The regular delta is
+        # still computed internally (needed to select the best eigenvalue pair); only
+        # the stored ranking value changes.  Falls back to regular delta when the
+        # prediction is unavailable (non-identified, no valid pairs, zero gcd_slope).
+        if search_config.USE_DELTA_PREDICTION and bool(ided):
+            pred = handler.delta_prediction()
+            ranking_delta = pred["predicted_delta"] if pred is not None else float(delta)
+        else:
+            ranking_delta = float(delta)
+
+        delta_dict[c_name] = ranking_delta
         p_dict[c_name] = tuple(_pq_to_jsonsafe(x) for x in p) if p else None
         q_dict[c_name] = tuple(_pq_to_jsonsafe(x) for x in q) if q else None
         identified_dict[c_name] = bool(ided)
@@ -344,9 +376,6 @@ class TrajectoryAttributesHandler:
     #  Construction
     # ------------------------------------------------------------------
 
-    CONSTANT_RESOLUTION = search_config.CONSTANT_NO_DIGITS_HIGH_RES
-    HIGH_RES_CONSTANT = None
-
     def __init__(
         self,
         traj_matrix: Matrix,
@@ -354,6 +383,9 @@ class TrajectoryAttributesHandler:
         walk_depth: int = 1500,
         walk_type: Optional[int] = None,
         searchable: Optional[Searchable] = None,
+        cmf=None,
+        trajectory=None,
+        start_point=None,
     ):
         """
         Parameters
@@ -376,8 +408,18 @@ class TrajectoryAttributesHandler:
             The ``Searchable`` (typically the ``Shard``) this trajectory was
             sampled from.  When provided, its ``cache`` is consulted/updated
             for p/q vectors so repeated identification calls are avoided.
+        cmf : optional
+            The originating CMF.  Stored only to enable the fast coboundary
+            eigenvalue path for ``pFq`` CMFs (see :meth:`sorted_eigenvalues`).
+            ``None`` when the handler is built directly from a matrix.
+        trajectory, start_point : ramanujantools.Position, optional
+            The trajectory direction and start point the matrix was walked
+            from.  Required (together with ``cmf``) for the coboundary path.
         """
         self._traj = traj_matrix
+        self._cmf = cmf
+        self._trajectory = trajectory
+        self._start_point = start_point
         self._constant = constant
         self._depth = walk_depth
         self._cache: dict = {}
@@ -386,6 +428,10 @@ class TrajectoryAttributesHandler:
         self._walk_type = walk_type
         self._searchable = searchable
         self._utility_cache: dict = {}  # separate cache for non-core attributes like p/q vectors
+        # Per-instance constant resolution state — avoids the class-level shared-state
+        # bug where one trajectory's precision escalation would pollute all subsequent ones.
+        self._constant_resolution: int = search_config.CONSTANT_NO_DIGITS_HIGH_RES
+        self._high_res_constant: Optional[sp.Expr] = None
 
     @classmethod
     def from_cmf(
@@ -413,27 +459,30 @@ class TrajectoryAttributesHandler:
             walk_depth = search_config.DEPTH_FROM_TRAJECTORY_LEN(
                 _trajectory_norm(trajectory), cmf.dim(),
             )
-        return cls(tmat, constant, walk_depth, walk_type, searchable)
+        return cls(
+            tmat, constant, walk_depth, walk_type, searchable,
+            cmf=cmf, trajectory=trajectory, start_point=start_point,
+        )
 
     # ------------------------------------------------------------------
     #  Cache helpers
     # ------------------------------------------------------------------
 
-    def _get(self, key: str, fn):
+    def __get(self, key: str, fn):
         if key not in self._cache:
             self._cache[key] = fn()
         return self._cache[key]
 
-    def _get_utility(self, key: str, fn):
+    def __get_utility(self, key: str, fn):
         if key not in self._utility_cache:
             self._utility_cache[key] = fn()
         return self._utility_cache[key]
 
-    def clear_cache(self):
+    def __clear_cache(self):
         """Drop all cached core (Tier-1/2) attribute results."""
         self._cache.clear()
 
-    def clear_utility_cache(self):
+    def __clear_utility_cache(self):
         """Drop all cached utility results (walks, p/q vectors)."""
         self._utility_cache.clear()
 
@@ -446,12 +495,12 @@ class TrajectoryAttributesHandler:
     # ==================================================================
 
     @cached_property
-    def symbolic_trajectory_matrix(self) -> Matrix:
-        if self.walk_type() == 1:
-            self._traj = self._traj.inv().T
+    def trajectory_matrix(self) -> Matrix:
+        """Raw d×d symbolic trajectory matrix M(n)."""
         return self._traj
 
-    def trajectory_matrix(self) -> Matrix:
+    @cached_property
+    def trajectory_matrix_typed(self) -> Matrix:
         """Raw d×d symbolic trajectory matrix M(n).
 
         The ``inv().T`` transform for ``walk_type=1`` is applied *after*
@@ -460,7 +509,6 @@ class TrajectoryAttributesHandler:
         attributes (linear_recurrence, companion, eigenvalues, kamidelta,
         gcd_slope) all operate on raw ``M``.
         """
-        # TODO: inverse only after walk - not use symbolic.
         if self.walk_type() == 1:
             self._traj = self._traj.inv().T
         return self._traj
@@ -480,7 +528,7 @@ class TrajectoryAttributesHandler:
         """
         def compute():
             try:
-                walked = self._traj.walk({n: 1}, depth, {n: 0})
+                walked = self.trajectory_matrix.walk({n: 1}, depth, {n: 0})
                 return walked if self.walk_type() == 2 else walked.inv().T
             except Exception as e:
                 Logger(
@@ -488,7 +536,12 @@ class TrajectoryAttributesHandler:
                     Logger.Levels.warning,
                 ).log()
                 return None
-        return self._get_utility(f"walked_{depth}", compute)
+        return self.__get_utility(f"walked_{depth}", compute)
+
+    @cached_property
+    def __initial_values(self):
+        p, q = self.p_vector(), self.q_vector()
+        return Matrix([p, q])
 
     # ==================================================================
     #  LINEAR RECURRENCE  (the core object from ramanujantools)
@@ -508,7 +561,6 @@ class TrajectoryAttributesHandler:
         are methods on this object.
         """
         def _build():
-            tmat = self.trajectory_matrix()
             # sp.cancel() commented out: LinearRecurrence extracts recurrence
             # coefficients correctly from the unsimplified symbolic matrix.
             # Re-enable here if symbolic simplification is needed for Tier-2 attributes.
@@ -516,8 +568,8 @@ class TrajectoryAttributesHandler:
             #     tmat = tmat.applyfunc(sp.cancel)
             # elif hasattr(tmat, 'matrix'):
             #     tmat.matrix = tmat.matrix.applyfunc(sp.cancel)
-            return LinearRecurrence(tmat) # TODO: This must use the initial values somehow! talk to Kalisch
-        return self._get("linear_recurrence", _build)
+            return LinearRecurrence(self.trajectory_matrix_typed)
+        return self.__get("linear_recurrence", _build)
 
     # ==================================================================
     #  COMPANION MATRIX
@@ -534,7 +586,7 @@ class TrajectoryAttributesHandler:
         All recurrence coefficients live in the LAST column.
         The 0s and 1s in the left columns are structural.
         """
-        return self._get("companion", lambda: self.trajectory_matrix().as_companion())
+        return self.__get("companion", lambda: self.trajectory_matrix_typed.as_companion())
 
     # ==================================================================
     #  RECURRENCE FORMULA ATTRIBUTES
@@ -545,9 +597,7 @@ class TrajectoryAttributesHandler:
         Order d of the recurrence.
         d=2 → f(n) depends on f(n-1) and f(n-2).
         """
-        return self._get("order", lambda:
-            self.linear_recurrence().order()
-        )
+        return self.__get("order", lambda: self.linear_recurrence().order())
 
     def relation(self) -> list:
         """
@@ -558,9 +608,7 @@ class TrajectoryAttributesHandler:
 
         Rearranging: f(n) = -[a_1(n)·f(n-1) + ... + a_d(n)·f(n-d)] / a_0(n)
         """
-        return self._get("relation", lambda:
-            self.linear_recurrence().relation
-        )
+        return self.__get("relation", lambda: self.linear_recurrence().relation)
 
     def recurrence_coeffs(self) -> list:
         """
@@ -573,25 +621,21 @@ class TrajectoryAttributesHandler:
             C = self.companion()
             d = self.order()
             return [sp.simplify(C[d - i, -1]) for i in range(1, d + 1)]
-        return self._get("recurrence_coeffs", compute)
+        return self.__get("recurrence_coeffs", compute)
 
     def coeff_degrees(self) -> list:
         """
         Polynomial degrees of the relation coefficients.
         Uses LinearRecurrence.degrees() which returns degrees of [a_0, ..., a_d].
         """
-        return self._get("coeff_degrees", lambda:
-            self.linear_recurrence().degrees()
-        )
+        return self.__get("coeff_degrees", lambda: self.linear_recurrence().degrees())
 
     def formula_str(self) -> str:
         """
         Human-readable recurrence formula.
         Uses LinearRecurrence.__str__() which gives: Σ a_i(n)·p(n-i) = 0
         """
-        return self._get("formula_str", lambda:
-            str(self.linear_recurrence())
-        )
+        return self.__get("formula_str", lambda: str(self.linear_recurrence()))
 
     # ==================================================================
     #  EIGENVALUES
@@ -607,29 +651,143 @@ class TrajectoryAttributesHandler:
         For a constant-coefficient recurrence, these are the actual
         characteristic roots. For polynomial coefficients, these are
         the leading-term roots that govern asymptotic growth.
+
+        Fast path: when this handler originates from a ``pFq`` CMF (built via
+        :meth:`from_cmf`), the eigenvalues are obtained through a diagonal
+        coboundary transform (see :meth:`_pfq_coboundary_eigenvalues`), which
+        is ~3x faster than the generic symbolic ``sorted_eigenvals`` at higher
+        dimensions.  For every other CMF — or when the coboundary path fails —
+        the generic implementation is used.
         """
-        # TODO: we can find eigenvlaues using Coboundary and substitute infty and then extract eigenvlaues! Superfast!
-        return self._get("sorted_eigenvalues", lambda: self.trajectory_matrix().sorted_eigenvals())
+        def _compute_sorted_eigenvalues(self) -> list:
+            fast = self._pfq_coboundary_eigenvalues()
+            if fast is not None:
+                return fast
+            return self.trajectory_matrix_typed.sorted_eigenvals()
+        return self.__get("sorted_eigenvalues", _compute_sorted_eigenvalues)
+
+    def _pfq_coboundary_eigenvalues(self) -> Optional[list]:
+        r"""Eigenvalues of a ``pFq`` trajectory matrix via a coboundary transform.
+
+        For a ``pFq(p, q, z)`` CMF the trajectory matrix :math:`M(n)` admits a
+        *diagonal* coboundary :math:`C(n) = \operatorname{diag}(1, r, r^2, \dots)`
+        with ratio
+
+        .. math:: r(n) = \frac{\prod_k y_k(n)}{\prod_k x_k(n)},
+
+        evaluated along the trajectory (``x_k(n) = start_k + n·traj_k``).  The
+        transformed matrix :math:`\tilde M(n) = C(n)^{-1} M(n) C(n+1)` has a
+        finite element-wise limit as :math:`n\to\infty`, whose eigenvalues are
+        the Poincaré eigenvalues of :math:`M`.
+
+        Because :math:`C` is diagonal the transform is pure element-wise
+        scaling — no symbolic inverse or matmul — so
+        :math:`\tilde M_{ij} = \lim_{n\to\infty} M_{ij}\, r(n+1)^j / r(n)^i`.
+        The eigenvalues of the resulting numeric matrix are extracted by rooting
+        its exact characteristic polynomial with ``mpmath`` at high precision
+        (robust to the large condition numbers that defeat float eigensolvers on
+        the small, convergence-governing eigenvalue).
+
+        Returns the eigenvalues as sympy ``Float``/``Add`` expressions sorted by
+        :math:`|\lambda|` descending (matching :meth:`Matrix.sorted_eigenvals`),
+        or ``None`` when the fast path is not applicable (non-``pFq`` CMF, missing
+        trajectory/start, or any failure) so the caller can fall back.
+
+        For ``walk_type == 1`` the handler walks ``M.inv().T`` whose eigenvalues
+        are the reciprocals of :math:`M`'s; they are reciprocated here so the
+        result matches the generic path for both walk types.
+        """
+        cmf = self._cmf
+        if cmf is None or self._trajectory is None or self._start_point is None:
+            return None
+        # Duck-typed pFq detection (avoids a hard import dependency at module load).
+        if type(cmf).__name__ != "pFq" or not (hasattr(cmf, "p") and hasattr(cmf, "q")):
+            return None
+        try:
+            import mpmath as mp
+
+            x_axes = sp.symbols(f"x:{cmf.p}")
+            y_axes = sp.symbols(f"y:{cmf.q}")
+            traj = self._trajectory
+            start = self._start_point
+
+            def at(sym):
+                return start[sym] + n * traj[sym]
+
+            r = sp.prod([at(y) for y in y_axes]) / sp.prod([at(x) for x in x_axes])
+            r_next = r.subs({n: n + 1})
+
+            # Raw pFq trajectory matrix (before the handler's inv().T transform).
+            tmat = cmf.trajectory_matrix(traj, start)
+            d = tmat.shape[0]
+            lim = sp.zeros(d, d)
+            for i in range(d):
+                for j in range(d):
+                    lim[i, j] = sp.limit(tmat[i, j] * r_next ** j / r ** i, n, sp.oo)
+
+            charpoly = Matrix(lim).charpoly()
+            with mp.workdps(50):
+                coeffs = [mp.mpf(str(sp.N(c, 50))) if sp.im(c) == 0
+                          else mp.mpc(complex(c)) for c in charpoly.all_coeffs()]
+                roots = mp.polyroots(coeffs, maxsteps=200, extraprec=200)
+            if self.walk_type() == 1:
+                roots = [1 / rt if rt != 0 else mp.inf for rt in roots]
+            eigs = [_mpc_to_sympy(rt) for rt in roots]
+            return sorted(eigs, key=lambda e: abs(complex(e.evalf(chop=True))), reverse=True)
+        except Exception as exc:  # noqa: BLE001 — any failure → generic fallback
+            Logger(
+                f"pFq coboundary eigenvalue path failed ({exc!r}); "
+                f"falling back to symbolic sorted_eigenvals.",
+                Logger.Levels.debug,
+            ).log()
+            return None
+
+    def _unique_eigenvalue_pairs(self) -> list:
+        """All ordered pairs (λᵢ, λⱼ) with |λᵢ| > |λⱼ| from the unique eigenvalues.
+
+        Deduplicates eigenvalues by absolute value (tolerance 1e-10) before building
+        pairs so multiplicities do not generate redundant combinations.  Pairs where
+        |λᵢ| ≈ |λⱼ| are excluded because they predict a convergence rate of zero.
+
+        Returns a list of 2-tuples of sympy expressions (evalf'd, chop=True).
+        """
+        raw = [e.evalf(chop=True) for e in self.sorted_eigenvalues()]
+        # Deduplicate by |λ|
+        unique: list = []
+        seen_abs: list = []
+        for e in raw:
+            a = abs(complex(e))
+            if not any(abs(a - s) < 1e-10 for s in seen_abs):
+                unique.append(e)
+                seen_abs.append(a)
+        # All pairs (λᵢ, λⱼ) with |λᵢ| strictly greater than |λⱼ|
+        pairs = []
+        for i, ei in enumerate(unique):
+            for j, ej in enumerate(unique):
+                if i == j:
+                    continue
+                abs_i = abs(complex(ei))
+                abs_j = abs(complex(ej))
+                if abs_i > abs_j + 1e-10:
+                    pairs.append((ei, ej))
+        return pairs
 
     def eigenvalue_errors(self) -> list:
         """
         log|λ₁/λᵢ| for i = 2, ..., d.
         These are the 'error terms' — the log-ratios between the dominant
-        eigenvalue and each subdominant one. Used internally by kamidelta().
+        eigenvalue and each subdominant one. Used internally by delta_prediction().
 
-        From Matrix.errors():
-            errors[0] = log|λ₁/λ₂|  (primary convergence rate)
-            errors[1] = log|λ₁/λ₃|  (if d ≥ 3)
-            etc.
+        errors[0] = log|λ₁/λ₂|  (primary convergence rate)
+        errors[1] = log|λ₁/λ₃|  (if d ≥ 3), etc.
         """
         def compute():
-            # Using Ramanujan-tools implementation of errors() for caching
             lambdas = [e.evalf(chop=True) for e in self.sorted_eigenvalues()]
             deltas = []
             for i in range(1, len(lambdas)):
                 deltas.append(sp.log(abs(lambdas[0]) / abs(lambdas[i])))
             return deltas
-        return self._get("eigenvalue_errors", compute)
+        return self.__get("eigenvalue_errors", compute)
 
     def spectral_gap(self) -> Optional[float]:
         """
@@ -641,7 +799,7 @@ class TrajectoryAttributesHandler:
             if len(eigs) >= 2:
                 return float(abs(eigs[0]).evalf() - abs(eigs[1]).evalf())
             return None
-        return self._get("spectral_gap", compute)
+        return self.__get("spectral_gap", compute)
 
     # ==================================================================
     #  WALKING — LIMIT
@@ -715,7 +873,7 @@ class TrajectoryAttributesHandler:
 
         if walk_matrix is not None:
             return compute()
-        return self._get_utility(f"effective_walk_{depth}", compute)
+        return self.__get_utility(f"effective_walk_{depth}", compute)
 
     def _limits(self, depths: list) -> list[Limit]:
         """
@@ -725,7 +883,7 @@ class TrajectoryAttributesHandler:
         on degenerate trajectories, etc.) — callers must handle this.
         """
         try:
-            limits = self.trajectory_matrix().limit({n: 1}, depths, {n: 0})
+            limits = self.trajectory_matrix.limit({n: 1}, depths, {n: 0}, self.__initial_values)
             if isinstance(limits, Limit):
                 limits = [limits]
 
@@ -761,17 +919,16 @@ class TrajectoryAttributesHandler:
                     Logger.Levels.warning,
                 ).log()
                 return float('nan')
-        return self._get(f"limit_{depth}", compute)
+        return self.__get(f"limit_{depth}", compute)
 
-    # TODO: limit should be a column and not the actual float
+    # TODO: limit should be a column and not the actual float\
     def limit_rational(self, depth: Optional[int] = None):
         """
         Limit as an exact sympy Rational p/q.
         """
         depth = depth or self._depth
-        return self._get(f"limit_rational_{depth}", lambda:
-            self._limits([depth])[0].as_rational()
-        )
+        return self.__get(f"limit_rational_{depth}", lambda:
+            self._limits([depth])[0].as_rational())
 
     # ==================================================================
     #  DELTA — IRRATIONALITY MEASURE
@@ -803,27 +960,23 @@ class TrajectoryAttributesHandler:
                     Logger.Levels.warning,
                 ).log()
                 return float('-inf')
-        return self._get(f"delta_{depth}", compute)
+        return self.__get(f"delta_{depth}", compute)
 
-    @classmethod
     def __compute_delta(
-            cls, p: sp.Matrix, q: sp.Matrix, effective_walk_values: list, constant: sp.Expr
-    ) -> Tuple[bool, float | sp.Expr] :
+            self, p: sp.Matrix, q: sp.Matrix, effective_walk_values: list, constant: sp.Expr
+    ) -> Tuple[bool, float | sp.Expr]:
         """
         Computes the delta value for evaluating an approximation using a rational estimator.
-        This method evaluates how closely a given symbolic constant matches an estimated value derived from
-        a set of input parameters. The delta computation is used to determine the level of approximation
-        and validate whether the result adheres to specified constraints such as the denominator limit.
-        If the approximation does not meet the defined criteria, the method iteratively improves the resolution
-        until a guardrail boundary is reached.
 
-        :param p: A symbolic representation of a row vector providing weights for numerator computation.
-        :param q: A symbolic representation of another row vector providing weights for denominator computation.
-        :param effective_walk_values: A list of values used to compute the weighted sum.
+        Uses per-instance ``_constant_resolution`` / ``_high_res_constant`` so that
+        precision escalation for one trajectory does not affect any other handler.
+
+        :param p: Row vector providing weights for numerator computation.
+        :param q: Row vector providing weights for denominator computation.
+        :param effective_walk_values: Walk column values used to compute the weighted sum.
         :param constant: The symbolic constant whose approximation is to be validated.
-
-        :returns:  Tuple[bool, float]: A tuple where the first element indicates whether a valid approximation was
-         achieved, and the second element is the computed delta value or negative infinity in case of failure.
+        :returns: ``(success, delta)`` — ``success`` is False and ``delta`` is ``-inf``
+            when the approximation fails the denominator guard or precision ceiling.
         """
         walk_col = sp.Matrix(effective_walk_values)
         numerator = p.dot(walk_col)
@@ -832,32 +985,32 @@ class TrajectoryAttributesHandler:
         denom_int = sp.Abs(sp.denom(estimated))
 
         if sp.Abs(denom_int) <= search_config.MIN_ESTIMATE_DENOMINATOR:
-            # probably didn't converge for some reason
             Logger(f'Guardrail reached - not good enough approximation. Ignoring trajectory\n'
                    f'Reason: Denominator <= {search_config.MIN_ESTIMATE_DENOMINATOR}',
                    Logger.Levels.debug).log()
-            return False, float(f'-inf')
-        
-        if cls.HIGH_RES_CONSTANT is None:
-            cls.HIGH_RES_CONSTANT = constant.evalf(cls.CONSTANT_RESOLUTION)
+            return False, float('-inf')
 
-        while cls.CONSTANT_RESOLUTION <= search_config.MAX_CONSTANT_RESOLUTION:
-            err = sp.Abs(estimated - cls.HIGH_RES_CONSTANT)
+        if self._high_res_constant is None:
+            self._high_res_constant = constant.evalf(self._constant_resolution)
+
+        while self._constant_resolution <= search_config.MAX_CONSTANT_RESOLUTION:
+            err = sp.Abs(estimated - self._high_res_constant)
             # Match Searchable.calc_delta: use the integer denominator
             # of the rational estimate for the delta formula, not the
             # raw symbolic q·walk (which can be a fractional Rational).
-
             delta = -1 - sp.log(err) / sp.log(denom_int)
             if delta == sp.oo or delta == sp.zoo:
-                if cls.CONSTANT_RESOLUTION == search_config.MAX_CONSTANT_RESOLUTION:
+                if self._constant_resolution == search_config.MAX_CONSTANT_RESOLUTION:
                     Logger(
                         f'Guardrail reached - could not approximate with constant at resolution: '
                         f'{search_config.MAX_CONSTANT_RESOLUTION}',
                         Logger.Levels.debug,
                     ).log()
                     break
-                cls.CONSTANT_RESOLUTION = min(cls.CONSTANT_RESOLUTION * 2, search_config.MAX_CONSTANT_RESOLUTION)
-                cls.HIGH_RES_CONSTANT = constant.evalf(cls.CONSTANT_RESOLUTION)
+                self._constant_resolution = min(
+                    self._constant_resolution * 2, search_config.MAX_CONSTANT_RESOLUTION
+                )
+                self._high_res_constant = constant.evalf(self._constant_resolution)
                 continue
             return True, delta
         return False, float('-inf')
@@ -895,27 +1048,61 @@ class TrajectoryAttributesHandler:
                 deltas.append(float(delta.evalf(10)) if success else delta)
             return deltas
         
-        return self._get(f"delta_seq_{depth}", compute)
+        return self.__get(f"delta_seq_{depth}", compute)
 
-    def kamidelta(self, depth: int = 20) -> list:
+    def delta_prediction(self, depth: int = 20) -> Optional[dict]:
+        """Predict δ by selecting the eigenvalue pair that best fits the actual delta.
+
+        Algorithm:
+          1. Enumerate all pairs (λᵢ, λⱼ) with |λᵢ| > |λⱼ| from the unique
+             Poincaré eigenvalues (see :meth:`_unique_eigenvalue_pairs`).
+          2. For each pair, compute the kamidelta formula:
+             ``predicted = -1 + log(|λᵢ| / |λⱼ|) / gcd_slope(depth)``.
+          3. Compare each ``predicted`` to the actual ``self.delta()`` and pick
+             the pair with minimum ``|predicted − actual_delta|``.
+
+        Returns a dict ``{"predicted_delta": float, "lambda_1": expr, "lambda_2": expr}``
+        where ``lambda_1`` / ``lambda_2`` are the matched dominant / subdominant
+        eigenvalues (sympy expressions, evalf'd).
+        Returns ``None`` when the actual delta is not finite, no valid pairs exist,
+        or ``gcd_slope`` is zero.
         """
-        BLIND irrationality measure prediction — NO knowledge of L needed.
+        def compute() -> Optional[dict]:
+            actual_delta = self.delta()
+            if not math.isfinite(actual_delta):
+                return None
 
-        Uses the Kamidelta algorithm from ramanujantools:
-            1. errors() computes log|λ₁/λᵢ| from Poincaré eigenvalues
-            2. gcd_slope(depth) fits log(q̃_n) linearly
-            3. kamidelta = -1 + error / slope
+            pairs = self._unique_eigenvalue_pairs()
+            if not pairs:
+                return None
 
-        Returns a list of predicted δ values (one per eigenvalue pair).
-        For order-2 recurrences, this is a single-element list.
-        """
-        # TODO: kamidelta should be computed between every two eigenvalues (bigger over the smaller one)
-        def compute():
-            # Copied implementation from Ramanujan-Tools - utilizing cache here.
-            errors = self.eigenvalue_errors()
             slope = self.gcd_slope(depth)
-            return [-1 + error / slope for error in errors]
-        return self._get(f'kamidelta_{depth}', compute)
+            try:
+                slope_f = float(slope)
+            except Exception:
+                return None
+            if abs(slope_f) < 1e-30:
+                return None
+
+            best: Optional[dict] = None
+            best_diff = float('inf')
+            for lam1, lam2 in pairs:
+                try:
+                    log_ratio = math.log(abs(complex(lam1)) / abs(complex(lam2)))
+                    predicted = float(-1 + log_ratio / slope_f)
+                    diff = abs(predicted - actual_delta)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best = {
+                            "predicted_delta": predicted,
+                            "lambda_1": lam1,
+                            "lambda_2": lam2,
+                        }
+                except Exception:
+                    continue
+            return best
+
+        return self.__get(f"delta_prediction_{depth}", compute)
 
     def gcd_slope(self, depth: int = 20):
         """
@@ -924,8 +1111,15 @@ class TrajectoryAttributesHandler:
 
         Used internally by kamidelta, but also useful on its own.
         """
-        # return self._get(f"gcd_slope_{depth}", lambda: self.trajectory_matrix().gcd_slope(depth))
-        return self._get(f"gcd_slope_{depth}", lambda: self.trajectory_matrix().gcd_slope(depth))
+        vectors, _ = self._pq_vector(depth)[0]
+        if vectors is None:
+            return None
+        p, q = vectors
+        
+        return self.__get(
+            f"gcd_slope_{depth}",
+            lambda: self.trajectory_matrix_typed.gcd_slope(depth, initial_values=self.__initial_values)
+        )
 
     # ==================================================================
     #  CONVERGENCE RATE
@@ -968,9 +1162,7 @@ class TrajectoryAttributesHandler:
         Uses Limit.precision() which compares the last two walk steps.
         """
         depth = depth or self._depth
-        return self._get(f"precision_{depth}", lambda:
-            self._limits([depth])[0].precision()
-        )
+        return self.__get(f"precision_{depth}", lambda: self._limits([depth])[0].precision())
 
     def digits_per_step(self, max_depth: Optional[int] = None) -> list:
         """
@@ -992,25 +1184,86 @@ class TrajectoryAttributesHandler:
                 for k in range(1, len(precisions))
                 if precisions[k - 1] > 0
             ]
-        return self._get(f"dps_{max_depth}", compute)
+        return self.__get(f"dps_{max_depth}", compute)
 
     def asymptotic_digits_per_step(self, max_depth: Optional[int] = None) -> Optional[float]:
-        """
-        Mean Δd in the tail (last 25%) of the digits-per-step trajectory.
-        This is the stable long-run convergence rate.
+        """Replaced by :meth:`digits_approximation` which uses the matched eigenvalue pair.
 
-        Expected:  Gosper N=29 → ≈8,  Chudnovsky N=41 → ≈14
+        The walk-based implementation is kept here for reference but is no longer the
+        primary method.  It required walking to ``max_depth`` steps and averaging Δd
+        in the tail — expensive and noisy compared to the eigenvalue formula.
         """
-        max_depth = max_depth or min(self._depth, 100)
-        def compute():
-            dps = self.digits_per_step(max_depth)
-            if not dps:
+        # max_depth = max_depth or min(self._depth, 100)
+        # def compute():
+        #     dps = self.digits_per_step(max_depth)
+        #     if not dps:
+        #         return None
+        #     tail = dps[max(0, int(0.75 * len(dps))):]
+        #     if not tail:
+        #         return None
+        #     return sum(d for _, d in tail) / len(tail)
+        # return self._get(f"asymp_dps_{max_depth}", compute)
+        return self.digits_approximation()
+
+    def digits_approximation(self, depth: Optional[int] = None, prediction_depth: int = 20) -> Optional[float]:
+        """Predicted number of correct digits at *depth* from the matched eigenvalue pair.
+
+        Formula:  ``#digits(n) = -n · log₁₀(|λ₂ / λ₁|)``
+
+        Uses the ``(λ₁, λ₂)`` pair selected by :meth:`delta_prediction`, which is the
+        pair whose kamidelta prediction is closest to the actual δ.  Returns ``None``
+        when delta_prediction is unavailable (non-identified trajectory, no valid pairs,
+        or zero gcd_slope).
+
+        :param depth: Walk depth to predict at (defaults to this handler's walk depth).
+        :param prediction_depth: Depth passed to :meth:`delta_prediction` for
+            ``gcd_slope``; controls how far back the GCD slope is fitted.
+        """
+        depth = depth or self._depth
+        def compute() -> Optional[float]:
+            pred = self.delta_prediction(prediction_depth)
+            if pred is None:
                 return None
-            tail = dps[max(0, int(0.75 * len(dps))):]
-            if not tail:
+            abs1 = abs(complex(pred["lambda_1"]))
+            abs2 = abs(complex(pred["lambda_2"]))
+            if abs1 < 1e-30:
                 return None
-            return sum(d for _, d in tail) / len(tail)
-        return self._get(f"asymp_dps_{max_depth}", compute)
+            ratio = abs2 / abs1  # < 1 by construction
+            if ratio <= 0 or ratio >= 1:
+                return None
+            return -depth * math.log10(ratio)
+        return self.__get(f"digits_approx_{depth}_{prediction_depth}", compute)
+
+    def error_formula_ratio(self, prediction_depth: int = 20) -> Optional[float]:
+        """Eigenvalue ratio ``|λ₂ / λ₁|`` from the matched pair.
+
+        Determines the per-step error decay rate:  ``err(n) ≈ ratio^n``.
+        Returns ``None`` when delta_prediction is unavailable.
+        """
+        def compute() -> Optional[float]:
+            pred = self.delta_prediction(prediction_depth)
+            if pred is None:
+                return None
+            abs1 = abs(complex(pred["lambda_1"]))
+            abs2 = abs(complex(pred["lambda_2"]))
+            if abs1 < 1e-30:
+                return None
+            return abs2 / abs1
+        return self.__get(f"error_ratio_{prediction_depth}", compute)
+
+    def error_at_depth(self, depth: Optional[int] = None, prediction_depth: int = 20) -> Optional[float]:
+        """Predicted approximation error at *depth*: ``|λ₂ / λ₁|^n``.
+
+        Uses the matched eigenvalue ratio from :meth:`error_formula_ratio`.
+        Returns ``None`` when the ratio is unavailable.
+        """
+        depth = depth or self._depth
+        def compute() -> Optional[float]:
+            ratio = self.error_formula_ratio(prediction_depth)
+            if ratio is None:
+                return None
+            return ratio ** depth
+        return self.__get(f"error_at_{depth}_{prediction_depth}", compute)
 
     def convergence_class(self, max_depth: Optional[int] = None) -> str:
         """
@@ -1035,7 +1288,7 @@ class TrajectoryAttributesHandler:
             if   r > 1.25: return "factorial"
             elif r < 0.80: return "polynomial"
             else:          return "exponential"
-        return self._get(f"conv_class_{max_depth}", compute)
+        return self.__get(f"conv_class_{max_depth}", compute)
 
     # ==================================================================
     #  PENDING IMPLEMENTATIONS  (stubs — user will fill in later)
@@ -1115,7 +1368,7 @@ class TrajectoryAttributesHandler:
                 self._searchable.cache.append((tuple(p), tuple(q)))
             return (p, q), walk_values
 
-        return self._get_utility("pq_vector", compute)
+        return self.__get_utility("pq_vector", compute)
 
     def p_vector(self, depth: Optional[int] = None) -> list:
         """Projection vector p such that p·walk gives the numerator sequence."""
@@ -1157,11 +1410,7 @@ class TrajectoryAttributesHandler:
             Logger(f'computation successful [id={rand}]!').log()
             return result
 
-        return self._get(f"asymptotics_{precision}", compute)
-
-        # return self._get(f"asymptotics_{precision}", lambda:
-        #     self.linear_recurrence().asymptotics(precision)
-        # )
+        return self.__get(f"asymptotics_{precision}", compute)
 
     def identified(self) -> bool:
         """Whether the trajectory both identifies and converges to the target.
@@ -1225,13 +1474,12 @@ class TrajectoryAttributesHandler:
             for key in list(self._cache.keys()):
                 if "delta" in key:
                     del self._cache[key]
-
         return delta, p, q, ided
 
     def companion_coboundary_rank(self) -> int:
         """
         Rank of the coboundary matrix of the companion.
         """
-        return self._get("coboundary_rank", lambda:
-            self.trajectory_matrix().companion_coboundary_matrix().rank()
+        return self.__get("coboundary_rank", lambda:
+            self.trajectory_matrix_typed.companion_coboundary_matrix().rank()
         )

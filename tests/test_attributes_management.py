@@ -797,6 +797,69 @@ class TestJsonlRoundTrip:
 
 
 # ---------------------------------------------------------------------------
+# 8b. pFq coboundary fast eigenvalue path
+# ---------------------------------------------------------------------------
+
+class TestCoboundaryEigenvalues:
+    """The pFq coboundary fast path must reproduce the generic symbolic
+    ``sorted_eigenvals`` exactly, for both walk types, and fall back cleanly
+    when the CMF is not a pFq (or the originating CMF/trajectory is absent)."""
+
+    @staticmethod
+    def _abs_sorted(eigs):
+        return sorted(abs(complex(e.evalf(chop=True))) for e in eigs)
+
+    @pytest.mark.parametrize("walk_type", [1, 2])
+    def test_fast_path_matches_generic(self, walk_type):
+        cmf = rt_pFq(4, 3, sp.Integer(1))
+        x = sp.symbols("x:4")
+        y = sp.symbols("y:3")
+        start = Position({x[0]: 1, x[1]: 1, x[2]: 2, x[3]: 2,
+                          y[0]: 3, y[1]: 3, y[2]: 3})
+        traj = Position({x[0]: 1, x[1]: 2, x[2]: 3, x[3]: 4,
+                         y[0]: 5, y[1]: 6, y[2]: 8})
+
+        h_fast = TrajectoryAttributesHandler.from_cmf(
+            cmf, traj, start, constant=None, walk_type=walk_type,
+        )
+        fast = h_fast.sorted_eigenvalues()
+        assert h_fast._pfq_coboundary_eigenvalues() is not None  # fast path engaged
+
+        # Force the generic path by dropping the stored CMF.
+        h_gen = TrajectoryAttributesHandler.from_cmf(
+            cmf, traj, start, constant=None, walk_type=walk_type,
+        )
+        h_gen._cmf = None
+        h_gen.__clear_cache()
+        generic = h_gen.sorted_eigenvalues()
+
+        fa, ga = self._abs_sorted(fast), self._abs_sorted(generic)
+        assert len(fa) == len(ga)
+        for a, b in zip(fa, ga):
+            assert abs(a - b) <= 1e-7 * max(1.0, a)
+
+    def test_non_pfq_falls_back(self, minimal_handler):
+        """A handler whose CMF is not a pFq returns None from the fast path
+        (and still produces eigenvalues via the generic route)."""
+        minimal_handler._cmf = object()  # not a pFq
+        minimal_handler.__clear_cache()
+        assert minimal_handler._pfq_coboundary_eigenvalues() is None
+        assert minimal_handler.sorted_eigenvalues() is not None
+
+    def test_matrix_only_handler_falls_back(self):
+        """A handler built directly from a matrix (no CMF/trajectory stored)
+        cannot use the fast path."""
+        cmf = rt_pFq(2, 1, sp.Integer(1))
+        x = sp.symbols("x:2")
+        y = sp.symbols("y:1")
+        start = Position({x[0]: 1, x[1]: 1, y[0]: 2})
+        traj = Position({x[0]: 1, x[1]: 1, y[0]: 1})
+        tmat = cmf.trajectory_matrix(traj, start)
+        h = TrajectoryAttributesHandler(tmat)
+        assert h._pfq_coboundary_eigenvalues() is None
+
+
+# ---------------------------------------------------------------------------
 # 9. Central attribute registry
 # ---------------------------------------------------------------------------
 
@@ -809,14 +872,17 @@ class TestAttributeRegistry:
         expected = {
             # Tier-1 — core scalars / vectors.
             "delta", "limit", "order", "formula", "identified",
-            "p_vector", "q_vector", "traj_size", "limit_rational",
+            "p_vector", "q_vector", "traj_size",
             # Tier-2 — heavier numerical / spectral attributes.
             "eigenvalues", "eigenvalue_errors", "spectral_gap", "gcd_slope",
-            "convergence_class", "coeff_degrees",
-            "asymptotic_digits_per_step", "precision_at",
+            # "convergence_class",  # commented out in the registry (WIP)
+            "coeff_degrees",
+            "digits_approximation", "precision_at",
             "companion_coboundary_rank",
+            "delta_prediction", "error_formula_ratio", "error_at_depth",
             # Tier-3 — symbolic / expensive attributes.
-            "asymptotics", "kamidelta", "delta_sequence", "digits_per_step",
+            # "asymptotics",  # commented out in the registry (WIP)
+            "delta_sequence", "digits_per_step",
             "relation", "recurrence_coeffs",
         }
         assert expected <= set(ATTRIBUTE_REGISTRY)

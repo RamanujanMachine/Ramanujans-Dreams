@@ -131,9 +131,23 @@ class SearchConfig(Configurable):
         default=(
             ("eigenvalues", "if_identified"), ("eigenvalue_errors", "if_identified"), ("spectral_gap", "if_identified"),
             ("companion_coboundary_rank", "if_identified"), #("asymptotics", "if_identified"),
-            ("convergence_class", "if_identified"), ("kamidelta", "if_identified"), ("gcd_slope", "if_identified")
+            #("convergence_class", "if_identified"),
+            ("delta_prediction", "if_identified"),
+            ("gcd_slope", "if_identified"), ("error_formula_ratio", "if_identified"),
+            ("error_at_depth", "if_identified"), ("digits_approximation", "if_identified"),
         ),
         metadata={"description": "Background-worker attributes computed asynchronously during search. Empty disables the worker/writer subprocesses entirely."},
+    )
+
+    USE_DELTA_PREDICTION: bool = field(
+        default=False,
+        metadata={"description": (
+            "When True, use delta_prediction (eigenvalue-based) as the primary ranking "
+            "metric stored in delta_estimate for analysis and search, instead of the "
+            "regular walk-based delta.  The regular delta is always computed first because "
+            "it is needed to select the best eigenvalue pair for delta_prediction; both "
+            "values are computed, only the ranking metric changes."
+        )},
     )
 
     # ============================== Genetic search settings ==============================
@@ -256,6 +270,24 @@ class SearchConfig(Configurable):
     SEARCH_TRAJ_NORM: str = field(
         default="l2",
         metadata={"description": "Norm used to measure trajectory length for the SEARCH_MAX_TRAJ_LEN cap, shared by all search methods. 'linf' = max absolute coordinate (tightest bound on trajectory_matrix cost), 'l1' = sum of abs coords (exact symbolic mult count), 'l2' = Euclidean norm."},
+    )
+
+    # ============================== Discrete Micro-Hill-Climb finalization (all search methods) ==============================
+    # Optional post-search assurance endgame applied to the best-delta trajectory
+    # (or trajectories, on a tie up to 2 decimal places) of EVERY search method
+    # (Gradient Ascent, Hybrid SPSA, Simulated Annealing, Genetic, Small Angle).
+    # Phase A is the existing 2*d_flat orthogonal +-1 lattice hill-climb (the
+    # discrete local-maximum certificate); Phase B subdivides the angular
+    # resolution by treating ``2^j z +- e_i`` (j = 1..K) as continuous directional
+    # probes, re-snapping each into a primitive in-cone ray via snap_to_trajectory,
+    # and re-climbing around any superior interstitial ray.  Doubling continues
+    # purely until the max-length (SEARCH_MAX_TRAJ_LEN) resolution is reached
+    # (K = ceil(log2(SEARCH_MAX_TRAJ_LEN / |primitive ray|))); the final level's
+    # probe is projected back down to the nearest in-cone max-length ray by
+    # snap_to_trajectory.  No round-count knob — the resolution IS the bound.
+    ENABLE_MICRO_HILL_CLIMB: bool = field(
+        default=True,
+        metadata={"description": "Enable the discrete micro-hill-climb finalization (resolution-doubling endgame) after every search method completes, run on the best-delta trajectory(ies) of each shard/constant. False => no finalization, byte-identical legacy behaviour."},
     )
 
     # ============================== Genetic search — parallelism ==============================
