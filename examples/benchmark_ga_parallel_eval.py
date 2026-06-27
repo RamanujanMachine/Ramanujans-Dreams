@@ -83,7 +83,7 @@ def _walk_one(direction):
         direction=direction,
         constants=[constant],
     )
-    return (handler.trajectory_matrix(), constant.value_sympy, dto)
+    return (handler.trajectory_matrix, constant.value_sympy, dto)
 
 
 # ---------------------------------------------------------------------------

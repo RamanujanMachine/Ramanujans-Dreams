@@ -377,7 +377,7 @@ class Tier3PostProcessModV1(PostProcessModScheme):
 
             patch = {"trajectory_id": tid, "extended_metrics": {}}
             context = self._build_context(tid, top_n_sets, resolved_specs)
-            sink((handler.trajectory_matrix(), constant_sympy, patch, context))
+            sink((handler.trajectory_matrix, constant_sympy, patch, context))
 
     # ------------------------------------------------------------------
     # Ranking (Phase 1) + predicate context

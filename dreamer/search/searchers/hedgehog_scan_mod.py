@@ -254,7 +254,7 @@ class SearcherModV1(SearcherModScheme):
                     "trajectory_id": trajectory_id,
                     "extended_metrics": {},
                 }
-                sink((handler.trajectory_matrix(), primary_sympy, patch))
+                sink((handler.trajectory_matrix, primary_sympy, patch))
                 seen_trajectories[trajectory_id] = {
                     "extended_metrics": dict.fromkeys(existing_keys | missing),
                     "config_fingerprint": current_fp,
@@ -294,4 +294,4 @@ class SearcherModV1(SearcherModScheme):
                 "extended_metrics": dict.fromkeys(desired),
                 "config_fingerprint": current_fp,
             }
-            sink((handler.trajectory_matrix(), primary_sympy, dto))
+            sink((handler.trajectory_matrix, primary_sympy, dto))

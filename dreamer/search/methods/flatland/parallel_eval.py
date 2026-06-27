@@ -109,7 +109,7 @@ def _pool_walk(args):
             direction=direction,
             constants=[constant],
         )
-        return (handler.trajectory_matrix(), constant.value_sympy, dto)
+        return (handler.trajectory_matrix, constant.value_sympy, dto)
     except Exception as exc:  # noqa: BLE001 — mirror serial evaluator resilience
         return WalkError(str(exc))
 
