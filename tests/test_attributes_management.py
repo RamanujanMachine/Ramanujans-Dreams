@@ -15,6 +15,7 @@ Coverage:
 """
 
 import json
+import math
 import multiprocessing as mp
 import os
 
@@ -155,7 +156,6 @@ class TestDTOSerializationRoundTrips:
             direction=(0, 1),
             recurrence_relation="a(n)*f(n) + b(n)*f(n-1) = 0",
             recurrence_order=1,
-            limit_value=2.718,
             delta_estimate={"e": 1.5, "log2": 0.7},
             p_vector={"e": (1, 0), "log2": (2, 1)},
             q_vector={"e": (0, 1), "log2": (1, 0)},
@@ -182,7 +182,6 @@ class TestDTOSerializationRoundTrips:
             "direction": [0],
             "recurrence_relation": "",
             "recurrence_order": 1,
-            "limit_value": 1.0,
             "delta_estimate": {"e": 1.0},
             "identified": {"e": True},
         }
@@ -199,7 +198,6 @@ class TestDTOSerializationRoundTrips:
             direction=(1,),
             recurrence_relation="",
             recurrence_order=2,
-            limit_value=3.14,
             delta_estimate={"e": 1.1},
             p_vector={"e": ()},
             q_vector={"e": ()},
@@ -256,7 +254,6 @@ class TestDTOSerializationRoundTrips:
             "direction": [0],
             "recurrence_relation": "",
             "recurrence_order": 1,
-            "limit_value": 1.0,
             "delta_estimate": {"e": 1.0},
             "identified": {"e": True},
         }
@@ -468,9 +465,16 @@ class TestHandlerStubs:
         assert isinstance(minimal_handler.formula_str(), str)
 
     def test_limit_is_finite(self, minimal_handler):
+        # ``limit`` is only computed for an *identified* trajectory (p/q vectors
+        # found).  An unidentified trajectory returns NaN — we deliberately do not
+        # compute Limit-based values without p/q (feeding absent p/q as
+        # ``initial_values`` is what caused the matrix-size / zoo crashes).
         limit = minimal_handler.limit()
-        assert limit is not None
-        assert abs(float(limit)) < 1e15
+        if minimal_handler.identified():
+            assert limit is not None
+            assert abs(float(limit)) < 1e15
+        else:
+            assert math.isnan(float(limit))
 
 
 # ---------------------------------------------------------------------------
@@ -521,11 +525,11 @@ class TestBuildTrajectoryDto:
     def test_base_tier1_fields_populated(self, minimal_handler, symbols):
         """build_trajectory_dto fills the cheap Tier-1 fields.
 
-        ``limit_value`` and ``delta_estimate`` (a dict) are Tier-1.  The
-        recurrence (``recurrence_relation`` / ``recurrence_order``) is **Tier-2**
-        and stays ``None`` unless ``compute_recurrence=True`` (it builds the
-        expensive symbolic ``LinearRecurrence``).  ``extended_metrics`` stays
-        empty until Tier-2 workers (if any) write to it.
+        ``delta_estimate`` (a per-constant dict) is Tier-1.  The recurrence
+        (``recurrence_relation`` / ``recurrence_order``) is **Tier-2** and stays
+        ``None`` unless ``compute_recurrence=True`` (it builds the expensive
+        symbolic ``LinearRecurrence``).  ``extended_metrics`` stays empty until
+        Tier-2 workers (if any) write to it.
         """
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
@@ -541,7 +545,6 @@ class TestBuildTrajectoryDto:
         assert isinstance(dto.delta_estimate, dict)
         for delta_val in dto.delta_estimate.values():
             assert abs(delta_val) < 1e9 or delta_val == float("-inf")
-        assert abs(float(dto.limit_value)) < 1e15
         assert dto.extended_metrics == {}   # workers haven't run yet
 
     def test_compute_recurrence_opt_in_populates_recurrence(self, minimal_handler, symbols):
@@ -690,7 +693,6 @@ class TestExtendedMetricsMutation:
             direction=(1,),
             recurrence_relation="",
             recurrence_order=1,
-            limit_value=1.0,
             delta_estimate={"e": 1.0},
             p_vector={"e": ()},
             q_vector={"e": ()},
@@ -708,7 +710,6 @@ class TestExtendedMetricsMutation:
             direction=(1,),
             recurrence_relation="",
             recurrence_order=1,
-            limit_value=1.0,
             delta_estimate={"e": 1.0},
             p_vector={"e": ()},
             q_vector={"e": ()},
@@ -731,7 +732,6 @@ def _make_dto(trajectory_id: str = "t1", delta: float = 1.0) -> TrajectoryDTO:
         direction=(0, 1),
         recurrence_relation="a*f(n) + b*f(n-1) = 0",
         recurrence_order=1,
-        limit_value=2.7,
         delta_estimate={"e": delta},
         p_vector={"e": ()},
         q_vector={"e": ()},
@@ -830,7 +830,7 @@ class TestCoboundaryEigenvalues:
             cmf, traj, start, constant=None, walk_type=walk_type,
         )
         h_gen._cmf = None
-        h_gen.__clear_cache()
+        h_gen.clear_cache()
         generic = h_gen.sorted_eigenvalues()
 
         fa, ga = self._abs_sorted(fast), self._abs_sorted(generic)
@@ -842,7 +842,7 @@ class TestCoboundaryEigenvalues:
         """A handler whose CMF is not a pFq returns None from the fast path
         (and still produces eigenvalues via the generic route)."""
         minimal_handler._cmf = object()  # not a pFq
-        minimal_handler.__clear_cache()
+        minimal_handler.clear_cache()
         assert minimal_handler._pfq_coboundary_eigenvalues() is None
         assert minimal_handler.sorted_eigenvalues() is not None
 
@@ -871,18 +871,18 @@ class TestAttributeRegistry:
         with :class:`TrajectoryAttributesHandler`'s public surface."""
         expected = {
             # Tier-1 — core scalars / vectors.
-            "delta", "limit", "order", "formula", "identified",
-            "p_vector", "q_vector", "traj_size",
+            "delta", "order", "formula", "identified",
+            "p_vector", "q_vector", "traj_size", "projection_column",
             # Tier-2 — heavier numerical / spectral attributes.
             "eigenvalues", "eigenvalue_errors", "spectral_gap", "gcd_slope",
-            # "convergence_class",  # commented out in the registry (WIP)
             "coeff_degrees",
-            "digits_approximation", "precision_at",
+            "approximated_digits_per_step", "digits_approximation", "precision_at",
             "companion_coboundary_rank",
-            "delta_prediction", "error_formula_ratio", "error_at_depth",
+            "delta_prediction", "error_formula_ratio",
             # Tier-3 — symbolic / expensive attributes.
             # "asymptotics",  # commented out in the registry (WIP)
             "delta_sequence", "digits_per_step",
+            "digits_computed", "avg_computed_digits_per_step",
             "relation", "recurrence_coeffs",
         }
         assert expected <= set(ATTRIBUTE_REGISTRY)
@@ -1318,7 +1318,7 @@ class TestConfigAttributeSelection:
 
     def test_compute_attributes_with_known_tier2_names_works(self, minimal_handler):
         """A representative Tier-2 attribute list resolves through the registry."""
-        names = ('eigenvalues', 'spectral_gap', 'gcd_slope', 'convergence_class')
+        names = ('eigenvalues', 'spectral_gap', 'gcd_slope', 'approximated_digits_per_step')
         out = compute_attributes(minimal_handler, names)
         for name in names:
             assert name in out or f"{name}_error" in out
@@ -1426,7 +1426,7 @@ class TestMergeOnRead:
         monkeypatch.setattr(
             config.search,
             "TIER2_ATTRIBUTES",
-            ("eigenvalues", "spectral_gap", "gcd_slope", "convergence_class"),
+            ("eigenvalues", "spectral_gap", "gcd_slope", "approximated_digits_per_step"),
         )
 
         patch = {
@@ -1435,7 +1435,7 @@ class TestMergeOnRead:
                 "eigenvalues": ["pre-computed"],
                 "spectral_gap": 0.5,
                 "gcd_slope": 0.1,
-                "convergence_class": "linear",
+                "approximated_digits_per_step": 8.0,
             },
         }
         out = compute_tier2_for_item((None, None, patch))
@@ -1504,7 +1504,7 @@ class TestMergeOnRead:
         )
 
         patch = {"trajectory_id": "t1", "extended_metrics": {}}
-        out = compute_tier3_for_item((handler.trajectory_matrix(), e.value_sympy, patch, None))
+        out = compute_tier3_for_item((handler.trajectory_matrix, e.value_sympy, patch, None))
 
         assert out is patch  # same dict, mutated in place
         # kamidelta either computed successfully or recorded as an error;

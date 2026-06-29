@@ -130,11 +130,11 @@ class SearchConfig(Configurable):
     TIER2_ATTRIBUTES: Tuple[str, ...] = field(
         default=(
             ("eigenvalues", "if_identified"), ("eigenvalue_errors", "if_identified"), ("spectral_gap", "if_identified"),
-            ("companion_coboundary_rank", "if_identified"), #("asymptotics", "if_identified"),
-            #("convergence_class", "if_identified"),
+            #("companion_coboundary_rank", "if_identified"), #("asymptotics", "if_identified"),
             ("delta_prediction", "if_identified"),
             ("gcd_slope", "if_identified"), ("error_formula_ratio", "if_identified"),
-            ("error_at_depth", "if_identified"), ("digits_approximation", "if_identified"),
+            ("approximated_digits_per_step", "if_identified"), ("digits_approximation", "if_identified"),
+            ("digits_computed", "if_identified"), ("avg_computed_digits_per_step", "if_identified"),
         ),
         metadata={"description": "Background-worker attributes computed asynchronously during search. Empty disables the worker/writer subprocesses entirely."},
     )

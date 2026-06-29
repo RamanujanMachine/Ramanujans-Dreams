@@ -134,7 +134,7 @@ class TestDtoFingerprintRoundTrip:
         dto = TrajectoryDTO(
             trajectory_id="t", cmf_id="c", shard_id="s",
             start_point=(0, 0), direction=(1, 2),
-            limit_value=1.0, delta_estimate={"e": 2.0},
+            delta_estimate={"e": 2.0},
             p_vector=None, q_vector=None, identified={"e": True},
             walk_depth=321, config_fingerprint="abc123",
         )
@@ -146,7 +146,7 @@ class TestDtoFingerprintRoundTrip:
         """A record without the new fields parses with None (→ treated stale)."""
         legacy = {
             "trajectory_id": "t", "cmf_id": "c", "shard_id": "s",
-            "start_point": [0, 0], "direction": [1, 2], "limit_value": 1.0,
+            "start_point": [0, 0], "direction": [1, 2],
             "delta_estimate": {"e": 2.0}, "p_vector": None, "q_vector": None,
             "identified": {"e": True},
         }

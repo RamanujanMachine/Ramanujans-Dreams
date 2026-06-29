@@ -145,7 +145,7 @@ class TestMetricExtractors:
         assert convergence_rate_metric({"extended_metrics": {"eigenvalues": ["1", "2"]}}, None) is None
 
     def test_registry_complete(self):
-        for name in ("delta", "convergence_rate", "asymptotic_digits_per_step",
+        for name in ("delta", "convergence_rate", "approximated_digits_per_step",
                      "spectral_gap", "gcd_slope", "precision_at"):
             assert name in METRIC_EXTRACTORS
 

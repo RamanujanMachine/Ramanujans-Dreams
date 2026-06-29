@@ -10,7 +10,7 @@ These are used by the Tier-3 post-process *top-N selectors* to rank trajectories
 **without re-walking** them: the metric must already live in the JSONL (a Tier-1
 field, a per-constant ``delta_estimate`` entry, or a Tier-2/Tier-3
 ``extended_metrics`` entry).  To rank on a metric that is not yet stored (e.g.
-``asymptotic_digits_per_step``), add it to the relevant ``TIER2`` / ``TIER3``
+``approximated_digits_per_step``), add it to the relevant ``TIER2`` / ``TIER3``
 attribute list first so the search / post-process stage computes it for every
 trajectory.
 
@@ -130,7 +130,10 @@ def convergence_rate_metric(
 METRIC_EXTRACTORS: Dict[str, MetricExtractor] = {
     "delta": delta_metric,
     "convergence_rate": convergence_rate_metric,
-    "asymptotic_digits_per_step": _extended_float("asymptotic_digits_per_step"),
+    "approximated_digits_per_step": _extended_float("approximated_digits_per_step"),
+    "digits_approximation": _extended_float("digits_approximation"),
+    "digits_computed": _extended_float("digits_computed"),
+    "avg_computed_digits_per_step": _extended_float("avg_computed_digits_per_step"),
     "spectral_gap": _extended_float("spectral_gap"),
     "gcd_slope": _extended_float("gcd_slope"),
     "precision_at": _extended_float("precision_at"),
