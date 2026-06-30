@@ -11,7 +11,7 @@ same norm band.  If sampler ~= truth -> unbiased (uniformity preserved).  If
 sampler >> truth -> the walker dwells on faces (bias).
 """
 import numpy as np
-from examples.benchmark_3f2_samplers import _extract_shards
+from tests.pocs.benchmark_3f2_samplers import _extract_shards
 from dreamer.extraction.samplers.conditioner import HyperSpaceConditioner
 from dreamer.extraction.samplers.parallel_tempering_raycaster import ParallelTemperingSampler as PT
 

@@ -1,27 +1,74 @@
 # Ramanujan's Dreams
 Ramanujan's Dreams is a modular system for advanced search in CMFs.
 
+## Table of Contents
+
+1. [Installation](#installation) - Download and setup your runtime environment.
+2. [Structure](#structure)  
+    2.1. [System](#system-structure) - Overview of the system's design.  
+    2.2. [Project](#project-structure) - Structure of the repository. 
+3. [Usage](#usage)  
+    3.1. [Configuration](#configuration) - How to configure the system and explore options.  
+    3.2. [Run](#run) - Running the system, simple example.
+4. [Contribution](#contribution) - How to customize the system and add your own modules.
+5. [License](#license)
+
 ## Installation
-* This project is supported fully only on Mac-OS and Linux.  
+* This project is supported only on Mac-OS and Linux.  
 If you are a Windows user, it is recommended to use [Windows Subsystem for Linux](https://learn.microsoft.com/en-us/windows/wsl/install) (WSL).
-* Install via:
+* Install the package via:
     ```bash
     pip install git+https://github.com/UriKH/RamanujansDreams.git
     ```
+
+**Note:** If you are developing using an IDE the output might look a bit off due to terminal default configurations.  
+If you are a PyCharm user, an easy fix is:
+1. Select: `Run -> Edit Configurations -> Modify Options`
+2. And then: `Emulate terminal in output console`
+
+## Structure
+
+### System Structure
+The system is a pipeline composed of 5 stages:
+1. Loading - storing and retrieving mapping from a constant to the inspiration functions.
+2. Extraction - extraction of the searchables from the CMF of the inspiration functions.
+3. Analysis - analysis of each of the CMFs i.e., filtering and prioritization of shards, borders, etc. 
+4. Search - deep and full search within the searchable spaces. This stage (will) contain further logic and particularly ascend logic.
+5. Post-process (optional) - computes expensive per-trajectory attributes for the already-found trajectories, and (optionally) renders graphs/tables. See [Post-processing configuration](#post-processing-configuration).
+
+### Project Structure
+
+```
+dreamer    --> The system itself
+examples   --> Examples of how to run and templates for customized modules
+data_utils --> Results exploration tools
+graphs     --> Utility scripts for analysis of 3D CMFs and statistics
+tests      --> System tests
+```
+
+#### Where to read more
+
+Each pipeline stage has its own README explaining what it does and what its
+directory contains. Start with the one matching what you're working on:
+
+| Stage | README |
+|-------|--------|
+| Loading | [`dreamer/loading/`](dreamer/loading/README.md) |
+| Extraction | [`dreamer/extraction/`](dreamer/extraction/README.md) |
+| Analysis | [`dreamer/analysis/`](dreamer/analysis/README.md) |
+| Search | [`dreamer/search/`](dreamer/search/README.md) |
+| Post-process | [`dreamer/post_process/`](dreamer/post_process/README.md) |
+| Graphing (post-process renderer) | [`dreamer/graphing/`](dreamer/graphing/README.md) |
+| **All configuration** | [`dreamer/configs/`](dreamer/configs/README.md) |
+
+To extend the system with your own modules, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 
 ## Usage
 Interaction with the system is via the System class (`from dreamer import System`) and using the config files.
 
 [//]: # (Common usage example with detailed instructions in [colab]&#40;https://colab.research.google.com/drive/1t6qo0LBBHTHTQyojXH566cNJRBhziN_3?usp=sharing&#41;.  )
 [//]: # (**Note**: The Colab might be slow and unstable as it's running online. For stable run download the colab as a Jupyter notebook.)
-
-### Structure:
-The system is composed of 5 stages:
-1. Loading - storing and retrieving mapping from a constant to the inspiration functions.
-2. Extraction - extraction of the searchables from the CMF of the inspiration functions.
-3. Analysis - analysis of each of the CMFs i.e., filtering and prioritization of shards, borders, etc. 
-4. Search - deep and full search within the searchable spaces. This stage (will) contain further logic and particularly ascend logic.
-5. Post-process (optional) - computes expensive per-trajectory attributes for the already-found trajectories, and (optionally) renders graphs/tables. See [Post-processing configuration](#post-processing-configuration).
 
 [//]: # (**Note:** each module could be executed independently of the others. In its current version, the system only wraps the modules together and connects them. )
 
@@ -57,6 +104,10 @@ There are a few important configurations you might want to change:
 - `config.analysis.NUM_TRAJECTORIES_FROM_DIM` - same configuration as above but for analysis stage.
 - `config.analysis.IDENTIFY_THRESHOLD` - "what fraction of the shard was identified as containing the constant?"
 
+> For the **full, annotated list of every configuration category and field**,
+> see the [configuration README](dreamer/configs/README.md). In a running
+> session, `config.<category>.display()` prints the live values and descriptions.
+
 > **How attributes are stored.** Every searched trajectory is one JSON line in
 > `<EXPORT_SEARCH_RESULTS>/<shard_id>.jsonl`. Cheap **Tier-1** values
 > (`delta`, `identified`, `limit`, …) are always written. Heavier **Tier-2**
@@ -71,97 +122,22 @@ The post-process stage (`post_process.Tier3PostProcessModV1`, passed as
 `post_processor=` to `System`) runs **once after Search** and has two
 independent jobs, each off by default:
 
-1. **Tier-3 attributes** — `config.post_process.TIER3_ATTRIBUTES`
-2. **Graphing** — `config.graph` (writes under `config.system.EXPORT_GRAPHS`)
+1. **Tier-3 attributes** — `config.post_process.TIER3_ATTRIBUTES`: the most
+   expensive per-trajectory attributes, each optionally restricted to a subset
+   of trajectories via a predicate (e.g. `if_identified`, or
+   `top 10 highest delta in shard`).
+2. **Graphing** — `config.graph`: δ-sequence plots, δ histograms, and a per-shard
+   δ-roughness ("bumpiness") table, written under `config.system.EXPORT_GRAPHS`.
 
 It reads the existing JSONL, computes only what's missing, and appends *patch*
 records (it never rewrites your data). An empty `TIER3_ATTRIBUTES` **and** a
 disabled `graph` config make the whole stage a no-op.
 
-#### `TIER3_ATTRIBUTES` — what to compute, and for which trajectories
-
-This is a tuple where **each entry is either**:
-
-- a **bare attribute name** — always computed, e.g. `'asymptotics'`; or
-- a **`(attribute, predicate)` tuple** — the attribute is computed **only for
-  trajectories the predicate accepts** (this is how you avoid paying for an
-  expensive attribute on every trajectory).
-
-```python
-config.configure(
-    post_process={
-        'TIER3_ATTRIBUTES': (
-            'precision_at',                                       # always
-            ('asymptotics', 'if_identified'),                     # only identified trajectories
-            ('delta_sequence', 'top 10 highest delta in shard'),  # only the 10 best-δ per shard
-            ('relation',     'max_degree below 4'),               # only low-degree recurrences
-            ('kamidelta',    'top 3 highest convergence_rate in cmf'),
-        ),
-    },
-)
-```
-
-**The predicate** can be:
-
-| Predicate | Meaning |
-|-----------|---------|
-| `'if_identified'` | the trajectory identified the constant |
-| `'if_has_degree_2'` | the recurrence has a degree-2 coefficient |
-| `'max_degree below N'` / `'max_degree above N'` | recurrence polynomial degree (max over coefficients) is `< N` / `> N` |
-| `'top N highest <metric> in shard'` | among the `N` largest `<metric>` **within the trajectory's shard** |
-| `'top N lowest  <metric> in shard'` | among the `N` smallest, within the shard |
-| `'top N highest/lowest <metric> in cmf'` | …ranked across the **whole CMF** instead of a single shard |
-
-> **General template:** `[top N highest|lowest] <metric> in <shard|cmf>`.
-
-**`<metric>` for the `top N …` selectors must already be stored in the JSONL**
-(the ranking pass only *reads* values — it never re-walks a trajectory).
-Available metrics:
-
-| metric | source | notes |
-|--------|--------|-------|
-| `delta` | Tier-1 (always present) | per-constant irrationality measure |
-| `convergence_rate` | needs `eigenvalues` in Tier-2 | normalised eigenvalue-error gap `(log\|λ₁\|−log\|λ₂\|)/‖v‖`; larger = faster |
-| `asymptotic_digits_per_step` | needs it in Tier-2/Tier-3 | mean new digits per step (tail) |
-| `spectral_gap`, `gcd_slope`, `precision_at` | needs the matching attribute stored | |
-
-> ⚠️ **Common gotcha:** to rank by a metric other than `delta`, make sure that
-> metric is computed for *every* trajectory first — e.g. add `'eigenvalues'` to
-> `config.search.TIER2_ATTRIBUTES` before using `convergence_rate`, or add
-> `'asymptotic_digits_per_step'` as a **bare** (unconditional) Tier-3 attribute
-> before ranking on it. Trajectories whose metric is missing are simply excluded
-> from the ranking.
-
-Notes on semantics:
-- `top N … in shard` ranks within each shard; `in cmf` pools all shards of a CMF.
-- A trajectory rejected by its predicate is reprocessed cheaply on each run
-  (the gate is settled before any walk), so re-running is safe and idempotent.
-- Discover everything available with `config.post_process.display()`.
-
-#### Graphing
-
-Enable any of the three graph kinds in `config.graph`; output goes to
-`config.system.EXPORT_GRAPHS`:
-
-```python
-config.configure(
-    system={'EXPORT_GRAPHS': './graphs'},
-    graph={
-        'PLOT_BEST_DELTA_SEQUENCE': True,  # δ vs step for the best trajectory of each (CMF, constant)
-        'PLOT_DELTA_HISTOGRAMS':   True,   # δ histogram per shard and per CMF
-        'WRITE_BUMPINESS_TABLE':   True,   # per-shard "how non-smooth is δ" table (CSV + markdown)
-        'DELTA_SEQUENCE_DEPTH':    1000,   # steps for the best-δ-sequence plot
-    },
-)
-```
-
-The **bumpiness table** quantifies how non-smooth the δ field of each shard is,
-with two columns: a density-robust **spatial roughness** (empirical
-semivariogram of δ over direction space — `relative_nugget` ≈ 1 → needle/bumpy,
-≈ 0 → smooth) and the median per-trajectory **δ-sequence total variation**
-(convergence wobble; needs `delta_sequence` stored as a Tier-3 attribute).
-See [`context/algorithms/05_bumpiness_metrics.md`](context/algorithms/05_bumpiness_metrics.md)
-for the math.
+The full attribute/predicate grammar, the rankable metrics, and the graph
+parameters are documented in the
+[configuration README](dreamer/configs/README.md#post_process) and the
+[post-process](dreamer/post_process/README.md) / [graphing](dreamer/graphing/README.md)
+stage READMEs.
 
 [//]: # (Each `<X>_config` contains the configurations for this section. You can access those directly in order to view the current values.  )
 [//]: # (In order to change them you can use: `<X>_config.<property> = <new-value>`  )
@@ -192,12 +168,6 @@ Advanced options are:
 * Using pickled inspiration function objects from past runs as inspiration functions source.
 * Using pickled past analysis results as input to the analysis stage.
 
-### Terminal Setup
-
-If you are a PyCharm user, the output might look a bit off due to `tqdm` default configurations.  
-To make sure the output console looks right:
-1. Enter: `Run > Edit Configurations > Modify Options`
-2. Select: `Emulate terminal in output console`
 
 [//]: # (#### Notes: )
 [//]: # (- When loading inspiration functions, you can use formerly computed CMFs using pickle files &#40;might be unstable&#41;, maunally list the inspiration functions or using a DB &#40;instructions below&#41;.)

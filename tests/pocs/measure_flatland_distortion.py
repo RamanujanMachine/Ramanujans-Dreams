@@ -295,7 +295,7 @@ def main() -> int:
     print("\n" + "=" * 78)
     print("REAL SHARDS — pFq(3, 2, 1/2)")
     print("=" * 78)
-    from examples.benchmark_3f2_samplers import _extract_shards
+    from tests.pocs.benchmark_3f2_samplers import _extract_shards
 
     shards = _extract_shards()
     if args.shards:
