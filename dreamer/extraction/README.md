@@ -51,9 +51,11 @@ the analysis and search stages consume.
 
 ### Trajectory samplers
 
-Inside a shard, directions are drawn by one of several engines (selected by
-`config.extraction.SAMPLING_METHOD` for extraction-time sampling, and mirrored by
-`config.analysis`/`config.search`):
+The trajectory-direction samplers live in this package (`samplers/`,
+`sampling_orchestrators/`), but they are **driven by the analysis and search
+stages**, not by extraction itself — extraction only locates the shards. The
+engine is chosen per stage by `config.analysis.SAMPLING_METHOD` /
+`config.search.SAMPLING_METHOD` (there is no `extraction.SAMPLING_METHOD`):
 
 - **`pt`** — Parallel-Tempering replica-exchange lattice walk (default; best in
   tightly constrained cones).
@@ -82,9 +84,9 @@ main process only (workers do deterministic work).
 ## Key configurations
 
 `config.extraction.*` — `STRATEGY`, the `EXACT_*` / `HEURISTIC_*` budgets and
-tuning knobs, `SAMPLING_METHOD`, `LOAD_SHARD_CACHE`, `IGNORE_DUPLICATE_SEARCHABLES`.
-See the [configuration index](../configs/README.md#extraction) for the full,
-annotated list.
+tuning knobs, `LOAD_SHARD_CACHE`, `IGNORE_DUPLICATE_SEARCHABLES`. (The sampler
+engine is set on the analysis/search configs, not here — see above.) See the
+[configuration index](../configs/README.md#extraction) for the full, annotated list.
 
 ---
 

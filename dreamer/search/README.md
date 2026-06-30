@@ -88,12 +88,15 @@ plus per-method blocks (`GA_*`, `SA_*` small-angle, `ANNEAL_*`, `GRAD_*`,
 
 Adding a search method is **two classes** (kept in separate files):
 
-1. A **method** — subclass `SearchMethod`. Implements the algorithm: how it
-   explores directions and evaluates δ. Put it in
+1. An **algorithm class** — picks which trajectory directions to evaluate inside
+   a shard and emits a `TrajectoryDTO` per trajectory. Put it in
    `methods/<your_method>/<your_method>_scan.py`.
-2. A **module** — subclass `SearcherModScheme`. Implements `execute()`: the
-   external interface — which shards to run, where/how to write results. Put it
-   in `searchers/<your_method>_mod.py`.
+2. A **module** — subclass `SearcherModScheme`, implement `execute()` (returns
+   `None`): dedup shards, open the per-shard JSONL `worker_pool`, and drive the
+   algorithm. Put it in `searchers/<your_method>_mod.py`.
+
+The default `SearcherModV1` and the optimiser mods show this JSONL/DTO pattern;
+`examples/search.py` is a minimal copy-paste skeleton of both classes.
 
 Wire it as `System(searcher=MySearchMod)`. Start from the ready-to-copy skeleton
 in [`examples/search.py`](../../examples/search.py); the `*_scan.py` / `*_mod.py`

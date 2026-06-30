@@ -86,7 +86,6 @@ Mostly **where things go** and **how many cores to use**.
 |-------|---------|
 | `STRATEGY` | `'auto'` / `'exact'` / `'heuristic'` / `'legacy'` — how shards are found (see [extraction README](../extraction/README.md)). |
 | `EXACT_TIMEOUT_SECONDS` / `HEURISTIC_TIMEOUT_SECONDS` | Per-strategy wall-clock budgets (used by `'auto'` to decide fallback). |
-| `SAMPLING_METHOD` | `'pt'` / `'discrete'` / `'raycast'` — trajectory-direction sampler. |
 | `LOAD_SHARD_CACHE` | Reuse a previously-extracted `…__shards.jsonl` instead of re-extracting. |
 | `IGNORE_DUPLICATE_SEARCHABLES` | Drop symmetry-equivalent shards. |
 | `HEURISTIC_*`, `EXACT_*` | Fine-tuning of the ray-shooter / reverse-search (see `display()`). |
@@ -97,7 +96,7 @@ Mostly **where things go** and **how many cores to use**.
 |-------|---------|
 | `NUM_TRAJECTORIES_FROM_DIM` | `lambda dim: int(...)` — how many trajectories to sample per shard. |
 | `IDENTIFY_THRESHOLD` | Minimum identified-fraction to keep a shard (`-1` disables filtering). |
-| `SAMPLING_METHOD` | Sampler for analysis (independent of extraction/search). |
+| `SAMPLING_METHOD` | `'pt'` / `'discrete'` / `'raycast'` — sampler for analysis (independent of the search sampler). |
 | `STORE_TRAJECTORIES_SEPARATELY` | Write analysis records to their own store instead of the shared one. |
 | `USE_LIReC` | Use LIReC for identification. |
 

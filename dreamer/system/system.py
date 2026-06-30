@@ -2,10 +2,11 @@ from collections import defaultdict
 from ramanujantools.cmf import CMF
 from functools import partial
 from typing import List, Dict, Optional, Type, Union, Set, Any, Iterable
-import sympy as sp
 import networkx as nx
 from itertools import combinations
 import os
+import json as _json
+import math
 
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.schemes.analysis_scheme import AnalyzerModScheme
@@ -19,6 +20,8 @@ from dreamer.utils.storage.atlas_writer import (
     load_shards_from_export,
     update_found_constants,
     write_cmf_records,
+    read_shard_records,
+    reconstruct_shard_from_dto
 )
 from dreamer.utils.storage.summary import write_summary
 from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
@@ -26,7 +29,6 @@ from dreamer.utils.types import CMFData
 from dreamer.utils.logger import Logger
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs.system import sys_config
-
 
 constant_type = Union[Constant, str]
 
@@ -98,7 +100,6 @@ class System:
                     # Write formatter JSON so shards can be reconstructed without pickle.
                     formatter = cmf_formatters.get(data.cmf_name)
                     if formatter is not None:
-                        import json as _json
                         fmt_path = os.path.join(const_path, f"{data.cmf_name}.json")
                         with open(fmt_path, "w") as _fh:
                             _fh.write(_json.dumps(formatter.to_json_obj()))
@@ -176,8 +177,6 @@ class System:
         bad_run = False
         if path := sys_config.EXPORT_ANALYSIS_PRIORITIES:
             os.makedirs(path, exist_ok=True)
-            import json as _json
-            from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 
             for const, l in priorities.items():
                 if not l:
@@ -479,10 +478,6 @@ class System:
         :param relevant_cmf_names: Per-constant set of allowed cmf_name values, or None for all.
         :return: Mapping from constant to ordered shard list.
         """
-        import json as _json
-        from dreamer.utils.storage.atlas_writer import read_shard_records, reconstruct_shard_from_dto
-        from dreamer.loading.funcs.formatter import Formatter
-
         prio_path = sys_config.EXPORT_ANALYSIS_PRIORITIES
         export_root = sys_config.EXPORT_CMFS
 
@@ -665,7 +660,6 @@ class System:
         exists, or no record carries a finite delta for this constant.
         ``delta_estimate`` is a ``{const_name: float}`` dict.
         """
-        import math as _math
         dir_path = sys_config.EXPORT_SEARCH_RESULTS
         if not os.path.isdir(dir_path):
             return None, None
@@ -692,7 +686,7 @@ class System:
                     delta = float(delta)
                 except (TypeError, ValueError):
                     continue
-                if not _math.isfinite(delta):
+                if not math.isfinite(delta):
                     continue
                 if delta > best_delta:
                     best_delta = delta

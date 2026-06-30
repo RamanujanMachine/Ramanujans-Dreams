@@ -23,7 +23,7 @@ class AnalysisConfig(Configurable):
         metadata={"description": "Callable that maps searchable dimension to number of sampled trajectories."},
     )
     SAMPLING_METHOD: str = field(
-        default="raycast",
+        default="pt",
         metadata={
             "description": (
                 "Trajectory-sampling engine used during the analysis stage: "

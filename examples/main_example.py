@@ -1,8 +1,6 @@
-from dreamer import System, config
-from dreamer import analysis, search, extraction, post_process
+from dreamer import System, config, analysis, search, extraction, post_process, log
 from dreamer.loading import pFq
-from dreamer import log, pi
-import sympy as sp
+
 
 # Because of pickling format we need to define these functions here
 def trajectory_compute_func(d):
@@ -11,7 +9,7 @@ def trajectory_compute_func(d):
     :param d: CMF dimensionality.
     :return: Trajectory count (``max(10**d, 10)``).
     """
-    return max(10 ** d, 10)
+    return max(5 * 10 ** d, 10)
 
 
 def trajectory_compute_func_analysis(d):
@@ -20,7 +18,7 @@ def trajectory_compute_func_analysis(d):
     :param d: CMF dimensionality.
     :return: Trajectory count (``max(10**(d-1), 10)``).
     """
-    return max(10 ** (d - 1), 10)
+    return max(5 * 10 ** (d - 1), 10)
 
 
 if __name__ == '__main__':
@@ -38,7 +36,8 @@ if __name__ == '__main__':
             # ignore shards with less than 0.1% identified trajectories as converge to the constant
             'IDENTIFY_THRESHOLD': 1e-3,
             # number of trajectories to be auto-generated in analysis
-            'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func_analysis
+            'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func_analysis,
+            'STORE_TRAJECTORIES_SEPARATELY': True,
         },
         extraction={
             # In this case this indicates usage of pFq symmetries utilization to reduce the number of shards
@@ -61,29 +60,40 @@ if __name__ == '__main__':
             'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func,
             'DEFAULT_USES_INV_T': False,
             'MAX_TRAJECTORY_LENGTH': 15,
-            'GRAD_VARIANT': 'adam',
-            'GRAD_MAX_STEPS': 50,
-            'TIER2_ATTRIBUTES': (),
-            'GRAD_GRAD_TOL': 1e-3,
-            'SA_MAX_DEPTH': 50,
-            'ANNEAL_TMIN': 2e-3,
             'SAMPLING_METHOD': 'pt'
         },
         logging={
             'GENERATE_LOGS': True
         },
         post_process={
+            # Each entry: bare attribute name, or (attribute, predicate). Predicate may be:
+            #   'if_identified' / 'if_has_degree_2'            -- named, handler-only
+            #   'max_degree below N' / 'max_degree above N'    -- recurrence polynomial degree
+            #   'top N highest <metric> in shard|cmf'          -- shard/CMF-scoped, gate-only
+            #   'top N lowest  <metric> in shard|cmf'
+            # <metric> read from stored JSONL: delta, convergence_rate, asymptotic_digits_per_step,
+            # spectral_gap, gcd_slope, precision_at. (To rank on a Tier-2/3 metric, store it first.)
+            # Example:
+            #   'TIER3_ATTRIBUTES': (
+            #       ('asymptotics', 'top 3 highest convergence_rate in cmf'),
+            #       ('delta_sequence', 'top 10 highest delta in shard'),
+            #       ('relation', 'max_degree below 4'),
+            #   ),
             'TIER3_ATTRIBUTES': ()
-        }
+        },
+        # Post-process graphing (writes under system.EXPORT_GRAPHS; all off by default).
+        graph={
+            'PLOT_BEST_DELTA_SEQUENCE': True,   # δ-sequence of the best trajectory per (CMF, constant)
+            'PLOT_DELTA_HISTOGRAMS': True,      # δ histograms per shard and per CMF
+            'WRITE_BUMPINESS_TABLE': True,      # per-shard δ non-smoothness (semivariogram + δ-seq TV)
+            'DELTA_SEQUENCE_DEPTH': 1000,
+        },
     )
 
     System(
         function_sources=[pFq(log(2), 2, 1, -1)],
         extractor=extraction.extractor.ShardExtractorMod,
         analyzers=[analysis.AnalyzerModV1],
-        # searcher=search.SimulatedAnnealingMod, # tested
-        # searcher=search.GeneticSearchModV2, # tested
-        # searcher=search.GradientAscentMod, # tested
         searcher=search.SearcherModV1,
         post_processor=post_process.Tier3PostProcessModV1,
     ).run(constants=[log(2)])
