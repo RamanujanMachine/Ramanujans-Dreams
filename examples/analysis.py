@@ -5,11 +5,12 @@ Copy this file, rename the classes, and fill in the ``TODO``s. An analysis
 stage is two classes (keep them in separate files when contributing — see
 CONTRIBUTING.md):
 
-  * ``MyAnalyzer`` (an ``AnalyzerScheme``) — the *internal logic*: cheaply
-    search each shard and turn the results into a prioritisation.
+  * ``MyAnalyzer`` — the *internal logic*: cheaply probe one shard (sample a few
+    trajectories, compute their Tier-1 attributes) and report the best δ per
+    constant.
   * ``MyAnalyzerMod`` (an ``AnalyzerModScheme``) — the *external interface*: run
-    the analyzer over every constant's shards and return the ranked shards the
-    search stage will consume.
+    the analyzer over every shard, then filter + rank the shards the search
+    stage will consume.
 
 Wire your module into the pipeline with::
 
@@ -17,77 +18,157 @@ Wire your module into the pipeline with::
     System(function_sources=[...], analyzers=[MyAnalyzerMod]).run(constants=[...])
 
 ``System`` constructs the module as ``MyAnalyzerMod(cmf_data)`` and calls
-``.execute()``. The goal of analysis is triage: keep the shards that actually
-produce the constant and rank them (best first) so the expensive search stage
-spends its budget where it matters.
+``.execute()``. Analysis is triage: keep the shards that actually produce the
+constant (above ``config.analysis.IDENTIFY_THRESHOLD``) and rank them best-first
+so the expensive search stage spends its budget where it matters.
 
-The built-in default is
-``dreamer.analysis.analyzers.serial_scan.analyzer_mod.AnalyzerModV1`` — use it
-as the production-grade reference.
+------------------------------------------------------------------------------
+HOW RESULTS ARE STORED (read this once)
+------------------------------------------------------------------------------
+Analysis writes the **same per-shard JSONL** the search stage reads — one
+trajectory per line in ``<shard_id>.jsonl`` (no pickles). By default that lives
+under ``config.system.EXPORT_SEARCH_RESULTS`` so search re-uses the records
+directly; when ``config.analysis.STORE_TRAJECTORIES_SEPARATELY`` is on, analysis
+writes to ``config.system.EXPORT_ANALYSIS_RESULTS`` instead (search still seeds
+its cache from there).
+
+This template mirrors the production default,
+``dreamer.analysis.analyzers.serial_scan.analyzer_mod.AnalyzerModV1`` — read it
+for the full re-run optimisation (config-fingerprint staleness, cached-δ reuse);
+this template keeps the loop minimal on purpose.
 """
 
-from typing import List, Dict
+import os
+from collections import defaultdict
+from typing import Dict, List, Optional, Set
 
-from dreamer.utils.schemes.analysis_scheme import AnalyzerScheme, AnalyzerModScheme
-from dreamer.utils.schemes.searchable import Searchable
-from dreamer.utils.schemes.module import CatchErrorInModule
-from dreamer.utils.constants.constant import Constant
-from dreamer.utils.storage.storage_objects import DataManager
+from dreamer.configs import config
 from dreamer.configs.system import sys_config
-from dreamer.utils.ui.tqdm_config import SmartTQDM
+from dreamer.extraction.shard import Shard
+from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
+from dreamer.utils.schemes.analysis_scheme import AnalyzerModScheme
+from dreamer.utils.schemes.module import CatchErrorInModule
+from dreamer.utils.schemes.searchable import Searchable
+from dreamer.utils.ui.tqdm_config import SmartTQDM
+from dreamer.search.methods.hedgehog_scan import SerialSearcher
+from dreamer.utils.storage.trajectory_attributes import (
+    TrajectoryAttributesHandler,
+    _position_to_tuple,
+    build_trajectory_dto,
+    derive_cmf_and_shard_ids,
+    derive_trajectory_id,
+)
+from dreamer.utils.multi_processing import load_seen_trajectories
+
+analysis_config = config.analysis
 
 
-class MyAnalyzer(AnalyzerScheme):
-    """The analysis algorithm, scoped to one constant and its shards."""
+class MyAnalyzer:
+    """Probe a single shard: sample trajectories, write their Tier-1 JSONL
+    records, and report the best δ found for each of the shard's constants.
+    """
 
-    def __init__(
-            self,
-            const: Constant,
-            shards: List[Searchable],
-            # TODO: <your arguments here>
-    ):
+    def __init__(self, shard: Shard, use_LIReC: bool = True):
         """
-        :param const: The constant being analysed.
-        :param shards: The shards (searchables) extracted for ``const``.
+        :param shard: The shard to analyse (carries its own constants in
+            ``shard.consts``).
+        :param use_LIReC: Identify constants with LIReC.
         """
-        self.const = const
-        self.shards = shards
+        self.shard = shard
+        self.use_LIReC = use_LIReC
 
-    def search(self) -> Dict[Searchable, DataManager]:
+    def analyze(
+        self,
+        *,
+        cmf_id: str,
+        shard_id: str,
+        encoding_str: str,
+        jsonl_path: str,
+        seen_trajectories: dict,
+    ) -> Dict[Constant, Optional[float]]:
         """
-        Cheaply probe each shard (e.g. sample a few trajectories, compute their
-        delta and whether they identify the constant).
+        Sample + evaluate trajectories in the shard and write one JSONL line per
+        trajectory.
 
-        :return: A mapping from each searched shard to its results.
+        :return: ``{Constant: best_delta}`` for every constant of the shard that
+            passed ``IDENTIFY_THRESHOLD`` (others are omitted). The trajectory
+            walk is computed once and scored against **all** the shard's
+            constants at once.
         """
-        # TODO: probe each shard and collect results; return {shard: DataManager}.
-        pass
+        # Trajectory sampling is constant-independent; the first constant is only
+        # used to drive the sampler.
+        sampler = SerialSearcher(self.shard, self.shard.consts[0], use_LIReC=self.use_LIReC)
+        try:
+            pairs = sampler.sample_pairs(
+                trajectory_generator=analysis_config.NUM_TRAJECTORIES_FROM_DIM,
+                sampling_method=analysis_config.SAMPLING_METHOD,
+            )
+        except ValueError as e:
+            Logger(f"Skipping shard {shard_id}: {e}", Logger.Levels.warning).log()
+            return {}
 
-    def prioritize(
-            self,
-            managers: Dict[Searchable, DataManager],
-            *args,   # TODO: <your arguments here>
-    ) -> Dict[Searchable, Dict[str, int]]:
-        """
-        Turn search results into a per-shard prioritisation score.
+        total = 0
+        identified_count: Dict[str, int] = defaultdict(int)
+        best_delta: Dict[str, Optional[float]] = {c.name: None for c in self.shard.consts}
 
-        The convention used by the built-in analyzer is to score each shard by
-        ``{'delta_rank': int, 'dim': int}`` — rank by the best delta found, and
-        keep the space dimension as a secondary key so that lower-dimensional
-        (cheaper) shards are searched before high-dimensional ones. You are free
-        to use any scoring you like, as long as ``execute`` below knows how to
-        sort by it.
+        with open(jsonl_path, "a") as fout:
+            for traj, start in SmartTQDM(
+                pairs, desc=f"  shard {shard_id[:8]}…", leave=False, **sys_config.TQDM_CONFIG,
+            ):
+                trajectory_id = derive_trajectory_id(
+                    shard_id, self.shard.cmf_name, encoding_str,
+                    _position_to_tuple(start), _position_to_tuple(traj),
+                )
+                if trajectory_id in seen_trajectories:
+                    continue  # already on disk — skip (AnalyzerModV1 reuses its δ)
 
-        :param managers: Mapping from each shard to its search results.
-        :return: Mapping from each shard to its prioritisation score.
-        """
-        # TODO: rank the shards in `managers` and return the score per shard.
-        pass
+                try:
+                    handler = TrajectoryAttributesHandler.from_cmf(
+                        self.shard.cmf, traj, start, constant=None, searchable=self.shard,
+                    )
+                    dto = build_trajectory_dto(
+                        handler,
+                        cmf_id=cmf_id,
+                        shard_id=shard_id,
+                        cmf_name=self.shard.cmf_name,
+                        shard_encoding_str=encoding_str,
+                        start=start,
+                        direction=traj,
+                        constants=self.shard.consts,  # score all constants at once
+                    )
+                except Exception as e:
+                    Logger(
+                        f"Handler error — shard {shard_id}, traj={traj}: {e}",
+                        Logger.Levels.warning,
+                    ).log()
+                    continue
+
+                fout.write(dto.to_json_line() + "\n")
+                fout.flush()
+                seen_trajectories[trajectory_id] = {"trajectory_id": trajectory_id}
+                total += 1
+
+                for c in self.shard.consts:
+                    if bool((dto.identified or {}).get(c.name, False)):
+                        identified_count[c.name] += 1
+                        delta_val = dto.delta_estimate.get(c.name)
+                        if delta_val is not None and (
+                            best_delta[c.name] is None or delta_val > best_delta[c.name]
+                        ):
+                            best_delta[c.name] = delta_val
+
+        # Keep a constant only if enough of its trajectories identified it.
+        result: Dict[Constant, Optional[float]] = {}
+        for c in self.shard.consts:
+            ident_pct = identified_count[c.name] / total if total else 0.0
+            if ident_pct >= analysis_config.IDENTIFY_THRESHOLD and best_delta[c.name] is not None:
+                result[c] = best_delta[c.name]
+        return result
 
 
 class MyAnalyzerMod(AnalyzerModScheme):
-    """The stage module — runs ``MyAnalyzer`` per constant and ranks the shards.
+    """The stage module — analyses every shard and returns them filtered + ranked.
 
     ``System`` instantiates this as ``MyAnalyzerMod(cmf_data)``, where
     ``cmf_data`` is ``Dict[Constant, List[Searchable]]`` from extraction.
@@ -114,10 +195,22 @@ class MyAnalyzerMod(AnalyzerModScheme):
         """
         Analyse every constant's shards and return them filtered + ranked.
 
-        :return: Mapping from each constant to its prioritised list of shards
-            (best first). The template below is a starting point, not a contract.
+        :return: Mapping from each constant to its shards, best-δ first (with
+            lower dimension as a tie-break). Only constants that passed the
+            threshold for at least one shard appear.
         """
-        queues: Dict[Constant, List[Searchable]] = {c: [] for c in self.cmf_data.keys()}
+        out_dir = (
+            sys_config.EXPORT_ANALYSIS_RESULTS
+            if analysis_config.STORE_TRAJECTORIES_SEPARATELY
+            else sys_config.EXPORT_SEARCH_RESULTS
+        )
+        os.makedirs(out_dir, exist_ok=True)
+
+        # shard_id → {Constant: best_delta} and shard_id → Shard, deduplicating
+        # shards that appear under several constants.
+        shard_const_best: Dict[str, Dict[Constant, float]] = {}
+        shard_by_id: Dict[str, Shard] = {}
+        seen_shard_ids: Set[str] = set()
 
         for constant, shards in SmartTQDM(
                 self.cmf_data.items(), desc='Analyzing constants and their CMFs',
@@ -129,19 +222,34 @@ class MyAnalyzerMod(AnalyzerModScheme):
                 ), Logger.Levels.message,
             ).log()
 
-            analyzer = MyAnalyzer(constant, shards)
-            managers = analyzer.search()
-            prioritization: Dict[Searchable, Dict[str, int]] = analyzer.prioritize(
-                managers,
-                # TODO: any other arguments your prioritize() needs
+            for shard in shards:
+                cmf_id, shard_id, encoding_str = derive_cmf_and_shard_ids(shard)
+                if shard_id in seen_shard_ids:
+                    continue  # analyse each unique shard once
+                seen_shard_ids.add(shard_id)
+                shard_by_id[shard_id] = shard
+
+                jsonl_path = os.path.join(out_dir, f"{shard_id}.jsonl")
+                shard_const_best[shard_id] = MyAnalyzer(shard, use_LIReC=True).analyze(
+                    cmf_id=cmf_id,
+                    shard_id=shard_id,
+                    encoding_str=encoding_str,
+                    jsonl_path=jsonl_path,
+                    seen_trajectories=load_seen_trajectories(jsonl_path),
+                )
+
+        # Build the ranked per-constant priority lists.
+        result: Dict[Constant, List[Searchable]] = {c: [] for c in self.cmf_data.keys()}
+        for const in self.cmf_data.keys():
+            passing = [
+                shard_by_id[sid] for sid, best in shard_const_best.items()
+                if best.get(const) is not None
+            ]
+            result[const] = sorted(
+                passing,
+                key=lambda s: (
+                    -shard_const_best[derive_cmf_and_shard_ids(s)[1]][const],  # best δ first
+                    s.dim,                                                     # then smaller dim
+                ),
             )
-
-            # TODO: drop shards that don't pass your threshold, then sort the
-            #   survivors by `prioritization` and assign them to queues[constant].
-            #   e.g. with the {'delta_rank', 'dim'} convention:
-            #       queues[constant] = sorted(
-            #           prioritization,
-            #           key=lambda s: (prioritization[s]['delta_rank'], prioritization[s]['dim']),
-            #       )
-
-        return queues
+        return result

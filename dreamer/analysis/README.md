@@ -71,11 +71,9 @@ toggles. See the [configuration index](../configs/README.md#analysis).
 **Add a new analysis module** → subclass `AnalyzerModScheme` and implement
 `execute()` returning a ranked `Dict[Constant, List[Shard]]`; wire it as
 `System(analyzers=[MyAnalyzerMod])`. You can pass several analyzers — the system
-merges their rankings into a consensus order. `AnalyzerModV1` is the reference.
-
-**Add a new ranking method** → subclass `AnalyzerScheme` (its `search` +
-`prioritize` pair) and have your module drive it.
+merges their rankings into a consensus order. `AnalyzerModV1` is the reference: it
+samples trajectories, writes Tier-1 JSONL records, and ranks shards by best δ.
 
 Start from the ready-to-copy skeleton in
-[`examples/analysis.py`](../../examples/analysis.py), which stubs both classes
-and matches the constructor signature `System` calls.
+[`examples/analysis.py`](../../examples/analysis.py), which stubs the probe-a-shard
+class and the module, and matches the constructor signature `System` calls.

@@ -94,18 +94,29 @@ reference implementation to copy from.
 | Loading (inspiration fn) | `Formatter` (`dreamer/loading/funcs/formatter.py`) | CMF construction + JSON round-trip | `function_sources=[MyFormatter(...)]` |
 | Extraction | `ExtractionModScheme` (`extraction_scheme.py`) | `execute() -> Dict[Constant, List[Searchable]]` | `extractor=MyExtractorMod` |
 | Analysis | `AnalyzerModScheme` (`analysis_scheme.py`) | `execute() -> Dict[Constant, List[Searchable]]` | `analyzers=[MyAnalyzerMod]` |
-| Search | `SearcherModScheme` (`searcher_scheme.py`) | `execute() -> Dict[Searchable, DataManager]` | `searcher=MySearchMod` |
+| Search | `SearcherModScheme` (`searcher_scheme.py`) | `execute() -> None` (writes per-shard JSONL) | `searcher=MySearchMod` |
 | Post-process | `PostProcessModScheme` (`post_process_scheme.py`) | `execute() -> None` | `post_processor=MyPostProcessMod` |
+
+> **Storage:** the search and analysis stages persist one **JSONL** record per
+> trajectory to `<EXPORT_SEARCH_RESULTS>/<shard_id>.jsonl` — the canonical store
+> the run summary reads. You don't write it by hand: open a `worker_pool`, build a
+> `TrajectoryAttributesHandler` + `TrajectoryDTO` per trajectory, and `push` it.
+> The `examples/` templates show this end-to-end.
 
 ### The method / module split (search & analysis)
 
 For the search and analysis stages there is a deliberate two-class split:
 
-- The **method** (`SearchMethod` / `AnalyzerScheme`) holds the *internal logic* —
-  how the algorithm explores and evaluates.
+- The **algorithm class** holds the *internal logic* — how it picks trajectory
+  directions inside a shard and evaluates them (this is the part that's genuinely
+  different between, say, a hill-climb and a genetic search).
 - The **module** (`SearcherModScheme` / `AnalyzerModScheme`) holds the *external
-  interface* — which shards to process, where/how to write results, how to
-  prioritise.
+  interface* — which shards to process, opening the JSONL store, and ranking.
+
+> The current default modules (`SearcherModV1`, `AnalyzerModV1`) and the optimiser
+> searchers follow this shape. The repo also ships older inner abstract bases
+> (`SearchMethod`, `AnalyzerScheme`) that predate the JSONL/DTO pipeline; the
+> `examples/` templates intentionally model the **current** modules instead.
 
 Keep them in **separate files** so they can be reused independently:
 
@@ -119,14 +130,14 @@ Each stage's README has an "Extending this stage" section with the specifics.
 ### Copy-paste templates
 
 The [`examples/`](examples/) directory contains ready-to-copy, fully-commented
-skeletons for the two stages you're most likely to extend. They already
-subclass the right schemes, match the exact constructor signatures `System`
-calls, and mark every spot you need to fill in with a `TODO`:
+skeletons for the two stages you're most likely to extend. They model the
+**current** default modules (the JSONL/DTO pipeline), match the exact constructor
+signatures `System` calls, and mark every spot you need to fill in with a `TODO`:
 
 | Template | Stage | What it skeletons |
 |----------|-------|-------------------|
-| [`examples/search.py`](examples/search.py) | Search | `MySearchMethod` (the algorithm) + `MySearchMod` (the module). |
-| [`examples/analysis.py`](examples/analysis.py) | Analysis | `MyAnalyzer` (probe + prioritise) + `MyAnalyzerMod` (the module). |
+| [`examples/search.py`](examples/search.py) | Search | `MySearchMethod` (your algorithm) + `MySearchMod` (the module, writes per-shard JSONL). |
+| [`examples/analysis.py`](examples/analysis.py) | Analysis | `MyAnalyzer` (probe one shard) + `MyAnalyzerMod` (the module, ranks shards). |
 
 Copy the file, rename the classes, fill in the `TODO`s, and wire it in:
 

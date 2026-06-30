@@ -164,13 +164,24 @@ System(
 ```
 
 Advanced options are:
-* Using a database as on of the inspiration functions source.
-* Using pickled inspiration function objects from past runs as inspiration functions source.
-* Using pickled past analysis results as input to the analysis stage.
+* Using a database as one of the inspiration-function sources.
+* Re-using CMFs **exported from a past run** as an inspiration-function source
+  (point `function_sources` at the export directory — see
+  `config.system.EXPORT_CMFS`).
+* Re-using a past run's **analysis priorities** to skip straight to search (run
+  without an `analyzers=` argument and the priorities are reloaded from
+  `config.system.EXPORT_ANALYSIS_PRIORITIES`).
+
+> **Where results live.** Every searched/analysed trajectory is one line in a
+> per-shard **JSONL** file under `config.system.EXPORT_SEARCH_RESULTS`
+> (`<shard_id>.jsonl`). That JSONL store is the canonical record the run summary
+> and best-δ reporting read back — see the
+> [search](dreamer/search/README.md) and [analysis](dreamer/analysis/README.md)
+> stage READMEs.
 
 
 [//]: # (#### Notes: )
-[//]: # (- When loading inspiration functions, you can use formerly computed CMFs using pickle files &#40;might be unstable&#41;, maunally list the inspiration functions or using a DB &#40;instructions below&#41;.)
+[//]: # (- When loading inspiration functions, you can re-use formerly exported CMFs, manually list the inspiration functions, or use a DB &#40;instructions below&#41;.)
 [//]: # (- Changing configurations could be done in two ways:)
 [//]: # (  1. Using `config.configure&#40;<config_section> = {<configuration-name> : <new value>}&#41;` - that way new configurations could be added to newly developed modules.)
 [//]: # (  2. Using each section's private configuration e.g. `db_config.USAGE = DBUsage.RETRIEVE_DATA`.)
