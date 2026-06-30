@@ -238,6 +238,7 @@ class ProjectionSpec:
 
     axes: Tuple[int, int, int] = (0, 1, 2)
     dependent: Dict[int, Tuple[float, float, float]] = field(default_factory=dict)
+    dim: Optional[int] = None  # full CMF dimension (for embedding back to D-space)
 
     @classmethod
     def identity(cls, dim: int) -> "ProjectionSpec":
@@ -248,7 +249,35 @@ class ProjectionSpec:
         """
         if dim < 3:
             raise ValueError(f"Need at least 3 coordinates to project, got {dim}.")
-        return cls(axes=(0, 1, 2), dependent={})
+        return cls(axes=(0, 1, 2), dependent={}, dim=dim)
+
+    @classmethod
+    def ignoring(cls, dim: int, ignore: Sequence[int]) -> "ProjectionSpec":
+        """Spec that **ignores** the given coordinates and uses the rest as axes.
+
+        The non-ignored coordinates become the sphere's ``(x, y, z)`` (in
+        ascending index order) and the ignored ones are dropped entirely — they
+        do not enter the unit-vector projection at all.  This is the natural way
+        to draw a CMF whose sampling fixed some coordinates (a constant component
+        would otherwise swamp the angular spread): ignore those coordinates.
+
+        Exactly three coordinates must remain.
+
+        :param dim: the CMF dimensionality (number of symbols).
+        :param ignore: coordinate indices to ignore (0-based).
+        :raises ValueError: if any index is out of range or the kept count != 3.
+        """
+        ig = sorted(set(int(i) for i in ignore))
+        if any(i < 0 or i >= dim for i in ig):
+            raise ValueError(f"--ignore-coords indices must be in [0, {dim - 1}]; got {ig}.")
+        kept = [i for i in range(dim) if i not in set(ig)]
+        if len(kept) != 3:
+            raise ValueError(
+                f"Ignoring {ig} leaves {len(kept)} coordinate(s) {kept}, but exactly "
+                f"3 are needed for a sphere.  Ignore {dim - 3} of the {dim} coords "
+                f"(or use --layout for finer control)."
+            )
+        return cls(axes=(kept[0], kept[1], kept[2]), dependent={}, dim=dim)
 
     @classmethod
     def from_layout(cls, layout: Sequence) -> "ProjectionSpec":
@@ -283,7 +312,8 @@ class ProjectionSpec:
             raise ValueError(
                 f"Layout must mark exactly one each of x, y, z; got {sorted(free)}."
             )
-        return cls(axes=(free["x"], free["y"], free["z"]), dependent=dependent)
+        return cls(axes=(free["x"], free["y"], free["z"]), dependent=dependent,
+                   dim=len(layout))
 
     def free_to_full(self, xyz: np.ndarray) -> np.ndarray:
         r"""Embed sphere points ``(x, y, z)`` back into full ``D``-dim space.
@@ -294,8 +324,13 @@ class ProjectionSpec:
 
         :param xyz: ``(N, 3)`` array of sphere points.
         :return: ``(N, D)`` array in the CMF coordinate frame.
+
+        Coordinates that are neither an axis nor dependent (i.e. *ignored*) are
+        left at 0, so ``A @ free_to_full(xyz)`` reduces to ``A[:, axes] · xyz`` —
+        the same projection the great circles are drawn with (see
+        :func:`plot_hyperplanes_on_sphere`), keeping the cone trim consistent.
         """
-        n = len(self.axes) + len(self.dependent)
+        n = self.dim if self.dim is not None else (len(self.axes) + len(self.dependent))
         full = np.zeros((xyz.shape[0], n), dtype=float)
         for slot, ax in enumerate(self.axes):
             full[:, ax] = xyz[:, slot]
@@ -996,6 +1031,7 @@ def generate_spheres(
     mode: str = "surface",
     mark_identified: bool = True,
     spec: Optional[ProjectionSpec] = None,
+    ignore_coords: Optional[Sequence[int]] = None,
     subspace_tol: float = 1e-6,
     value_fn: Optional[ValueFn] = None,
     value_label: Optional[str] = None,
@@ -1037,7 +1073,12 @@ def generate_spheres(
         trajectories by δ and draw non-identified ones faint grey; if ``False``,
         draw every sample in one neutral colour (sampling geometry only).
     :param spec: projection spec; defaults to the identity ``(0, 1, 2)`` spec for
-        a 3-D CMF.  Required (non-identity) for ``D > 3``.
+        a 3-D CMF (or, if *ignore_coords* is given, a spec over the kept coords).
+        Required (non-identity) for ``D > 3`` unless *ignore_coords* is used.
+    :param ignore_coords: coordinate indices to ignore (drop from the projection)
+        when *spec* is not given; the remaining coordinates (which must number
+        exactly 3) become the sphere axes.  Useful when sampling fixed some
+        coordinates and their constant value would otherwise dominate the plot.
     :param subspace_tol: relative tolerance for the subspace membership test.
     :param value_fn: scalar extractor (see :data:`ValueFn`); ``None`` →
         :func:`delta_value` for *constant*.
@@ -1102,7 +1143,9 @@ def generate_spheres(
     skipped_unidentified = 0
     for shard in shards:
         if spec is None:
-            spec = ProjectionSpec.identity(len(shard.symbols))
+            dim = len(shard.symbols)
+            spec = (ProjectionSpec.ignoring(dim, ignore_coords)
+                    if ignore_coords else ProjectionSpec.identity(dim))
         if require_identified and not shard_has_identified(shard, constant, results_root):
             skipped_unidentified += 1
             continue
@@ -1467,6 +1510,10 @@ def _build_cli():
     p.add_argument("--layout", default=None,
                    help="D>3 subspace, e.g. 'x,y,z,1:-1:0' (free axes x/y/z, "
                         "dependent coord a:b:c = a*x+b*y+c*z).")
+    p.add_argument("--ignore-coords", default=None,
+                   help="Coordinate indices to ignore when projecting, e.g. '0,4'. "
+                        "The remaining coords (must be exactly 3) become the sphere "
+                        "axes - handy when sampling fixed some coordinates.")
     p.add_argument("--subspace-tol", type=float, default=1e-6,
                    help="Relative tolerance for the subspace membership test.")
 
@@ -1520,6 +1567,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "every CMF at once is not supported (huge figure / pixmap exhaustion)."
         )
 
+    if args.layout and args.ignore_coords:
+        raise SystemExit("Use either --layout or --ignore-coords, not both.")
+    ignore_coords = None
+    if args.ignore_coords:
+        try:
+            ignore_coords = [int(t) for t in args.ignore_coords.replace(" ", "").split(",") if t]
+        except ValueError:
+            raise SystemExit(f"--ignore-coords must be comma-separated integers, "
+                             f"got {args.ignore_coords!r}.")
+
     shards = load_shards(args.export_cmfs, const, cmf_id=args.cmf)
     value_fn, value_label = _resolve_value_fn(args)
 
@@ -1542,6 +1599,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         mode="scatter" if args.scatter else "surface",
         mark_identified=args.mark_identified,
         spec=_parse_layout(args.layout),
+        ignore_coords=ignore_coords,
         subspace_tol=args.subspace_tol,
         value_fn=value_fn,
         value_label=value_label,

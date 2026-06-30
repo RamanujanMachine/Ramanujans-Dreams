@@ -75,7 +75,18 @@ class ShardSamplingOrchestrator(SamplingOrchestrator):
         _, shard_id, _ = derive_cmf_and_shard_ids(self.searchable)
         seed = derive_seed(shard_id, method)
 
-        a_matrix = self.searchable.A
+        # Direction constraints (e.g. {'x0': 12, 'y1': 28}) are folded into the cone as
+        # extra homogeneous rows so every sampler honours them with no kernel change; the
+        # strict v_i != 0 / sign part is applied as a post-harvest mask (``self._fixed``).
+        from dreamer.extraction.samplers.constraints import (
+            augment_cone,
+            get_trajectory_constraints,
+        )
+        constraints = get_trajectory_constraints()
+        a_matrix, self._fixed = augment_cone(
+            self.searchable.A, self.searchable.symbols, constraints
+        )
+
         if a_matrix is None:
             self.sampler = PrimitiveSphereSampler(len(self.searchable.symbols), seed=seed)
         else:
@@ -102,6 +113,14 @@ class ShardSamplingOrchestrator(SamplingOrchestrator):
             samples = self.sampler.harvest(compute_n_samples)
         else:
             samples = self.sampler.harvest(compute_n_samples, exact=exact)
+
+        # Enforce the strict fixed-coordinate sign/non-zero rule the closed cone admits on
+        # its facet (no-op when no direction constraints are configured).
+        if self._fixed and len(samples) > 0:
+            from dreamer.extraction.samplers.constraints import fixed_sign_mask
+
+            samples = np.asarray(samples)
+            samples = samples[fixed_sign_mask(samples, self._fixed)]
 
         result = {
             Position({sym: sp.sympify(int(v)) for v, sym in zip(p, self.searchable.symbols)})

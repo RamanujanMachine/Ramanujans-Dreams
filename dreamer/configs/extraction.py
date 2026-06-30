@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Dict, Optional
 
 from .configurable import Configurable
 
@@ -9,6 +9,23 @@ class ExtractionConfig(Configurable):
     """
     Extraction stage configurations
     """
+    TRAJECTORY_CONSTRAINTS: Optional[Dict[str, int]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Optional direction constraints fixing the *ratio* (and sign) of "
+                "sampled trajectories, e.g. {'x0': 12, 'y1': 28} means every "
+                "trajectory takes 12 steps in x0 for every 28 in y1 (scale-invariant: "
+                "the literal values matter only through their reduced ratio and sign). "
+                "Keys are CMF variable names; values are integers. Applied at every "
+                "stage that conditions a cone (extraction/analysis sampling + search) "
+                "and used to FILTER shards: a shard is dropped unless its recession "
+                "cone admits such a direction. None/empty = unconstrained. A single "
+                "fixed coordinate degenerates to a sign constraint; >=2 are needed for "
+                "a real ratio. See context/algorithms/06_trajectory_constraints.md."
+            )
+        },
+    )
     PARALLELIZE: bool = field(
         default=True,
         metadata={"description": "Enable parallel shard extraction routines."},

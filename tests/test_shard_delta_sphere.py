@@ -86,6 +86,35 @@ class TestProjectionSpec:
         with pytest.raises(ValueError):
             sds.ProjectionSpec.from_layout(["x", "y", "z", (1, -1)])  # bad coeffs
 
+    def test_ignoring_picks_remaining_axes(self):
+        spec = sds.ProjectionSpec.ignoring(5, [0, 4])
+        assert spec.axes == (1, 2, 3)
+        assert spec.dependent == {} and spec.dim == 5
+
+    def test_ignoring_drops_coords_in_projection(self):
+        spec = sds.ProjectionSpec.ignoring(5, [0, 4])
+        # direction (3, 2, 0, 4, 7): the ignored 3 and 7 must not affect the unit
+        # vector — it is the normalisation of (dir[1], dir[2], dir[3]) = (2, 0, 4).
+        dirs = np.array([[3.0, 2.0, 0.0, 4.0, 7.0]])
+        unit, mask = spec.project(dirs, tol=1e-6)
+        assert mask.all()
+        expected = np.array([2.0, 0.0, 4.0])
+        expected /= np.linalg.norm(expected)
+        np.testing.assert_allclose(unit[0], expected)
+
+    def test_ignoring_free_to_full_is_full_dim(self):
+        spec = sds.ProjectionSpec.ignoring(5, [0, 4])
+        full = spec.free_to_full(np.array([[0.6, 0.0, 0.8]]))
+        assert full.shape == (1, 5)
+        # ignored coords (0, 4) stay 0; kept coords carry x/y/z.
+        np.testing.assert_allclose(full[0], [0.0, 0.6, 0.0, 0.8, 0.0])
+
+    def test_ignoring_wrong_count_raises(self):
+        with pytest.raises(ValueError):
+            sds.ProjectionSpec.ignoring(5, [0])      # leaves 4
+        with pytest.raises(ValueError):
+            sds.ProjectionSpec.ignoring(5, [9])      # out of range
+
     def test_free_to_full_embedding(self):
         spec = sds.ProjectionSpec.from_layout(["x", "y", "z", (1, -1, 0)])
         xyz = np.array([[0.3, 0.4, 0.5]])

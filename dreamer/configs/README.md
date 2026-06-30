@@ -88,6 +88,7 @@ Mostly **where things go** and **how many cores to use**.
 | `EXACT_TIMEOUT_SECONDS` / `HEURISTIC_TIMEOUT_SECONDS` | Per-strategy wall-clock budgets (used by `'auto'` to decide fallback). |
 | `LOAD_SHARD_CACHE` | Reuse a previously-extracted `…__shards.jsonl` instead of re-extracting. |
 | `IGNORE_DUPLICATE_SEARCHABLES` | Drop symmetry-equivalent shards. |
+| `TRAJECTORY_CONSTRAINTS` | Optional `{var: int}` direction constraint, e.g. `{'x0': 12, 'y1': 28}` — pins the scale-invariant **ratio + sign** of every sampled trajectory and **drops shards** whose cone admits no such direction. Honoured by all samplers + search (see [extraction README](../extraction/README.md)). `None` = unconstrained. |
 | `HEURISTIC_*`, `EXACT_*` | Fine-tuning of the ray-shooter / reverse-search (see `display()`). |
 
 ## `analysis`
