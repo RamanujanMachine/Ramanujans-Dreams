@@ -162,7 +162,7 @@ def evaluate_in_flatland(
             ).log()
             return float("-inf"), False
 
-        sink((cached_handler.trajectory_matrix(), constant.value_sympy, merged_dto))
+        sink((cached_handler.trajectory_matrix, constant.value_sympy, merged_dto))
         seen_trajectories[trajectory_id] = {
             "extended_metrics": dict.fromkeys(desired),
             "delta_estimate": dict(merged_dto.delta_estimate),
@@ -196,7 +196,7 @@ def evaluate_in_flatland(
         ).log()
         return float("-inf"), False
 
-    sink((handler.trajectory_matrix(), constant.value_sympy, dto))
+    sink((handler.trajectory_matrix, constant.value_sympy, dto))
     handler_cache[trajectory_id] = handler
     seen_trajectories[trajectory_id] = {
         "extended_metrics": dict.fromkeys(desired),

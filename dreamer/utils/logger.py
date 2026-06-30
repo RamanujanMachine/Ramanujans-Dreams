@@ -4,6 +4,7 @@ import inspect
 import logging
 import os
 import platform
+import threading
 from enum import Enum, auto
 from contextlib import contextmanager
 from typing import Callable, Dict, Tuple, Optional
@@ -294,6 +295,69 @@ class Logger:
             if logging_config.PROFILE_SUMMARY:
                 n, s = cls.timer_mapping.get(label, (0, 0.0))
                 cls.timer_mapping[label] = (n + 1, s + (end - start))
+
+    @classmethod
+    @contextmanager
+    def watchdog(cls, label, threshold_seconds, *, detail=None, repeat=True):
+        """Warn while a wrapped procedure is *still running* past a threshold.
+
+        Unlike :meth:`simple_timer` (which logs only after the block returns),
+        this spawns a monitoring-only daemon thread that emits a WARNING the
+        moment the wrapped block has been running for ``threshold_seconds`` —
+        so a true hang is reported even though the call never returns.  This is
+        the intended way to locate a stall (e.g. a stuck trajectory walk /
+        LIReC identify): the warning carries ``detail`` so the user knows which
+        trajectory / shard to inspect.
+
+        The thread performs no computation (it sleeps on an
+        :class:`threading.Event`), so it is consistent with the project's
+        "no multithreading for CPU work" directive.
+
+        :param label: Short description of the wrapped procedure.
+        :param threshold_seconds: Seconds of runtime after which to warn.  A
+            falsy or non-positive value (or ``WATCHDOG_ENABLED=False``) makes
+            this a no-op with zero overhead.
+        :param detail: Optional extra context appended to the warning.  May be
+            a string, or a **callable** returning a string — the callable is
+            invoked only if the watchdog actually fires, so building an
+            expensive descriptor costs nothing on the happy path.
+        :param repeat: When ``True`` (default) re-warn every
+            ``threshold_seconds`` while the block is still running; when
+            ``False`` warn once and stay silent.
+        """
+        if (
+            not logging_config.WATCHDOG_ENABLED
+            or not threshold_seconds
+            or threshold_seconds <= 0
+        ):
+            yield
+            return
+
+        done = threading.Event()
+        start = time.perf_counter()
+
+        def monitor():
+            while not done.wait(threshold_seconds):
+                elapsed = time.perf_counter() - start
+                try:
+                    msg = detail() if callable(detail) else detail
+                except Exception as e:  # never let the monitor crash the run
+                    msg = f"<detail error: {e}>"
+                cls(
+                    f"[watchdog] {label} still running after {elapsed:.0f}s"
+                    + (f" — {msg}" if msg else ""),
+                    cls.Levels.warning,
+                ).log()
+                if not repeat:
+                    break
+
+        threading.Thread(
+            target=monitor, daemon=True, name=f"watchdog:{label}"
+        ).start()
+        try:
+            yield
+        finally:
+            done.set()
 
     @classmethod
     def timer_summary(cls):

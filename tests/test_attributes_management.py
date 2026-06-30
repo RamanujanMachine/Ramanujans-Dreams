@@ -15,6 +15,7 @@ Coverage:
 """
 
 import json
+import math
 import multiprocessing as mp
 import os
 
@@ -155,7 +156,6 @@ class TestDTOSerializationRoundTrips:
             direction=(0, 1),
             recurrence_relation="a(n)*f(n) + b(n)*f(n-1) = 0",
             recurrence_order=1,
-            limit_value=2.718,
             delta_estimate={"e": 1.5, "log2": 0.7},
             p_vector={"e": (1, 0), "log2": (2, 1)},
             q_vector={"e": (0, 1), "log2": (1, 0)},
@@ -182,7 +182,6 @@ class TestDTOSerializationRoundTrips:
             "direction": [0],
             "recurrence_relation": "",
             "recurrence_order": 1,
-            "limit_value": 1.0,
             "delta_estimate": {"e": 1.0},
             "identified": {"e": True},
         }
@@ -199,7 +198,6 @@ class TestDTOSerializationRoundTrips:
             direction=(1,),
             recurrence_relation="",
             recurrence_order=2,
-            limit_value=3.14,
             delta_estimate={"e": 1.1},
             p_vector={"e": ()},
             q_vector={"e": ()},
@@ -256,7 +254,6 @@ class TestDTOSerializationRoundTrips:
             "direction": [0],
             "recurrence_relation": "",
             "recurrence_order": 1,
-            "limit_value": 1.0,
             "delta_estimate": {"e": 1.0},
             "identified": {"e": True},
         }
@@ -468,9 +465,16 @@ class TestHandlerStubs:
         assert isinstance(minimal_handler.formula_str(), str)
 
     def test_limit_is_finite(self, minimal_handler):
+        # ``limit`` is only computed for an *identified* trajectory (p/q vectors
+        # found).  An unidentified trajectory returns NaN — we deliberately do not
+        # compute Limit-based values without p/q (feeding absent p/q as
+        # ``initial_values`` is what caused the matrix-size / zoo crashes).
         limit = minimal_handler.limit()
-        assert limit is not None
-        assert abs(float(limit)) < 1e15
+        if minimal_handler.identified():
+            assert limit is not None
+            assert abs(float(limit)) < 1e15
+        else:
+            assert math.isnan(float(limit))
 
 
 # ---------------------------------------------------------------------------
@@ -521,11 +525,11 @@ class TestBuildTrajectoryDto:
     def test_base_tier1_fields_populated(self, minimal_handler, symbols):
         """build_trajectory_dto fills the cheap Tier-1 fields.
 
-        ``limit_value`` and ``delta_estimate`` (a dict) are Tier-1.  The
-        recurrence (``recurrence_relation`` / ``recurrence_order``) is **Tier-2**
-        and stays ``None`` unless ``compute_recurrence=True`` (it builds the
-        expensive symbolic ``LinearRecurrence``).  ``extended_metrics`` stays
-        empty until Tier-2 workers (if any) write to it.
+        ``delta_estimate`` (a per-constant dict) is Tier-1.  The recurrence
+        (``recurrence_relation`` / ``recurrence_order``) is **Tier-2** and stays
+        ``None`` unless ``compute_recurrence=True`` (it builds the expensive
+        symbolic ``LinearRecurrence``).  ``extended_metrics`` stays empty until
+        Tier-2 workers (if any) write to it.
         """
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
@@ -541,7 +545,6 @@ class TestBuildTrajectoryDto:
         assert isinstance(dto.delta_estimate, dict)
         for delta_val in dto.delta_estimate.values():
             assert abs(delta_val) < 1e9 or delta_val == float("-inf")
-        assert abs(float(dto.limit_value)) < 1e15
         assert dto.extended_metrics == {}   # workers haven't run yet
 
     def test_compute_recurrence_opt_in_populates_recurrence(self, minimal_handler, symbols):
@@ -690,7 +693,6 @@ class TestExtendedMetricsMutation:
             direction=(1,),
             recurrence_relation="",
             recurrence_order=1,
-            limit_value=1.0,
             delta_estimate={"e": 1.0},
             p_vector={"e": ()},
             q_vector={"e": ()},
@@ -708,7 +710,6 @@ class TestExtendedMetricsMutation:
             direction=(1,),
             recurrence_relation="",
             recurrence_order=1,
-            limit_value=1.0,
             delta_estimate={"e": 1.0},
             p_vector={"e": ()},
             q_vector={"e": ()},
@@ -731,7 +732,6 @@ def _make_dto(trajectory_id: str = "t1", delta: float = 1.0) -> TrajectoryDTO:
         direction=(0, 1),
         recurrence_relation="a*f(n) + b*f(n-1) = 0",
         recurrence_order=1,
-        limit_value=2.7,
         delta_estimate={"e": delta},
         p_vector={"e": ()},
         q_vector={"e": ()},
@@ -797,6 +797,69 @@ class TestJsonlRoundTrip:
 
 
 # ---------------------------------------------------------------------------
+# 8b. pFq coboundary fast eigenvalue path
+# ---------------------------------------------------------------------------
+
+class TestCoboundaryEigenvalues:
+    """The pFq coboundary fast path must reproduce the generic symbolic
+    ``sorted_eigenvals`` exactly, for both walk types, and fall back cleanly
+    when the CMF is not a pFq (or the originating CMF/trajectory is absent)."""
+
+    @staticmethod
+    def _abs_sorted(eigs):
+        return sorted(abs(complex(e.evalf(chop=True))) for e in eigs)
+
+    @pytest.mark.parametrize("walk_type", [1, 2])
+    def test_fast_path_matches_generic(self, walk_type):
+        cmf = rt_pFq(4, 3, sp.Integer(1))
+        x = sp.symbols("x:4")
+        y = sp.symbols("y:3")
+        start = Position({x[0]: 1, x[1]: 1, x[2]: 2, x[3]: 2,
+                          y[0]: 3, y[1]: 3, y[2]: 3})
+        traj = Position({x[0]: 1, x[1]: 2, x[2]: 3, x[3]: 4,
+                         y[0]: 5, y[1]: 6, y[2]: 8})
+
+        h_fast = TrajectoryAttributesHandler.from_cmf(
+            cmf, traj, start, constant=None, walk_type=walk_type,
+        )
+        fast = h_fast.sorted_eigenvalues()
+        assert h_fast._pfq_coboundary_eigenvalues() is not None  # fast path engaged
+
+        # Force the generic path by dropping the stored CMF.
+        h_gen = TrajectoryAttributesHandler.from_cmf(
+            cmf, traj, start, constant=None, walk_type=walk_type,
+        )
+        h_gen._cmf = None
+        h_gen.clear_cache()
+        generic = h_gen.sorted_eigenvalues()
+
+        fa, ga = self._abs_sorted(fast), self._abs_sorted(generic)
+        assert len(fa) == len(ga)
+        for a, b in zip(fa, ga):
+            assert abs(a - b) <= 1e-7 * max(1.0, a)
+
+    def test_non_pfq_falls_back(self, minimal_handler):
+        """A handler whose CMF is not a pFq returns None from the fast path
+        (and still produces eigenvalues via the generic route)."""
+        minimal_handler._cmf = object()  # not a pFq
+        minimal_handler.clear_cache()
+        assert minimal_handler._pfq_coboundary_eigenvalues() is None
+        assert minimal_handler.sorted_eigenvalues() is not None
+
+    def test_matrix_only_handler_falls_back(self):
+        """A handler built directly from a matrix (no CMF/trajectory stored)
+        cannot use the fast path."""
+        cmf = rt_pFq(2, 1, sp.Integer(1))
+        x = sp.symbols("x:2")
+        y = sp.symbols("y:1")
+        start = Position({x[0]: 1, x[1]: 1, y[0]: 2})
+        traj = Position({x[0]: 1, x[1]: 1, y[0]: 1})
+        tmat = cmf.trajectory_matrix(traj, start)
+        h = TrajectoryAttributesHandler(tmat)
+        assert h._pfq_coboundary_eigenvalues() is None
+
+
+# ---------------------------------------------------------------------------
 # 9. Central attribute registry
 # ---------------------------------------------------------------------------
 
@@ -808,15 +871,18 @@ class TestAttributeRegistry:
         with :class:`TrajectoryAttributesHandler`'s public surface."""
         expected = {
             # Tier-1 — core scalars / vectors.
-            "delta", "limit", "order", "formula", "identified",
-            "p_vector", "q_vector", "traj_size", "limit_rational",
+            "delta", "order", "formula", "identified",
+            "p_vector", "q_vector", "traj_size", "projection_column",
             # Tier-2 — heavier numerical / spectral attributes.
             "eigenvalues", "eigenvalue_errors", "spectral_gap", "gcd_slope",
-            "convergence_class", "coeff_degrees",
-            "asymptotic_digits_per_step", "precision_at",
+            "coeff_degrees",
+            "approximated_digits_per_step", "digits_approximation", "precision_at",
             "companion_coboundary_rank",
+            "delta_prediction", "error_formula_ratio",
             # Tier-3 — symbolic / expensive attributes.
-            "asymptotics", "kamidelta", "delta_sequence", "digits_per_step",
+            # "asymptotics",  # commented out in the registry (WIP)
+            "delta_sequence", "digits_per_step",
+            "digits_computed", "avg_computed_digits_per_step",
             "relation", "recurrence_coeffs",
         }
         assert expected <= set(ATTRIBUTE_REGISTRY)
@@ -1148,10 +1214,43 @@ class TestBestTrajectoryRecord:
 
         class _Const:
             name = "e"
-        record, delta_val = System._System__best_trajectory_record(_Const())
+        record, delta_val = System._System__best_trajectory_record(
+            _Const(), {"cmfA__sh1", "cmfB__sh2"},
+        )
         assert record is not None
         assert record["trajectory_id"] == "b1"
         assert delta_val == pytest.approx(4.7)
+
+    def test_scoped_to_run_shards_ignores_other_runs(self, tmp_path, monkeypatch):
+        """Only shards in *this run's* shard_ids are scanned — a leftover JSONL
+        from a previous run on a different CMF (same constant) must not bleed
+        its (larger) delta into this run's best-delta report.
+        """
+        from dreamer.configs.system import sys_config
+        from dreamer.system.system import System
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+
+        # Run 1 (CMF A) left a high-delta file behind in the flat dir.
+        (tmp_path / "cmfA__sh1.jsonl").write_text(
+            json.dumps({"trajectory_id": "a1", "delta_estimate": {"e": 9.9},
+                        "start_point": [0, 0], "direction": [1, 0]}) + "\n"
+        )
+        # Run 2 (CMF B) — the only shard this run actually searched.
+        (tmp_path / "cmfB__sh2.jsonl").write_text(
+            json.dumps({"trajectory_id": "b1", "delta_estimate": {"e": 1.0},
+                        "start_point": [2, 2], "direction": [0, 1]}) + "\n"
+        )
+
+        class _Const:
+            name = "e"
+        # Scope to run 2's shard only.
+        record, delta_val = System._System__best_trajectory_record(
+            _Const(), {"cmfB__sh2"},
+        )
+        assert record is not None
+        assert record["trajectory_id"] == "b1", "must not pick CMF-A's leftover record"
+        assert delta_val == pytest.approx(1.0)
 
     def test_returns_none_when_dir_missing(self, tmp_path, monkeypatch):
         from dreamer.configs.system import sys_config
@@ -1162,7 +1261,7 @@ class TestBestTrajectoryRecord:
 
         class _Const:
             name = "missing_const"
-        record, delta_val = System._System__best_trajectory_record(_Const())
+        record, delta_val = System._System__best_trajectory_record(_Const(), {"any__sh"})
         assert record is None
         assert delta_val is None
 
@@ -1175,7 +1274,7 @@ class TestBestTrajectoryRecord:
 
         class _Const:
             name = "e"
-        record, delta_val = System._System__best_trajectory_record(_Const())
+        record, delta_val = System._System__best_trajectory_record(_Const(), {"stray"})
         assert record is None
         assert delta_val is None
 
@@ -1192,7 +1291,7 @@ class TestBestTrajectoryRecord:
 
         class _Const:
             name = "e"
-        record, delta_val = System._System__best_trajectory_record(_Const())
+        record, delta_val = System._System__best_trajectory_record(_Const(), {"f"})
         assert record["trajectory_id"] == "has_delta"
         assert delta_val == pytest.approx(1.0)
 
@@ -1219,7 +1318,7 @@ class TestConfigAttributeSelection:
 
     def test_compute_attributes_with_known_tier2_names_works(self, minimal_handler):
         """A representative Tier-2 attribute list resolves through the registry."""
-        names = ('eigenvalues', 'spectral_gap', 'gcd_slope', 'convergence_class')
+        names = ('eigenvalues', 'spectral_gap', 'gcd_slope', 'approximated_digits_per_step')
         out = compute_attributes(minimal_handler, names)
         for name in names:
             assert name in out or f"{name}_error" in out
@@ -1327,7 +1426,7 @@ class TestMergeOnRead:
         monkeypatch.setattr(
             config.search,
             "TIER2_ATTRIBUTES",
-            ("eigenvalues", "spectral_gap", "gcd_slope", "convergence_class"),
+            ("eigenvalues", "spectral_gap", "gcd_slope", "approximated_digits_per_step"),
         )
 
         patch = {
@@ -1336,7 +1435,7 @@ class TestMergeOnRead:
                 "eigenvalues": ["pre-computed"],
                 "spectral_gap": 0.5,
                 "gcd_slope": 0.1,
-                "convergence_class": "linear",
+                "approximated_digits_per_step": 8.0,
             },
         }
         out = compute_tier2_for_item((None, None, patch))
@@ -1405,7 +1504,7 @@ class TestMergeOnRead:
         )
 
         patch = {"trajectory_id": "t1", "extended_metrics": {}}
-        out = compute_tier3_for_item((handler.trajectory_matrix(), e.value_sympy, patch))
+        out = compute_tier3_for_item((handler.trajectory_matrix, e.value_sympy, patch, None))
 
         assert out is patch  # same dict, mutated in place
         # kamidelta either computed successfully or recorded as an error;
@@ -1897,6 +1996,94 @@ class TestAnalyzerDedup:
             "Analyzer must always call sample_pairs, even with a populated cache"
         )
 
+    def test_analyzer_records_only_identified_found_constants(
+        self, simple_shard, symbols, tmp_path, monkeypatch,
+    ):
+        """The per-CMF shard JSONL lists a constant as found only when a trajectory
+        identified it (LIReC) — not every candidate constant."""
+        import dreamer.analysis.analyzers.serial_scan.analyzer_mod as am
+        from dreamer.configs.system import sys_config
+        from dreamer.configs.analysis import analysis_config
+        from dreamer.search.methods.hedgehog_scan import SerialSearcher
+        from dreamer.utils.storage.atlas_writer import write_shard_records
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        monkeypatch.setattr(sys_config, "EXPORT_CMFS", str(tmp_path))
+        monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
+        monkeypatch.setattr(analysis_config, "STORE_TRAJECTORIES_SEPARATELY", False)
+
+        traj = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        start = simple_shard.get_interior_point()
+        monkeypatch.setattr(
+            SerialSearcher, "sample_pairs", lambda self_, *a, **k: [(traj, start)],
+        )
+
+        # Deterministic identification: skip the real walk; e is identified.
+        monkeypatch.setattr(
+            am.TrajectoryAttributesHandler, "from_cmf",
+            classmethod(lambda cls, *a, **k: None),
+        )
+
+        class _FakeDTO:
+            delta_estimate = {e.name: 1.0}
+            identified = {e.name: True}
+
+            def to_json_line(self):
+                return json.dumps({
+                    "trajectory_id": "x",
+                    "delta_estimate": self.delta_estimate,
+                    "identified": self.identified,
+                })
+
+        monkeypatch.setattr(am, "build_trajectory_dto", lambda *a, **k: _FakeDTO())
+
+        # Extraction wrote the shard with no constants confirmed found.
+        write_shard_records(str(tmp_path), simple_shard.cmf_name, [simple_shard],
+                            found_constants=[])
+
+        am.AnalyzerModV1({e: [simple_shard]}).execute()
+
+        path = next(tmp_path.glob("*__shards.jsonl"))
+        rec = json.loads(path.read_text().splitlines()[0])
+        assert rec["found_constants"] == [e.name]
+
+    def test_analyzer_includes_selected_trajectory(
+        self, simple_shard, symbols, tmp_path, monkeypatch,
+    ):
+        """A shard's ``selected_trajectory`` is analyzed (walked + recorded) even
+        when the sampler draws nothing."""
+        from dreamer.analysis.analyzers.serial_scan.analyzer_mod import AnalyzerModV1
+        from dreamer.configs.system import sys_config
+        from dreamer.configs.analysis import analysis_config
+        from dreamer.search.methods.hedgehog_scan import SerialSearcher
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
+
+        # Attach a user-supplied trajectory; pin the sampler to draw nothing so the
+        # only trajectory analyzed is the injected one.
+        traj = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        simple_shard.selected_trajectory = traj
+        monkeypatch.setattr(
+            SerialSearcher, "sample_pairs", lambda self_, *a, **k: [],
+        )
+
+        _cmf_id, shard_id, enc_str = derive_cmf_and_shard_ids(simple_shard)
+        start = simple_shard.get_interior_point()
+        expected_tid = derive_trajectory_id(
+            shard_id, simple_shard.cmf_name, enc_str,
+            tuple(int(v) for v in start.values()),
+            tuple(int(v) for v in traj.values()),
+        )
+
+        AnalyzerModV1({e: [simple_shard]}).execute()
+
+        jsonl_path = tmp_path / f"{shard_id}.jsonl"
+        assert jsonl_path.exists()
+        ids = {json.loads(line)["trajectory_id"]
+               for line in jsonl_path.read_text().strip().splitlines()}
+        assert expected_tid in ids
+
     def test_analyzer_skips_walks_for_cached_trajectories(
         self, simple_shard, tmp_path, monkeypatch,
     ):
@@ -1912,13 +2099,27 @@ class TestAnalyzerDedup:
         monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
 
         _cmf_id, shard_id, enc_str = derive_cmf_and_shard_ids(simple_shard)
-        pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs(
+
+        # Capture one fixed set of pairs and pin ``sample_pairs`` to it, so the
+        # trajectories the analyzer processes are *exactly* the ones we seed.
+        # The samplers are not yet seeded for determinism (see roadmap backlog),
+        # and the search-stage default (``pt``) differs from
+        # ``analysis.SAMPLING_METHOD`` (``raycast``); without pinning, two
+        # separate sample calls would draw different trajectories and the cache
+        # would miss, defeating the point of this test.
+        fixed_pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs(
             trajectory_generator=analysis_config.NUM_TRAJECTORIES_FROM_DIM,
+            sampling_method=analysis_config.SAMPLING_METHOD,
         )
+        monkeypatch.setattr(
+            SerialSearcher, "sample_pairs",
+            lambda self_, *args, **kwargs: fixed_pairs,
+        )
+
         # JSONL now lives flat under EXPORT_SEARCH_RESULTS.
         jsonl_path = tmp_path / f"{shard_id}.jsonl"
         with open(jsonl_path, "w") as fout:
-            for traj_p, start_p in pairs:
+            for traj_p, start_p in fixed_pairs:
                 start_t = tuple(int(v) for v in start_p.values())
                 dir_t = tuple(int(v) for v in traj_p.values())
                 tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
@@ -2001,6 +2202,35 @@ class TestAnalyzerDedup:
             assert "identified" in record
             assert "shard_id" in record
             assert record["shard_id"] == shard_id
+
+    def test_analyzer_writes_to_separate_store_when_flag_on(
+        self, simple_shard, tmp_path, monkeypatch,
+    ):
+        """With ``STORE_TRAJECTORIES_SEPARATELY`` the analyzer writes to
+        ``EXPORT_ANALYSIS_RESULTS`` and leaves ``EXPORT_SEARCH_RESULTS`` empty."""
+        from dreamer.analysis.analyzers.serial_scan.analyzer_mod import AnalyzerModV1
+        from dreamer.configs.system import sys_config
+        from dreamer.configs.analysis import analysis_config
+
+        search_dir = tmp_path / "search"
+        analysis_dir = tmp_path / "analysis"
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(search_dir))
+        monkeypatch.setattr(sys_config, "EXPORT_ANALYSIS_RESULTS", str(analysis_dir))
+        monkeypatch.setattr(analysis_config, "IDENTIFY_THRESHOLD", -1)
+        monkeypatch.setattr(analysis_config, "STORE_TRAJECTORIES_SEPARATELY", True)
+
+        AnalyzerModV1({e: [simple_shard]}).execute()
+
+        _cmf_id, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
+        analysis_jsonl = analysis_dir / f"{shard_id}.jsonl"
+        search_jsonl = search_dir / f"{shard_id}.jsonl"
+
+        assert analysis_jsonl.exists(), "Trajectories must go to the analysis store"
+        assert [ln for ln in analysis_jsonl.read_text().splitlines() if ln.strip()]
+        assert not search_jsonl.exists(), (
+            "Search-results dir must not receive analysis trajectories when the "
+            "separate-store flag is on"
+        )
 
     def test_analyzer_partial_cache_only_walks_missing(
         self, simple_shard, tmp_path, monkeypatch,
@@ -2342,6 +2572,50 @@ class TestTier3PostProcess:
             "asymptotics": ["pre-computed"],
         }
 
+    def test_skips_shards_not_in_priorities(
+        self, simple_shard, tmp_path, monkeypatch,
+    ):
+        """JSONLs whose shard isn't in ``priorities`` must be left untouched.
+
+        Extraction may write data for shards that didn't pass the analysis
+        identification threshold (so they aren't in ``priorities``).  Tier-3
+        compute on those is wasted work — the post-process stage should
+        process only the prioritised shards.
+        """
+        from dreamer.post_process.tier3_post_process_mod import Tier3PostProcessModV1
+        from dreamer.configs.system import sys_config
+        from dreamer.configs import config
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        monkeypatch.setattr(
+            config.post_process,
+            "TIER3_ATTRIBUTES",
+            ("kamidelta",),
+        )
+
+        _cmf_id, prioritised_shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
+        # An orphan shard JSONL — same cmf prefix, different encoding hash.
+        # The structural shard_id format is ``<cmf_id>__<hash>``.
+        orphan_shard_id = prioritised_shard_id.rsplit("__", 1)[0] + "__deadbeefdeadbeef"
+        orphan_jsonl = tmp_path / f"{orphan_shard_id}.jsonl"
+        orphan_record = {
+            "trajectory_id": f"{orphan_shard_id}__cafef00dcafef00d",
+            "cmf_id": prioritised_shard_id.rsplit("__", 1)[0],
+            "shard_id": orphan_shard_id,
+            "start_point": [1, 1],
+            "direction": [1, 1],
+            "extended_metrics": {},
+        }
+        original_orphan_text = json.dumps(orphan_record) + "\n"
+        orphan_jsonl.write_text(original_orphan_text)
+
+        # ``priorities`` contains *only* simple_shard — the orphan isn't in it.
+        Tier3PostProcessModV1({e: [simple_shard]}).execute()
+
+        # The orphan file is byte-for-byte unchanged: post-process didn't even
+        # open it, let alone append a patch.
+        assert orphan_jsonl.read_text() == original_orphan_text
+
     def test_appends_patch_for_missing_tier3_attr(
         self, simple_shard, tmp_path, monkeypatch,
     ):
@@ -2588,6 +2862,50 @@ class TestAtlasWriter:
         restored = ShardDTO.from_dict(record)
         assert restored.shard_id == derive_cmf_and_shard_ids(simple_shard)[1]
         assert restored.cmf_id == simple_shard.cmf_name
+
+    def test_write_shard_records_empty_found_constants(self, tmp_path, simple_shard):
+        """Extraction writes shard records with no constants confirmed found yet."""
+        from dreamer.utils.storage.atlas_writer import write_shard_records
+
+        write_shard_records(str(tmp_path), simple_shard.cmf_name, [simple_shard],
+                            found_constants=[])
+        path = next(tmp_path.glob("*__shards.jsonl"))
+        record = json.loads(path.read_text().splitlines()[0])
+        assert record["found_constants"] == []
+
+    def test_update_shard_found_constants_additive(self, tmp_path, simple_shard):
+        """After analysis, only identified constants are recorded (additive union)."""
+        from dreamer.utils.storage.atlas_writer import (
+            write_shard_records, update_shard_found_constants,
+        )
+
+        write_shard_records(str(tmp_path), simple_shard.cmf_name, [simple_shard],
+                            found_constants=[])
+        _, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
+
+        updated = update_shard_found_constants(
+            str(tmp_path), simple_shard.cmf_name, {shard_id: [e.name]},
+        )
+        assert updated is True
+        path = next(tmp_path.glob("*__shards.jsonl"))
+        record = json.loads(path.read_text().splitlines()[0])
+        assert record["found_constants"] == [e.name]
+
+        # Idempotent: re-adding the same constant changes nothing.
+        assert update_shard_found_constants(
+            str(tmp_path), simple_shard.cmf_name, {shard_id: [e.name]},
+        ) is False
+
+    def test_update_shard_found_constants_unknown_shard_noop(self, tmp_path, simple_shard):
+        from dreamer.utils.storage.atlas_writer import (
+            write_shard_records, update_shard_found_constants,
+        )
+
+        write_shard_records(str(tmp_path), simple_shard.cmf_name, [simple_shard],
+                            found_constants=[])
+        assert update_shard_found_constants(
+            str(tmp_path), simple_shard.cmf_name, {"no-such-shard": [e.name]},
+        ) is False
 
     def test_update_cmf_hyperplanes_populates_existing_record(
         self, tmp_path, simple_cmf, zero_shift, symbols,

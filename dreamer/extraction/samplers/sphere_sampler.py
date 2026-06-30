@@ -35,14 +35,16 @@ class PrimitiveSphereSampler(Sampler):
     Utility class for sampling primitive points in a hypersphere.
     """
 
-    def __init__(self, d, batch_size=100_000):
+    def __init__(self, d, batch_size=100_000, *, seed: int = -1):
         """
         :param d: dimensions of the sphere
         :param batch_size: number of points to sample per batch
+        :param seed: RNG seed for reproducibility (see :func:`dreamer.utils.rand.derive_seed`);
+            ``< 0`` uses OS entropy (nondeterministic).
         """
         super().__init__(d)
         self.batch_size = batch_size
-        self.rng = np.random.default_rng()
+        self.rng = np.random.default_rng(seed if seed >= 0 else None)
 
     def compute_radius(self, n_samples):
         """

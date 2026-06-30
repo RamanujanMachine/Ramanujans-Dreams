@@ -15,6 +15,7 @@ from typing import Dict, List, Set
 
 from dreamer.configs import config
 from dreamer.configs.system import sys_config
+from dreamer.configs.logging import logging_config
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.search.methods.flatland.parallel_eval import make_shared_eval_pool
@@ -23,6 +24,7 @@ from dreamer.search.methods.gradient_ascent import (
     NoInitialIdentification,
     SearchStalled,
 )
+from dreamer.search.searchers.micro_climb_finalize import finalize_best_trajectories
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.module import CatchErrorInModule
@@ -31,7 +33,7 @@ from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.utils.multi_processing import (
     compute_tier2_for_item,
-    load_seen_trajectories,
+    load_seen_trajectories_for_search,
     worker_pool,
     write_jsonl_line,
 )
@@ -92,8 +94,12 @@ class GradientAscentMod(SearcherModScheme):
     ) -> None:
         """Run gradient ascent for each identified constant of a single shard."""
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
+        Logger(
+            f"Starting Gradient Ascent search on shard {shard_id} (cmf={cmf_id})",
+            Logger.Levels.debug,
+        ).log()
         output_path = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl")
-        seen_trajectories = load_seen_trajectories(output_path)
+        seen_trajectories = load_seen_trajectories_for_search(output_path, shard_id)
 
         handler_cache: dict = {}
 
@@ -108,7 +114,11 @@ class GradientAscentMod(SearcherModScheme):
         )
 
         try:
-            with worker_pool(
+            with Logger.watchdog(
+                f"Gradient Ascent shard search (shard {shard_id})",
+                logging_config.WATCHDOG_TRAJECTORY_SECONDS,
+                detail=lambda: f"shard={shard_id} cmf={cmf_id}",
+            ), worker_pool(
                 num_workers=num_workers,
                 worker_fn=compute_tier2_for_item,
                 writer_fn=write_jsonl_line,
@@ -134,9 +144,31 @@ class GradientAscentMod(SearcherModScheme):
                     except (NoInitialIdentification, SearchStalled) as e:
                         Logger(str(e), Logger.Levels.warning).log()
                         continue
+
+            # Assurance endgame on the best-δ trajectory(ies): no-op unless
+            # ENABLE_MICRO_HILL_CLIMB.  Runs after the search pool has flushed the
+            # JSONL, while geom / start / eval_pool are still alive.
+            finalize_best_trajectories(
+                shard=shard,
+                identified_consts=identified_consts,
+                geom=geom,
+                start=start,
+                eval_pool=eval_pool,
+                cmf_id=cmf_id,
+                shard_id=shard_id,
+                shard_encoding_str=shard_encoding_str,
+                output_path=output_path,
+                num_workers=num_workers,
+                config_overrides=config_overrides,
+            )
         finally:
             if eval_pool is not None:
                 eval_pool.close()
                 eval_pool.join()
             if pq_manager is not None:
                 pq_manager.shutdown()
+
+        Logger(
+            f"Finished Gradient Ascent search on shard {shard_id}",
+            Logger.Levels.debug,
+        ).log()

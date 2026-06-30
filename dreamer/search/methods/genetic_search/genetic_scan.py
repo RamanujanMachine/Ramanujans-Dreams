@@ -26,9 +26,11 @@ from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
+from dreamer.search.methods.flatland.seed import resolve_injected_seed
 from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
+from dreamer.utils.rand import derive_py_random
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
 from dreamer.utils.ui.tqdm_config import SmartTQDM
@@ -56,12 +58,16 @@ class NoInitialPopulation(Exception):
 # Reference operators (translated from resources/code/algos/genetic.py)
 # ---------------------------------------------------------------------------
 
-def _crossover(z1: np.ndarray, z2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Single-point crossover over the flatland coordinate vector."""
+def _crossover(z1: np.ndarray, z2: np.ndarray, rng: random.Random) -> Tuple[np.ndarray, np.ndarray]:
+    """Single-point crossover over the flatland coordinate vector.
+
+    :param rng: seeded :class:`random.Random` (per-(shard, method, constant)) — see
+        :func:`dreamer.utils.rand.derive_py_random` — so the operator is reproducible.
+    """
     d = len(z1)
     if d < 2:
         return z1.copy(), z2.copy()
-    point = random.randint(1, d - 1)
+    point = rng.randint(1, d - 1)
     c1 = np.concatenate([z1[:point], z2[point:]])
     c2 = np.concatenate([z2[:point], z1[point:]])
     return c1, c2
@@ -74,6 +80,7 @@ def _mutate(
     mutation_prob: float,
     refine_prob: float,
     refine_coord_prob: float,
+    rng: random.Random,
 ) -> np.ndarray:
     """Mutate a flatland genome vector.
 
@@ -83,23 +90,25 @@ def _mutate(
       with ``refine_coord_prob``; guarantee ≥ 1 coord changes.
     * Coarse mode (otherwise): per-coord add ``randint(-max_step, max_step)``
       with ``mutation_prob``.
+
+    :param rng: seeded :class:`random.Random` for reproducibility.
     """
-    if random.random() < refine_prob:
+    if rng.random() < refine_prob:
         new_z = 2 * z.copy()
         changed = False
         for i in range(len(new_z)):
-            if random.random() < refine_coord_prob:
-                new_z[i] += random.choice([-1, 1])
+            if rng.random() < refine_coord_prob:
+                new_z[i] += rng.choice([-1, 1])
                 changed = True
         if not changed and len(new_z) > 0:
-            idx = random.randrange(len(new_z))
-            new_z[idx] += random.choice([-1, 1])
+            idx = rng.randrange(len(new_z))
+            new_z[idx] += rng.choice([-1, 1])
         return new_z
 
     new_z = z.copy()
     for i in range(len(new_z)):
-        if random.random() < mutation_prob:
-            new_z[i] += random.randint(-max_step, max_step)
+        if rng.random() < mutation_prob:
+            new_z[i] += rng.randint(-max_step, max_step)
     return new_z
 
 
@@ -154,6 +163,7 @@ class GeneticSearch(SearchMethod):
         geom: Optional[FlatlandGeometry] = None,
         start=None,
         pool=None,
+        initial_trajectory: Optional[Position] = None,
     ) -> None:
         """Run the GA for a single constant, emitting DTOs to *sink*.
 
@@ -172,10 +182,20 @@ class GeneticSearch(SearchMethod):
             ``None`` builds it here (standalone / single-constant path).
         :param start: Pre-fetched interior start :class:`Position` for the
             shard (also constant-independent).  ``None`` fetches it here.
+        :param initial_trajectory: Optional user-supplied seed direction.  Defaults
+            to the shard's ``selected_trajectory``.  When valid (a non-zero recession
+            direction) it is seeded into the initial population (the rest sampled as
+            usual); an invalid one is ignored (see :func:`resolve_injected_seed`).
         :raises NoInitialPopulation: if no in-cone seed genome can be built.
         """
         if handler_cache is None:
             handler_cache = {}
+
+        # Per-(shard, method, constant) reproducible RNG for every GA operator
+        # (selection / crossover / mutation / population top-up).  Same GLOBAL_SEED
+        # + shard + constant => identical evolution; distinct shards/constants get
+        # independent streams (nondeterministic when GLOBAL_SEED is None).
+        self._rng_py = derive_py_random(shard_id, "genetic", str(constant))
 
         shard: Shard = self.space
         if geom is None:
@@ -210,7 +230,11 @@ class GeneticSearch(SearchMethod):
         )
         pop_size = max(pop_size, 2)
 
-        population = self._init_population(geom, pop_size, shard_id, constant)
+        if initial_trajectory is None:
+            initial_trajectory = getattr(shard, "selected_trajectory", None)
+        population = self._init_population(
+            geom, pop_size, shard_id, constant, initial_trajectory=initial_trajectory
+        )
 
         # Evaluate initial population in parallel (Fix C).
         deltas = self._eval_population(population, eval_ctx, pool)
@@ -250,12 +274,12 @@ class GeneticSearch(SearchMethod):
 
             # Reproduction until full.
             while len(next_pop) < pop_size:
-                p1 = random.choice(elites)
-                p2 = random.choice(elites)
+                p1 = self._rng_py.choice(elites)
+                p2 = self._rng_py.choice(elites)
 
                 # Single-point crossover (reference child asymmetry).
-                if random.random() < search_config.GA_CROSSOVER_PROB:
-                    c1, c2 = _crossover(p1, p2)
+                if self._rng_py.random() < search_config.GA_CROSSOVER_PROB:
+                    c1, c2 = _crossover(p1, p2, self._rng_py)
                 else:
                     c1, c2 = p1.copy(), p2.copy()
 
@@ -266,6 +290,7 @@ class GeneticSearch(SearchMethod):
                     mutation_prob=search_config.GA_MUTATION_PROB,
                     refine_prob=0.7,
                     refine_coord_prob=search_config.GA_REFINE_COORD_PROB,
+                    rng=self._rng_py,
                 )
                 c1 = self._repair(c1, geom)
                 next_pop.append(c1)
@@ -279,6 +304,7 @@ class GeneticSearch(SearchMethod):
                         mutation_prob=search_config.GA_MUTATION_PROB,
                         refine_prob=0.3,
                         refine_coord_prob=search_config.GA_REFINE_COORD_PROB,
+                        rng=self._rng_py,
                     )
                     c2 = self._repair(c2, geom)
                     next_pop.append(c2)
@@ -323,7 +349,7 @@ class GeneticSearch(SearchMethod):
             return np.zeros(Z.shape[0], dtype=bool)
         nonzero = np.any(Z != 0, axis=1)
         inside = geom.is_inside_many(Z)
-        within = geom.traj_norm_many(Z, search_config.GA_TRAJ_NORM) <= search_config.GA_MAX_TRAJ_LEN
+        within = geom.traj_norm_many(Z, search_config.SEARCH_TRAJ_NORM) <= search_config.SEARCH_MAX_TRAJ_LEN
         return nonzero & inside & within
 
     def _valid_genome(self, z: np.ndarray, geom: FlatlandGeometry) -> bool:
@@ -345,6 +371,7 @@ class GeneticSearch(SearchMethod):
         pop_size: int,
         shard_id: str,
         constant: Constant,
+        initial_trajectory: Optional[Position] = None,
     ) -> List[np.ndarray]:
         """
         Build an initial population of valid flatland genomes.
@@ -353,14 +380,23 @@ class GeneticSearch(SearchMethod):
         :param pop_size: Target population size.
         :param shard_id: Shard identifier (used in exception message).
         :param constant: Constant being optimised (used in exception message).
+        :param initial_trajectory: Optional user-supplied seed direction; when valid
+            it is inserted as the first genome (the rest are sampled), so the search
+            starts from the user's known-good direction.  Invalid/``None`` ⇒ ignored.
         :raises NoInitialPopulation: if no valid in-cone genome can be found.
         :return: List of ``pop_size`` valid flatland genomes.
         """
+        population: List[np.ndarray] = []
+
+        # Seed the user-supplied trajectory first (if it is a valid in-cone genome).
+        seed_z = resolve_injected_seed(geom, initial_trajectory, shard_id, constant)
+        if seed_z is not None:
+            population.append(np.array(seed_z))
+
         orchestrator = ShardSamplingOrchestrator(self.space)
         n_sample = max(pop_size * 3, 10)
         trajectories = orchestrator.sample_trajectories(n_sample)
 
-        population: List[np.ndarray] = []
         traj_list = list(trajectories)
         if traj_list:
             # Convert all sampled trajectories to flatland and validate them in
@@ -380,13 +416,14 @@ class GeneticSearch(SearchMethod):
             attempts += 1
             if not population:
                 break
-            base = random.choice(population).copy()
+            base = self._rng_py.choice(population).copy()
             cand = _mutate(
                 base,
                 max_step=1,
                 mutation_prob=0.5,
                 refine_prob=0.0,
                 refine_coord_prob=0.0,
+                rng=self._rng_py,
             )
             if self._valid_genome(cand, geom):
                 population.append(cand)
@@ -396,7 +433,7 @@ class GeneticSearch(SearchMethod):
 
         # Pad with copies if still short (will be repaired/mutated next gen).
         while len(population) < pop_size:
-            population.append(random.choice(population).copy())
+            population.append(self._rng_py.choice(population).copy())
 
         return population[:pop_size]
 

@@ -365,9 +365,20 @@ def compute_tier2_for_item(item):
     ]
     if missing and traj_matrix is not None:
         try:
+            # Descriptor for the per-attribute watchdog so a stuck heavy
+            # attribute (e.g. asymptotics) can be traced to its trajectory.
+            if is_patch:
+                wd_detail = f"traj_id={tid}"
+            else:
+                wd_detail = (
+                    f"traj_id={tid} start={dto_or_patch.start_point} "
+                    f"direction={dto_or_patch.direction}"
+                )
             handler = TrajectoryAttributesHandler(traj_matrix, constant=constant)
             extended_metrics.update(
-                compute_attributes(handler, missing, on_error="store")
+                compute_attributes(
+                    handler, missing, on_error="store", watchdog_detail=wd_detail
+                )
             )
         except Exception as e:
             Logger(
@@ -439,6 +450,54 @@ def load_seen_trajectories(jsonl_path: str) -> Dict[str, dict]:
     except FileNotFoundError:
         pass
     return merged
+
+
+def load_seen_trajectories_for_search(output_path: str, shard_id: str) -> Dict[str, dict]:
+    """Load the search-stage trajectory cache for one shard, seeding from a
+    separate analysis-stage store when configured.
+
+    By default the analysis and search stages share one per-shard JSONL under
+    ``EXPORT_SEARCH_RESULTS``, so the search stage transparently reuses the
+    records the analyzer already computed.  When
+    ``config.analysis.STORE_TRAJECTORIES_SEPARATELY`` is enabled the analyzer
+    writes its records to a parallel per-shard file under
+    ``sys_config.EXPORT_ANALYSIS_RESULTS`` instead.  To keep cross-stage cache
+    reuse, this helper copies any analysis record for *shard_id* that is not yet
+    present in the search file **into** the search file, so the search results
+    JSONL stays the self-contained record consumed downstream (summary,
+    best-delta reporting) while the analysis store remains a separate pristine
+    copy.
+
+    Copied records are de-duplicated by ``trajectory_id``, so re-running the
+    search stage never appends an analysis record twice.
+
+    :param output_path: ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` path the
+        search stage reads and writes.
+    :param shard_id: Structural shard id; names the analysis-store file.
+    :return: Merged ``{trajectory_id: record}`` cache for the shard.
+    """
+    seen = load_seen_trajectories(output_path)
+
+    if not config.analysis.STORE_TRAJECTORIES_SEPARATELY:
+        return seen
+
+    analysis_path = os.path.join(
+        sys_config.EXPORT_ANALYSIS_RESULTS, f"{shard_id}.jsonl"
+    )
+    # Misconfiguration guard: if the analysis store points at the search file
+    # there is nothing to carry over.
+    if os.path.abspath(analysis_path) == os.path.abspath(output_path):
+        return seen
+
+    analysis_seen = load_seen_trajectories(analysis_path)
+    carryover = {tid: rec for tid, rec in analysis_seen.items() if tid not in seen}
+    if carryover:
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        with open(output_path, "a") as fout:
+            for rec in carryover.values():
+                fout.write(json.dumps(rec) + "\n")
+        seen.update(carryover)
+    return seen
 
 
 def load_seen_shards(jsonl_path: str) -> Dict[str, dict]:

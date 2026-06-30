@@ -72,6 +72,21 @@ class TestpFq:
         fmt = pFq(log2, 2, 1, -1, shifts=[0, sp.Rational(1, 2), 0])
         assert fmt.shifts[1] == sp.Rational(1, 2)
 
+    def test_shifts_normalized_to_sympy_rationals(self, log2):
+        """Integer/Rational shifts are coerced to exact sympy numbers."""
+        fmt = pFq(log2, 2, 1, -1, shifts=[0, 1, sp.Rational(1, 2)])
+        assert all(isinstance(s, sp.Rational) for s in fmt.shifts)  # Integer ⊂ Rational
+        assert fmt.shifts == [0, 1, sp.Rational(1, 2)]
+
+    def test_float_shift_raises(self, log2):
+        """A float shift is rejected with a clear error (use sp.Rational instead)."""
+        with pytest.raises(ValueError, match="rational"):
+            pFq(log2, 2, 1, -1, shifts=[0, 0.5, 0])
+
+    def test_irrational_shift_raises(self, log2):
+        with pytest.raises(ValueError, match="rational"):
+            pFq(log2, 2, 1, -1, shifts=[0, sp.sqrt(2), 0])
+
     def test_json_roundtrip(self, log2):
         original = pFq(log2, 2, 1, -1)
         json_obj = original.to_json_obj()
@@ -102,6 +117,37 @@ class TestpFq:
     def test_wrong_shift_length_raises(self, log2):
         with pytest.raises(ValueError):
             pFq(log2, 2, 1, -1, shifts=[0, 0])  # needs 3, given 2
+
+    def test_selected_trajectories_paired_with_start_points(self, log2):
+        fmt = pFq(
+            log2, 2, 1, -1,
+            selected_start_points=[(1, 2, 3)],
+            selected_trajectories=[(0, 1, 0)],
+            only_selected=True,
+        )
+        cmf_data = fmt.to_cmf()
+        assert cmf_data.selected_trajectories == [(0, 1, 0)]
+
+    def test_selected_trajectories_length_mismatch_raises(self, log2):
+        with pytest.raises(ValueError, match="selected_trajectories length"):
+            pFq(log2, 2, 1, -1,
+                selected_start_points=[(1, 2, 3)],
+                selected_trajectories=[(0, 1, 0), (1, 0, 0)])
+
+    def test_selected_trajectories_without_start_points_raises(self, log2):
+        with pytest.raises(ValueError, match="requires selected_start_points"):
+            pFq(log2, 2, 1, -1, selected_trajectories=[(0, 1, 0)])
+
+    def test_selected_trajectories_json_roundtrip(self, log2):
+        original = pFq(
+            log2, 2, 1, -1,
+            selected_start_points=[(1, 2, 3), (4, 5, 6)],
+            selected_trajectories=[(0, 1, 0), None],
+            only_selected=True,
+        )
+        restored = Formatter.from_json_obj(original.to_json_obj())
+        assert restored.selected_trajectories == [(0, 1, 0), None]
+        assert restored.selected_start_points == [(1, 2, 3), (4, 5, 6)]
 
 
 # ---------------------------------------------------------------------------

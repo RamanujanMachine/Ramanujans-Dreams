@@ -6,8 +6,9 @@ delta is continuous and generally smooth in the trajectory direction's angle
 (non-differentiable only at a finite set of points), so a gradient method over
 the real-valued direction space is well-posed.  The optimizer maintains a
 real-valued direction ``d``; each updated direction is *realized* as the
-angle-best integer trajectory with bounded L2 norm (:func:`snap_to_trajectory`),
-which is then walked / evaluated.
+angle-best integer trajectory with bounded real-space norm (the shared
+``SEARCH_MAX_TRAJ_LEN`` / ``SEARCH_TRAJ_NORM`` cap, via
+:func:`snap_to_trajectory`), which is then walked / evaluated.
 
 Design choices:
 
@@ -16,9 +17,22 @@ Design choices:
   realize + evaluate, and form ``g_i = (delta_i - base_delta) / angle``.
 * Optimizer variants (vanilla / momentum / RMSprop / Adam) are selected via the
   :mod:`optimizers` strategy and ``GRAD_VARIANT``.
-* **Convergence stop:** the ascent terminates when the gradient is too small to
-  act on, the snapped step cannot move, patience is exhausted, or the step
-  budget is spent — it never spins on a local optimum.
+* **Convergence stop (resolution-driven):** ``delta`` realized through
+  :func:`snap_to_trajectory` is *piecewise-constant* on the integer lattice, so a
+  small estimated gradient norm is not a reliable "near optimum" signal (and Adam
+  rescales the step regardless of gradient magnitude).  The ascent therefore runs
+  until it can no longer make an **improving lattice move** at the current
+  resolution — the snapped step cannot reach a new in-cone trajectory
+  (``z_new == cur_z`` / ``None``) or ``delta`` plateaus for ``GRAD_PATIENCE``
+  steps.  ``GRAD_MAX_STEPS`` is only a safety ceiling.  It never spins on a local
+  optimum.  The lattice resolution itself is set by ``SEARCH_MAX_TRAJ_LEN``.
+* **Local-maximum certificate:** the ascent always finishes with the shared
+  discrete ±1-neighbour hill-climb
+  (:func:`flatland.discrete_local_max.discrete_hill_climb`).  Adam combines the
+  per-axis probes into a single step, so the continuous loop can stop where a
+  coordinate-axis neighbour still improves δ; the certificate climbs any such
+  neighbour and guarantees the returned trajectory is a genuine discrete local
+  maximum at the resolution.
 * **Non-identified handling (three-stage):** skip the offending probe; after
   ``GRAD_SKIP_LIMIT`` unproductive steps, length-double; after
   ``GRAD_MAX_DOUBLINGS`` doublings, *diffract* off the wall by drawing a random
@@ -35,12 +49,16 @@ from ramanujantools import Position
 from dreamer.configs import config
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
+from dreamer.search.methods.flatland.discrete_local_max import discrete_hill_climb
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
+from dreamer.search.methods.flatland.seed import resolve_injected_seed
 from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.search.methods.gradient_ascent.lattice import rotate_toward, snap_to_trajectory
 from dreamer.search.methods.gradient_ascent.optimizers import optimizer_for
 from dreamer.utils.constants.constant import Constant
+from dreamer.utils.logger import Logger
+from dreamer.utils.rand import derive_rng
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
 from dreamer.utils.ui.tqdm_config import SmartTQDM
@@ -134,6 +152,7 @@ class GradientAscentSearch(SearchMethod):
         geom: Optional[FlatlandGeometry] = None,
         start=None,
         pool=None,
+        initial_trajectory: Optional[Position] = None,
     ) -> None:
         """Run gradient ascent for a single constant, emitting DTOs to *sink*.
 
@@ -153,11 +172,21 @@ class GradientAscentSearch(SearchMethod):
         :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`;
             the per-step forward-difference probe batch is walked across worker
             processes.  ``None`` evaluates serially.
+        :param initial_trajectory: Optional user-supplied seed direction.  Defaults
+            to the shard's ``selected_trajectory``.  When valid (a non-zero recession
+            direction) it seeds the optimiser instead of the reservoir; an invalid
+            one falls back to reservoir seeding (see :func:`resolve_injected_seed`).
         :raises SearchStalled: If the recovery ladder cannot reach an identified
             trajectory after diffraction.
         """
         if handler_cache is None:
             handler_cache = {}
+
+        # Per-(shard, method, constant) reproducible RNG for the diffraction kicks.
+        # Same GLOBAL_SEED + shard + constant => identical run; distinct shards/
+        # constants get independent streams (nondeterministic when GLOBAL_SEED is
+        # None).  Overrides the unseeded generator created in __init__.
+        self._rng = derive_rng(shard_id, "gradient", str(constant))
 
         shard: Shard = self.space
         if geom is None:
@@ -179,10 +208,17 @@ class GradientAscentSearch(SearchMethod):
         )
 
         cfg = search_config
-        max_norm = cfg.GRAD_MAX_NORM
+        max_norm = cfg.SEARCH_MAX_TRAJ_LEN
 
-        # --- Seed -----------------------------------------------------
-        cur_z = self._select_seed(geom, eval_ctx, shard_id, constant)
+        # --- Seed: user-supplied trajectory if valid, else reservoir ----------
+        if initial_trajectory is None:
+            initial_trajectory = getattr(shard, "selected_trajectory", None)
+        cur_z = resolve_injected_seed(
+            geom, initial_trajectory, shard_id, constant,
+            identify_fn=lambda z: evaluate_in_flatland(z, **eval_ctx)[1],
+        )
+        if cur_z is None:
+            cur_z = self._select_seed(geom, eval_ctx, shard_id, constant)
         cur_delta, _ = evaluate_in_flatland(cur_z, **eval_ctx)
         best_delta = cur_delta
         last_identified_z = cur_z.copy()
@@ -208,10 +244,6 @@ class GradientAscentSearch(SearchMethod):
                 )
                 optimizer.reset()
                 continue
-
-            # --- Convergence stop: gradient too small to act on ---
-            if float(np.linalg.norm(grad)) < cfg.GRAD_GRAD_TOL:
-                break
 
             # --- 2. Optimizer update + lattice realization (backtrack into cone) ---
             update = optimizer.step(grad)
@@ -249,6 +281,27 @@ class GradientAscentSearch(SearchMethod):
             if no_improve >= cfg.GRAD_PATIENCE:
                 break
 
+        # --- Discrete local-maximum certificate -----------------------------
+        # The continuous ascent stops on a resolution-derived signal (no snapped
+        # move / δ plateau), but Adam combines the per-axis probes into a single
+        # step direction, so it can stop at a point where a coordinate-axis ±1
+        # neighbour — not aligned with that step — still improves δ.  Finish with
+        # the shared discrete hill-climb so GA returns a genuine ±1 local maximum
+        # at the lattice resolution (the honest "resolution exhausted" stop),
+        # climbing any improving neighbour the continuous phase left on the table.
+        cur_z, cur_delta = discrete_hill_climb(
+            cur_z, cur_delta,
+            geom=geom, eval_ctx=eval_ctx, max_norm=max_norm,
+            traj_norm=cfg.SEARCH_TRAJ_NORM, improve_threshold=cfg.GRAD_IMPROVE_THRESHOLD,
+            pool=pool,
+            on_local_max=lambda z, dlt: Logger(
+                f"Discrete local maximum reached — shard {shard_id}, constant "
+                f"{constant.name}: δ={dlt:.6g} (no improving ±1 neighbour).",
+                Logger.Levels.info,
+            ).log(),
+        )
+        best_delta = max(best_delta, cur_delta)
+
         self.best_delta = best_delta
 
     # ------------------------------------------------------------------
@@ -283,7 +336,7 @@ class GradientAscentSearch(SearchMethod):
             yielded a usable (identified, in-cone) probe.
         """
         h = search_config.GRAD_FD_ANGLE
-        max_norm = search_config.GRAD_MAX_NORM
+        max_norm = search_config.SEARCH_MAX_TRAJ_LEN
         grad = np.zeros(geom.d_flat, dtype=np.float64)
         usable = 0
 
@@ -291,7 +344,7 @@ class GradientAscentSearch(SearchMethod):
         probes: List[Tuple[int, np.ndarray]] = []
         for i in range(geom.d_flat):
             d_rot = rotate_toward(d, i, h)
-            z_probe = snap_to_trajectory(d_rot, geom, max_norm, search_config.GRAD_TRAJ_NORM)
+            z_probe = snap_to_trajectory(d_rot, geom, max_norm, search_config.SEARCH_TRAJ_NORM)
             if z_probe is not None:
                 probes.append((i, z_probe))
 
@@ -330,14 +383,14 @@ class GradientAscentSearch(SearchMethod):
         :param update: Optimizer update vector.
         :param geom: Flatland geometry.
         :param lr: Base learning rate (step scale).
-        :param max_norm: Trajectory L2-norm cap for snapping.
+        :param max_norm: Trajectory norm cap for snapping (``SEARCH_MAX_TRAJ_LEN``).
         :return: ``(z_new, d_new)`` — the realized integer direction (or ``None``
             if no in-cone realization was found) and the real direction used.
         """
         scale = lr
         d_new = d + scale * update
         for _ in range(5):
-            z_new = snap_to_trajectory(d_new, geom, max_norm, search_config.GRAD_TRAJ_NORM)
+            z_new = snap_to_trajectory(d_new, geom, max_norm, search_config.SEARCH_TRAJ_NORM)
             if z_new is not None:
                 return z_new, d_new
             scale *= 0.5
@@ -382,7 +435,7 @@ class GradientAscentSearch(SearchMethod):
         if doubling_count < cfg.GRAD_MAX_DOUBLINGS:
             # Stage 2 — length-doubling fallback (escape the dead region).
             doubled = last_identified_z * 2
-            if geom.traj_norm(doubled, search_config.GRAD_TRAJ_NORM) <= max_norm and geom.is_inside(doubled):
+            if geom.traj_norm(doubled, search_config.SEARCH_TRAJ_NORM) <= max_norm and geom.is_inside(doubled):
                 delta, identified = evaluate_in_flatland(doubled, **eval_ctx)
                 if identified:
                     return (
@@ -427,7 +480,7 @@ class GradientAscentSearch(SearchMethod):
             kick /= (np.linalg.norm(kick) or 1.0)
             angle = self._rng.uniform(cfg.GRAD_FD_ANGLE, np.pi / 3.0)
             d_rand = np.cos(angle) * base + np.sin(angle) * np.linalg.norm(base) * kick
-            z = snap_to_trajectory(d_rand, geom, max_norm, search_config.GRAD_TRAJ_NORM)
+            z = snap_to_trajectory(d_rand, geom, max_norm, search_config.SEARCH_TRAJ_NORM)
             if z is None:
                 continue
             delta, identified = evaluate_in_flatland(z, **eval_ctx)

@@ -10,7 +10,12 @@ bound to the shard; per-constant attributes (``delta_estimate``,
 constant name.
 
 **JSONL layout** — one file per shard (no constant subdirectory):
-    ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl``
+    ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` by default, shared with the
+    search stage.  When ``analysis.STORE_TRAJECTORIES_SEPARATELY`` is enabled the
+    records are written to a separate per-shard store,
+    ``EXPORT_ANALYSIS_RESULTS/<shard_id>.jsonl``, instead; the search stage then
+    seeds its cache from that store (see
+    ``multi_processing.load_seen_trajectories_for_search``).
 
 **Per-shard deduplication** — each unique shard (by shard_id) is processed
 exactly once even if it appears under several constants in the input dict.
@@ -34,6 +39,7 @@ from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs.system import sys_config
 from dreamer.configs import config
+from dreamer.configs.logging import logging_config
 from dreamer.extraction.shard import Shard
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
@@ -45,7 +51,9 @@ from dreamer.utils.storage.trajectory_attributes import (
     walk_depth_for,
 )
 from dreamer.utils.multi_processing import load_seen_trajectories
+from dreamer.utils.storage.atlas_writer import update_shard_found_constants
 from dreamer.search.methods.hedgehog_scan import SerialSearcher
+import math
 
 analysis_config = config.analysis
 
@@ -81,7 +89,17 @@ class AnalyzerModV1(AnalyzerModScheme):
         (descending), then by dimension (ascending, as a tie-breaker).
         Only constants whose shards are identified above threshold appear.
         """
-        os.makedirs(sys_config.EXPORT_SEARCH_RESULTS, exist_ok=True)
+        # Trajectory records normally share the search-results dir so the search
+        # stage reuses them directly.  When STORE_TRAJECTORIES_SEPARATELY is set,
+        # the analysis stage keeps its own per-shard store under
+        # EXPORT_ANALYSIS_RESULTS instead (the search stage still seeds its cache
+        # from it — see load_seen_trajectories_for_search).
+        out_dir = (
+            sys_config.EXPORT_ANALYSIS_RESULTS
+            if analysis_config.STORE_TRAJECTORIES_SEPARATELY
+            else sys_config.EXPORT_SEARCH_RESULTS
+        )
+        os.makedirs(out_dir, exist_ok=True)
 
         result: Dict[Constant, List[Searchable]] = {c: [] for c in self.cmf_data.keys()}
 
@@ -96,6 +114,11 @@ class AnalyzerModV1(AnalyzerModScheme):
         shard_const_best: Dict[str, Dict[Constant, Optional[float]]] = {}
         # shard_id → Shard object (to build the sorted result later)
         shard_objects: Dict[str, Shard] = {}
+
+        # cmf_name → {shard_id: [identified constant names]} — populated by
+        # _analyze_shard, flushed to the shard JSONL after the loop so a constant
+        # is recorded as found in a shard only when a trajectory identified it.
+        self._found_constants_by_shard: Dict[str, Dict[str, List[str]]] = {}
 
         # Iterate in a deterministic order: all constants, then their shards.
         for constant, shards in SmartTQDM(
@@ -112,6 +135,8 @@ class AnalyzerModV1(AnalyzerModScheme):
                 Logger.Levels.message,
             ).log()
 
+            shard_width = int(math.log10(len(shards))) + 1
+
             for i, shard in enumerate(shards):
                 cmf_id, shard_id, encoding_str = derive_cmf_and_shard_ids(shard)
 
@@ -121,9 +146,7 @@ class AnalyzerModV1(AnalyzerModScheme):
                 seen_shard_ids.add(shard_id)
                 shard_objects[shard_id] = shard
 
-                shard_jsonl_path = os.path.join(
-                    sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl"
-                )
+                shard_jsonl_path = os.path.join(out_dir, f"{shard_id}.jsonl")
                 seen_trajectories = load_seen_trajectories(shard_jsonl_path)
 
                 per_const_best = self._analyze_shard(
@@ -142,14 +165,23 @@ class AnalyzerModV1(AnalyzerModScheme):
                             bd = per_const_best[c]
                             bd_str = f'{bd:.4f}' if bd is not None else 'N/A'
                             Logger(
-                                f"Shard {i+1} in {cmf_id} - searching {c.name}: best_delta={bd_str}",
+                                f"Shard {i+1:0{shard_width}d} in {cmf_id} - searching {c.name}: best_delta={bd_str} [identified: ✅]",
                                 Logger.Levels.info,
                             ).log()
                         else:
                             Logger(
-                                f"Shard {i+1} in {cmf_id} - searching {c.name}: not identified",
+                                f"Shard {i+1:0{shard_width}d} in {cmf_id} - searching {c.name}: {' ':<17} [identified: ❌]",
                                 Logger.Levels.info,
                             ).log()
+
+        # Persist the actually-found constants into the per-CMF shard JSONL so the
+        # cached records (and any no-extractor rerun) reflect only constants that an
+        # identified trajectory converged to — not every candidate constant.
+        if sys_config.EXPORT_CMFS:
+            for cmf_name, found_by_shard in self._found_constants_by_shard.items():
+                update_shard_found_constants(
+                    sys_config.EXPORT_CMFS, cmf_name, found_by_shard
+                )
 
         # Build per-constant priority lists from the analysis results.
         for const in all_constants:
@@ -195,6 +227,12 @@ class AnalyzerModV1(AnalyzerModScheme):
         The trajectory walk is computed once per trajectory and evaluated
         against every constant via ``build_trajectory_dto(..., constants=...)``.
         """
+        Logger(
+            f"Starting analysis on shard {shard_id} "
+            f"(cmf={cmf_id}, encoding={encoding_str})",
+            Logger.Levels.debug,
+        ).log()
+
         # Use the first constant just to drive the SerialSearcher for pair sampling
         # (trajectory sampling is constant-independent).
         primary_const = shard.consts[0]
@@ -211,10 +249,18 @@ class AnalyzerModV1(AnalyzerModScheme):
             ).log()
             return {}
 
+        # Seed the user-supplied trajectory into the analysis set (first) so its δ is
+        # computed and recorded alongside the sampled ones.  It is paired with the
+        # shard's interior point, exactly like ``sample_pairs``.  Per-run dedup below
+        # avoids walking it twice if the sampler happened to draw the same direction.
+        if getattr(shard, "selected_trajectory", None) is not None:
+            pairs = [(shard.selected_trajectory, shard.get_interior_point())] + list(pairs)
+
         # Per-constant accumulators.
         total = 0
         identified_count: Dict[str, int] = defaultdict(int)
         best_delta: Dict[str, Optional[float]] = {c.name: None for c in shard.consts}
+        processed_tids: set = set()
 
         with open(jsonl_path, "a") as fout:
             for traj, start in SmartTQDM(
@@ -228,6 +274,12 @@ class AnalyzerModV1(AnalyzerModScheme):
                 tid = derive_trajectory_id(
                     shard_id, shard.cmf_name, encoding_str, start_t, dir_t,
                 )
+
+                # Skip a trajectory already handled in this run (e.g. the injected
+                # seed also drawn by the sampler) — count + write it only once.
+                if tid in processed_tids:
+                    continue
+                processed_tids.add(tid)
 
                 # Reuse a cached record only when it was computed under the same
                 # configuration — a changed walk depth / walk type / identification
@@ -259,21 +311,26 @@ class AnalyzerModV1(AnalyzerModScheme):
                     continue
 
                 try:
-                    handler = TrajectoryAttributesHandler.from_cmf(
-                        shard.cmf, traj, start,
-                        constant=None,  # constant injected per-constant in build_trajectory_dto
-                        searchable=shard,
-                    )
-                    dto = build_trajectory_dto(
-                        handler,
-                        cmf_id=cmf_id,
-                        shard_id=shard_id,
-                        cmf_name=shard.cmf_name,
-                        shard_encoding_str=encoding_str,
-                        start=start,
-                        direction=traj,
-                        constants=shard.consts,  # Constant objects → keys are c.name
-                    )
+                    with Logger.watchdog(
+                        f"Tier-1 trajectory compute (shard {shard_id})",
+                        logging_config.WATCHDOG_TRAJECTORY_SECONDS,
+                        detail=lambda: f"traj_id={tid} start={start_t} direction={dir_t}",
+                    ):
+                        handler = TrajectoryAttributesHandler.from_cmf(
+                            shard.cmf, traj, start,
+                            constant=None,  # constant injected per-constant in build_trajectory_dto
+                            searchable=shard,
+                        )
+                        dto = build_trajectory_dto(
+                            handler,
+                            cmf_id=cmf_id,
+                            shard_id=shard_id,
+                            cmf_name=shard.cmf_name,
+                            shard_encoding_str=encoding_str,
+                            start=start,
+                            direction=traj,
+                            constants=shard.consts,  # Constant objects → keys are c.name
+                        )
                 except Exception as e:
                     Logger(
                         f"Handler error — shard {shard_id}, "
@@ -299,7 +356,34 @@ class AnalyzerModV1(AnalyzerModScheme):
 
                 total += 1
 
+        Logger(
+            f"Finished analysis on shard {shard_id}: {total} trajectories",
+            Logger.Levels.debug,
+        ).log()
+
+        # User-facing summary: which start point we searched from and how many of the
+        # sampled trajectories identified each constant (LIReC).
+        start_disp = _position_to_tuple(shard.get_interior_point())
+        pct_summary = ", ".join(
+            f"{c.name} {100.0 * identified_count[c.name] / total:.2f}% "
+            f"({identified_count[c.name]}/{total})"
+            if total else f"{c.name} N/A"
+            for c in shard.consts
+        )
+        Logger(
+            f"Shard {shard_id} — start point {start_disp}; "
+            f"identified trajectories: {pct_summary}",
+            Logger.Levels.info,
+        ).log()
+
         # Build the final result: only include constants that passed the threshold.
+        # A constant is "found" in this shard iff at least one trajectory identified
+        # it (LIReC), independent of the prioritisation threshold — recorded so the
+        # shard JSONL only lists genuinely-found constants.
+        self._found_constants_by_shard.setdefault(shard.cmf_name, {})[shard_id] = [
+            c.name for c in shard.consts if identified_count[c.name] > 0
+        ]
+
         result: Dict[Constant, Optional[float]] = {}
         for c in shard.consts:
             ident_pct = identified_count[c.name] / total if total else 0.0

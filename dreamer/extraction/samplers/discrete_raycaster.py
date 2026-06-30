@@ -132,7 +132,9 @@ def _mcmc_walk(
     inside the band (Phase 2, harvest) the log-ratio PID manages exploration vs caging.
 
     :param Z: ``(d_orig, d_flat)`` integer basis of the equality solution lattice.
-    :param B: ``(m, d_flat)`` facet normals; strict interior iff ``B z < 0``.
+    :param B: ``(m, d_flat)`` facet normals; the walk admits the **closed** recession
+        cone ``B z <= 0`` (a ray parallel to a facet, ``B_i z == 0``, is valid). ``B`` is
+        integer-valued (``B_orig @ Z @ U^T``) so the test is exact.
     :param z0: ``(d_flat,)`` strict-interior integer seed (may be far from origin).
     :param v0: ``Z @ z0`` (original-space seed), passed in to avoid a recompute.
     :param quota: target number of useful primitive harvested vectors.
@@ -147,7 +149,8 @@ def _mcmc_walk(
     :param max_useful_norm: only states with ``||Z z|| <= this`` are harvested/counted,
         and the Phase-1/Phase-2 controller boundary.
     :param flatland_box: hard ``max|z_i|`` bound (caps lateral flatland wandering).
-    :param tol: feasibility tolerance; a move is rejected unless ``B z' < -tol``.
+    :param tol: feasibility tolerance; a move is rejected only if ``B z' > tol`` (i.e. the
+        closed cone ``B z' <= 0`` is admitted; ``v == 0`` is excluded by the norm guard).
     :param rng_seed: if ``>= 0``, seeds numba's RNG for reproducibility.
     :return: ``(harvest_buffer, harvest_count, accept_rate)`` — buffer is
         ``(quota, d_orig)`` int64; ``accept_rate`` is accepted/proposed over the run.
@@ -214,13 +217,18 @@ def _mcmc_walk(
                 current_max_stride -= 1
             continue
 
-        # ---- Hard boundary: strict interior (B z' < -tol on every facet) ----
+        # ---- Closed recession cone (B z' <= 0 on every facet, non-strict) ----
+        # A ray with ``B_i z == 0`` runs parallel to facet ``i``; from a strictly-interior
+        # start it stays inside the open shard forever, so the closed cone is correct.  B is
+        # integer-valued (B_orig @ Z @ U^T), so ``acc`` is exact and ``acc > tol`` rejects
+        # only genuinely-exterior moves.  The origin (v == 0) is excluded by the norm guard
+        # below — the sole v == 0 gate now that the test is non-strict.
         inside = True
         for row in range(m):
             acc = 0.0
             for k in range(d_flat):
                 acc += B[row, k] * z_prop[k]
-            if acc >= -tol:
+            if acc > tol:
                 inside = False
                 break
         if not inside:
@@ -401,9 +409,11 @@ class DiscreteMCMCSampler(Sampler):
 
         # Cone-volume fraction (Gaussian dart-throw) — reused verbatim from the raycaster
         # so the requested quota scales with the cone's solid angle, exactly as before.
+        # Seeded from ``rng_seed`` so the fraction (and hence the quota) is reproducible.
         self.fraction = float(RaycastPipelineSampler._estimate_cone_fraction(
             self.B, self.d_flat,
             samples=min(500_000, max(10_000, 10 ** self.d_flat)),
+            rng=np.random.default_rng(rng_seed if rng_seed >= 0 else None),
         ))
 
         self.initial_lambda = initial_lambda

@@ -41,6 +41,7 @@ from dreamer.extraction.shard import Shard
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs import config
 from dreamer.configs.system import sys_config
+from dreamer.configs.logging import logging_config
 from dreamer.utils.logger import Logger
 from dreamer.utils.storage.attribute_registry import attribute_name
 from dreamer.utils.storage.trajectory_attributes import (
@@ -54,7 +55,7 @@ from dreamer.utils.storage.trajectory_attributes import (
 )
 from dreamer.utils.multi_processing import (
     compute_tier2_for_item,
-    load_seen_trajectories,
+    load_seen_trajectories_for_search,
     worker_pool,
     write_jsonl_line,
 )
@@ -128,10 +129,14 @@ class SearcherModV1(SearcherModScheme):
     ) -> None:
         """Run the search for a single shard using only *identified_consts*."""
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
+        Logger(
+            f"Starting deep search on shard {shard_id} (cmf={cmf_id})",
+            Logger.Levels.debug,
+        ).log()
         output_path = os.path.join(
             sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl"
         )
-        seen_trajectories = load_seen_trajectories(output_path)
+        seen_trajectories = load_seen_trajectories_for_search(output_path, shard_id)
 
         with worker_pool(
             num_workers=num_workers,
@@ -150,6 +155,11 @@ class SearcherModV1(SearcherModScheme):
                 sink=push,
                 seen_trajectories=seen_trajectories,
             )
+
+        Logger(
+            f"Finished deep search on shard {shard_id}",
+            Logger.Levels.debug,
+        ).log()
 
     # ------------------------------------------------------------------
     # Producer
@@ -223,11 +233,16 @@ class SearcherModV1(SearcherModScheme):
 
                 # Case 2: partial coverage — emit patch.
                 try:
-                    handler = TrajectoryAttributesHandler.from_cmf(
-                        shard.cmf, traj, start,
-                        constant=primary_sympy,
-                        searchable=shard,
-                    )
+                    with Logger.watchdog(
+                        f"Tier-1 trajectory compute (shard {shard_id})",
+                        logging_config.WATCHDOG_TRAJECTORY_SECONDS,
+                        detail=lambda: f"traj_id={trajectory_id} start={start_t} direction={dir_t}",
+                    ):
+                        handler = TrajectoryAttributesHandler.from_cmf(
+                            shard.cmf, traj, start,
+                            constant=primary_sympy,
+                            searchable=shard,
+                        )
                 except Exception as e:
                     Logger(
                         f"Handler error — shard {shard_id}, traj={traj}, start={start}: {e}",
@@ -239,7 +254,7 @@ class SearcherModV1(SearcherModScheme):
                     "trajectory_id": trajectory_id,
                     "extended_metrics": {},
                 }
-                sink((handler.trajectory_matrix(), primary_sympy, patch))
+                sink((handler.trajectory_matrix, primary_sympy, patch))
                 seen_trajectories[trajectory_id] = {
                     "extended_metrics": dict.fromkeys(existing_keys | missing),
                     "config_fingerprint": current_fp,
@@ -248,21 +263,26 @@ class SearcherModV1(SearcherModScheme):
 
             # Case 3: new trajectory.
             try:
-                handler = TrajectoryAttributesHandler.from_cmf(
-                    shard.cmf, traj, start,
-                    constant=None,
-                    searchable=shard,
-                )
-                dto = build_trajectory_dto(
-                    handler,
-                    cmf_id=cmf_id,
-                    shard_id=shard_id,
-                    cmf_name=shard.cmf_name,
-                    shard_encoding_str=shard_encoding_str,
-                    start=start,
-                    direction=traj,
-                    constants=identified_consts,  # Constant objects → keys are c.name
-                )
+                with Logger.watchdog(
+                    f"Tier-1 trajectory compute (shard {shard_id})",
+                    logging_config.WATCHDOG_TRAJECTORY_SECONDS,
+                    detail=lambda: f"traj_id={trajectory_id} start={start_t} direction={dir_t}",
+                ):
+                    handler = TrajectoryAttributesHandler.from_cmf(
+                        shard.cmf, traj, start,
+                        constant=None,
+                        searchable=shard,
+                    )
+                    dto = build_trajectory_dto(
+                        handler,
+                        cmf_id=cmf_id,
+                        shard_id=shard_id,
+                        cmf_name=shard.cmf_name,
+                        shard_encoding_str=shard_encoding_str,
+                        start=start,
+                        direction=traj,
+                        constants=identified_consts,  # Constant objects → keys are c.name
+                    )
             except Exception as e:
                 Logger(
                     f"Handler error — shard {shard_id}, traj={traj}, start={start}: {e}",
@@ -274,4 +294,4 @@ class SearcherModV1(SearcherModScheme):
                 "extended_metrics": dict.fromkeys(desired),
                 "config_fingerprint": current_fp,
             }
-            sink((handler.trajectory_matrix(), primary_sympy, dto))
+            sink((handler.trajectory_matrix, primary_sympy, dto))

@@ -20,9 +20,23 @@ class Formatter(ABC):
                  selected_start_points: Optional[List[Tuple[Union[int, sp.Rational], ...]]] = None,
                  only_selected: bool = False,
                  use_inv_t: bool = None,
-                 cmf_name_segments: Optional[List[List[Union[str, sp.Expr, int]]]] = None):
+                 cmf_name_segments: Optional[List[List[Union[str, sp.Expr, int]]]] = None,
+                 selected_trajectories: Optional[List[Optional[Tuple[Union[int, sp.Rational], ...]]]] = None):
         if use_inv_t is None:
             use_inv_t = config.search.DEFAULT_USES_INV_T
+
+        # Trajectories pair 1:1 with selected_start_points.  A None entry (or an entirely
+        # omitted list) means "use the start point as-is" (must be a strict interior point);
+        # a provided trajectory lets a border start point resolve to the correct shard by
+        # taking one step along it.  See ShardExtractor.extract / Shard.encoding_at.
+        if selected_trajectories is not None:
+            if selected_start_points is None:
+                raise ValueError('selected_trajectories requires selected_start_points')
+            if len(selected_trajectories) != len(selected_start_points):
+                raise ValueError(
+                    f'selected_trajectories length ({len(selected_trajectories)}) must match '
+                    f'selected_start_points length ({len(selected_start_points)})'
+                )
 
         # Normalise to a list of name strings; accept single constant or list.
         if isinstance(const, list):
@@ -32,8 +46,9 @@ class Formatter(ABC):
         else:
             self.consts = [const.name if isinstance(const, Constant) else const]
 
-        self.shifts = shifts
+        self.shifts = self._normalize_shifts(shifts)
         self.selected_start_points = selected_start_points
+        self.selected_trajectories = selected_trajectories
         self.only_selected = only_selected
         self.use_inv_t = use_inv_t
 
@@ -69,6 +84,39 @@ class Formatter(ABC):
             name_segments_concat.append(segment_str)
         self.cmf_name = '__'.join(name_segments_concat)
 
+    @staticmethod
+    def _normalize_shifts(shifts):
+        """Validate and coerce shifts to exact rational sympy numbers.
+
+        A coordinate shift must be a rational (an integer or an ``sp.Rational``):
+        a Python ``float`` (e.g. ``0.5``) is silently inexact and previously leaked
+        floats into the start-point coordinates, while an irrational/symbolic shift
+        is meaningless for a lattice walk.  Both now raise a clear, user-facing
+        error instead of corrupting the search.
+
+        Integers (Python ``int`` or ``sp.Integer``) and ``sp.Rational`` pass through
+        as their sympy form — name-stable (the serialized ``cmf_name`` is unchanged)
+        and consistent for downstream coordinate arithmetic.
+
+        :param shifts: The raw ``shifts`` argument (list, ``Position``, or ``None``).
+        :return: The normalised shifts (a list of sympy rationals when a list was
+            given; otherwise the input is returned unchanged).
+        :raises ValueError: If any list entry is not a rational number.
+        """
+        if not isinstance(shifts, list):
+            return shifts
+        normalized = []
+        for s in shifts:
+            val = sp.sympify(s)
+            if val.is_Float or not val.is_rational:
+                raise ValueError(
+                    f"Invalid shift {s!r}: shifts must be rational numbers "
+                    f"(an integer or sp.Rational). Pass e.g. sp.Rational(1, 2) "
+                    f"instead of a float like 0.5 or an irrational value."
+                )
+            normalized.append(val)
+        return normalized
+
     @property
     def const(self) -> str:
         """Backward-compatible accessor — returns the first (primary) constant name."""
@@ -92,6 +140,7 @@ class Formatter(ABC):
             tuple(self.consts),
             tuple(self.shifts if self.shifts else []),
             frozenset(self.selected_start_points if self.selected_start_points else []),
+            tuple(self.selected_trajectories) if self.selected_trajectories else (),
             self.only_selected,
             self.use_inv_t
         ))
@@ -115,11 +164,20 @@ class Formatter(ABC):
         if points:
             points = [[v if isinstance(v, int) else str(v) for v in p] for p in self.selected_start_points]
 
+        # Prepare trajectories (paired 1:1 with start points; entries may be None)
+        trajectories = self.selected_trajectories
+        if trajectories:
+            trajectories = [
+                None if t is None else [v if isinstance(v, int) else str(v) for v in t]
+                for t in self.selected_trajectories
+            ]
+
         return {
             'consts': self.consts,
             'use_inv_t': self.use_inv_t,
             'shifts': shifts,
             'selected_start_points': points,
+            'selected_trajectories': trajectories,
             'only_selected': self.only_selected
         }
 
@@ -141,6 +199,20 @@ class Formatter(ABC):
         for point_list in data:
             points.append(tuple(sp.sympify(v) if isinstance(v, str) else v for v in point_list))
         return points
+
+    @staticmethod
+    def _selected_trajectories_from_json(data):
+        """Deserialize selected_trajectories (entries may be ``None``); ``None``/empty → ``None``."""
+        if not data:
+            return None
+
+        trajectories = []
+        for traj in data:
+            if traj is None:
+                trajectories.append(None)
+            else:
+                trajectories.append(tuple(sp.sympify(v) if isinstance(v, str) else v for v in traj))
+        return trajectories
 
     @classmethod
     def fetch_from_registry(cls, name: str) -> Type['Formatter']:

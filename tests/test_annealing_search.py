@@ -134,7 +134,7 @@ class TestSASeedSelection:
             constant=e, cmf_id="", shard_id="sid", shard_encoding_str="",
             sink=lambda x: None, seen_trajectories={}, handler_cache={},
         )
-        seed = method._select_seed(geom, ctx, "sid", e)
+        seed = method._select_seed(geom, ctx, "sid", e, max_traj_len=1_000.0, traj_norm_name="linf")
         assert list(evaluated[0]) == [1, 0]
         assert list(seed) == [1, 0]
 
@@ -159,7 +159,7 @@ class TestSASeedSelection:
             sink=lambda x: None, seen_trajectories={}, handler_cache={},
         )
         with pytest.raises(NoInitialIdentification):
-            method._select_seed(geom, ctx, "sid", e)
+            method._select_seed(geom, ctx, "sid", e, max_traj_len=1_000.0, traj_norm_name="linf")
 
 
 # ---------------------------------------------------------------------------
@@ -200,8 +200,11 @@ class TestMetropolis:
         monkeypatch.setattr(config.search, "ANNEAL_TMIN", 0.0, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_MAX_DOUBLINGS", 5, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_MAX_TOTAL_STEPS", 10_000, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_RESEEDS", 100, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_TABU_SIZE", 100, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_RESERVOIR_SIZE", 1, raising=False)
+        monkeypatch.setattr(config.search, "SEARCH_MAX_TRAJ_LEN", 1_000.0, raising=False)
+        monkeypatch.setattr(config.search, "SEARCH_TRAJ_NORM", "linf", raising=False)
 
         method.run(
             constant=e,
@@ -317,6 +320,11 @@ class TestSAStoppingConditions:
             lambda self, n: {Position({s: sp.Integer(1) if i == 0 else sp.Integer(0)
                                        for i, s in enumerate(whole_space_shard.symbols)})},
         )
+        # New shared config knobs — set to non-restrictive values so they don't
+        # interfere with stopping-condition tests.
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_RESEEDS", 100, raising=False)
+        monkeypatch.setattr(config.search, "SEARCH_MAX_TRAJ_LEN", 1_000.0, raising=False)
+        monkeypatch.setattr(config.search, "SEARCH_TRAJ_NORM", "linf", raising=False)
         return call_count
 
     def test_stops_when_iter_left_exhausted(self, whole_space_shard, monkeypatch):
@@ -402,8 +410,11 @@ class TestSAStallFixes:
         monkeypatch.setattr(config.search, "ANNEAL_MAX_ITERS", 1_000, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_MAX_TOTAL_STEPS", 50, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_MAX_DOUBLINGS", 100, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_RESEEDS", 100, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_TABU_SIZE", 100, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_RESERVOIR_SIZE", 1, raising=False)
+        monkeypatch.setattr(config.search, "SEARCH_MAX_TRAJ_LEN", 1_000.0, raising=False)
+        monkeypatch.setattr(config.search, "SEARCH_TRAJ_NORM", "linf", raising=False)
 
         method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",
                    sink=lambda x: None, seen_trajectories={})
@@ -457,8 +468,8 @@ class TestSAStallFixes:
 
         original_try_reseed = SimulatedAnnealingSearch._try_reseed
 
-        def counting_reseed(self_, geom, eval_ctx, shard_id, constant):
-            result = original_try_reseed(self_, geom, eval_ctx, shard_id, constant)
+        def counting_reseed(self_, geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name):
+            result = original_try_reseed(self_, geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
             if result is not None:
                 reseed_count[0] += 1
                 seed_returned[0] = True
@@ -473,8 +484,11 @@ class TestSAStallFixes:
         monkeypatch.setattr(config.search, "ANNEAL_MAX_ITERS", 500, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_MAX_TOTAL_STEPS", 200, raising=False)
         monkeypatch.setattr(config.search, "ANNEAL_MAX_DOUBLINGS", 2, raising=False)  # reseed quickly
-        monkeypatch.setattr(config.search, "ANNEAL_TABU_SIZE", 200, raising=False)  # large → would deadlock without clear
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_RESEEDS", 20, raising=False)   # allow many for this test
+        monkeypatch.setattr(config.search, "ANNEAL_TABU_SIZE", 200, raising=False)    # large → would deadlock without clear
         monkeypatch.setattr(config.search, "ANNEAL_RESERVOIR_SIZE", 1, raising=False)
+        monkeypatch.setattr(config.search, "SEARCH_MAX_TRAJ_LEN", 1_000.0, raising=False)  # no cap for this test
+        monkeypatch.setattr(config.search, "SEARCH_TRAJ_NORM", "linf", raising=False)
 
         method = SimulatedAnnealingSearch(whole_space_shard, e, use_LIReC=False)
         method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",
@@ -490,7 +504,110 @@ class TestSAStallFixes:
 
 
 # ---------------------------------------------------------------------------
-# 8. Module: orchestration + NoInitialIdentification caught
+# 8. Seed filtering and reseed cap
+# ---------------------------------------------------------------------------
+
+class TestSeedFilter:
+    def test_seed_with_no_valid_neighbours_is_skipped(self, whole_space_shard, monkeypatch):
+        """_select_seed must skip a trajectory whose entire neighbourhood is outside
+        the traj-len cap; only seeds with at least one reachable neighbour are accepted.
+
+        If this filter is missing the algorithm immediately enters the stall cycle
+        (no neighbours → double → reseed → repeat → 12-hour hang).
+        """
+        import dreamer.search.methods.annealing.annealing_scan as ann
+        from dreamer.extraction.samplers import ShardSamplingOrchestrator
+
+        method = SimulatedAnnealingSearch(whole_space_shard, e, use_LIReC=False)
+        geom = FlatlandGeometry(whole_space_shard)
+
+        evaluated = []
+
+        def fake_eval(z, **kw):
+            evaluated.append(np.asarray(z).copy())
+            return 1.0, True  # every seed identifies
+
+        monkeypatch.setattr(ann, "evaluate_in_flatland", fake_eval)
+        monkeypatch.setattr(
+            ShardSamplingOrchestrator, "sample_trajectories",
+            lambda self, n: {Position({s: sp.Integer(1) if i == 0 else sp.Integer(0)
+                                       for i, s in enumerate(whole_space_shard.symbols)})},
+        )
+
+        ctx = dict(
+            geom=geom, shard=whole_space_shard,
+            start=whole_space_shard.get_interior_point(),
+            constant=e, cmf_id="", shard_id="sid", shard_encoding_str="",
+            sink=lambda x: None, seen_trajectories={}, handler_cache={},
+        )
+
+        # With cap = 0.0, no real-space direction has norm ≤ 0 → all neighbours filtered
+        # → the seed should be skipped → NoInitialIdentification.
+        with pytest.raises(NoInitialIdentification):
+            method._select_seed(geom, ctx, "sid", e, max_traj_len=0.0, traj_norm_name="linf")
+
+        # Confirm evaluate_in_flatland was never called (seed rejected before eval).
+        assert evaluated == [], "Seed was evaluated despite having no valid neighbours."
+
+    def test_consecutive_reseed_failures_stop_run(self, whole_space_shard, monkeypatch):
+        """After ANNEAL_MAX_RESEEDS consecutive failed reseeds, the run must terminate
+        cleanly instead of looping forever calling the expensive PT sampler.
+        """
+        import dreamer.search.methods.annealing.annealing_scan as ann
+        from dreamer.extraction.samplers import ShardSamplingOrchestrator
+
+        reseed_calls = [0]
+
+        # Seed [1,0] identifies (so run starts), but fake_eval returns delta 0.5 for it.
+        def fake_eval(z, **kw):
+            z = np.asarray(z)
+            if list(z[:2]) == [1, 0]:
+                return 0.5, True
+            return 0.0, True
+
+        monkeypatch.setattr(ann, "evaluate_in_flatland", fake_eval)
+        monkeypatch.setattr(
+            ShardSamplingOrchestrator, "sample_trajectories",
+            lambda self, n: {Position({s: sp.Integer(1) if i == 0 else sp.Integer(0)
+                                       for i, s in enumerate(whole_space_shard.symbols)})},
+        )
+
+        import random as _random
+        monkeypatch.setattr(_random, "random", lambda: 1.0)  # never accept probabilistically
+
+        # Patch _try_reseed to always return None (simulates no valid seed found).
+        original_try_reseed = SimulatedAnnealingSearch._try_reseed
+
+        def always_fail_reseed(self_, geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name):
+            reseed_calls[0] += 1
+            return None
+
+        monkeypatch.setattr(SimulatedAnnealingSearch, "_try_reseed", always_fail_reseed)
+
+        monkeypatch.setattr(config.search, "ANNEAL_T0", 1.0, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_TMIN", 0.0, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_ITERS", 1_000, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_TOTAL_STEPS", 100_000, raising=False)  # high: reseed cap fires first
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_DOUBLINGS", 2, raising=False)  # reseed every 2 rejections
+        monkeypatch.setattr(config.search, "ANNEAL_MAX_RESEEDS", 3, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_TABU_SIZE", 200, raising=False)
+        monkeypatch.setattr(config.search, "ANNEAL_RESERVOIR_SIZE", 1, raising=False)
+        monkeypatch.setattr(config.search, "SEARCH_MAX_TRAJ_LEN", 1_000.0, raising=False)
+        monkeypatch.setattr(config.search, "SEARCH_TRAJ_NORM", "linf", raising=False)
+
+        method = SimulatedAnnealingSearch(whole_space_shard, e, use_LIReC=False)
+        # Must complete without hanging.
+        method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",
+                   sink=lambda x: None, seen_trajectories={})
+
+        # _try_reseed must have been called at most max_reseeds consecutive times.
+        assert reseed_calls[0] <= 3, (
+            f"_try_reseed called {reseed_calls[0]} times; should have stopped at 3 consecutive failures."
+        )
+
+
+# ---------------------------------------------------------------------------
+# 9. Module: orchestration + NoInitialIdentification caught
 # ---------------------------------------------------------------------------
 
 class TestSimulatedAnnealingMod:

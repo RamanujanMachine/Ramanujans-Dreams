@@ -47,6 +47,7 @@ from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
+from dreamer.search.methods.flatland.seed import resolve_injected_seed
 from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
@@ -124,6 +125,7 @@ class SmallAngleSearch(SearchMethod):
         geom: Optional[FlatlandGeometry] = None,
         start=None,
         pool=None,
+        initial_trajectory: Optional[Position] = None,
     ) -> None:
         """Run the hill-climb for a single constant, emitting DTOs to *sink*.
 
@@ -141,6 +143,10 @@ class SmallAngleSearch(SearchMethod):
         :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`;
             each step's in-cone perturbation batch is walked across worker
             processes.  ``None`` evaluates serially.
+        :param initial_trajectory: Optional user-supplied seed direction.  Defaults
+            to the shard's ``selected_trajectory``.  When valid (a non-zero recession
+            direction) it seeds the climb instead of the reservoir; an invalid one
+            falls back to reservoir seeding (see :func:`resolve_injected_seed`).
 
         :raises NoInitialIdentification: if no reservoir seed identifies *constant*.
         """
@@ -166,7 +172,14 @@ class SmallAngleSearch(SearchMethod):
             handler_cache=handler_cache,
         )
 
-        z = self._select_seed(geom, ctx, shard_id, constant)
+        if initial_trajectory is None:
+            initial_trajectory = getattr(shard, "selected_trajectory", None)
+        z = resolve_injected_seed(
+            geom, initial_trajectory, shard_id, constant,
+            identify_fn=lambda zz: self._evaluate(zz, **ctx)[1],
+        )
+        if z is None:
+            z = self._select_seed(geom, ctx, shard_id, constant)
 
         best_delta, _ = self._evaluate(z, **ctx)
         no_improve = 0

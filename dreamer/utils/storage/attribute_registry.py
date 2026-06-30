@@ -25,6 +25,8 @@ from __future__ import annotations
 import inspect
 from typing import Any, Callable, Dict, Optional, Tuple, Union, TYPE_CHECKING
 
+import sympy as sp
+
 if TYPE_CHECKING:
     from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
 
@@ -74,6 +76,31 @@ def _list_of_str(values) -> list[str]:
     return [_numeric_str(v) for v in values]
 
 
+_EIGENVALUE_STR_DIGITS = 100  # eigenvalues are stored at high precision for reconstruction
+
+
+def _eigenvalue_str(value, n: int = _EIGENVALUE_STR_DIGITS) -> str:
+    """High-precision numeric string of an eigenvalue for storage.
+
+    Evaluates the (possibly symbolic) eigenvalue to *n* digits — resolving any
+    radical cancellation via SymPy's adaptive ``evalf`` — and applies a *true*
+    zero filter: a value that is really ``x + 0i`` is collapsed to ``x`` (only an
+    exactly-zero imaginary part is dropped; magnitudes are never chopped).
+    """
+    try:
+        v = sp.sympify(value).evalf(n)
+        if sp.im(v) == 0:
+            v = sp.re(v)
+        return str(v)
+    except Exception:
+        return str(value)
+
+
+def _list_of_eigenvalue_str(values) -> list[str]:
+    """High-precision eigenvalue strings (see :func:`_eigenvalue_str`)."""
+    return [_eigenvalue_str(v) for v in values]
+
+
 def _list_of_int(values) -> list[int]:
     """Coerce each element to ``int`` — used for integer-valued sequences."""
     return [int(v) for v in values]
@@ -82,6 +109,22 @@ def _list_of_int(values) -> list[int]:
 def _list_of_float(values) -> list[float]:
     """Coerce each element to ``float`` — used for numeric sequences."""
     return [float(v) for v in values]
+
+
+def _serialize_delta_prediction(pred) -> Optional[dict]:
+    """Convert a delta_prediction dict to a JSON-safe form.
+
+    The handler returns ``{"predicted_delta": float, "lambda_1": sympy_expr,
+    "lambda_2": sympy_expr}`` or ``None``.  Eigenvalue expressions are
+    stringified with limited precision via :func:`_numeric_str`.
+    """
+    if pred is None:
+        return None
+    return {
+        "predicted_delta": float(pred["predicted_delta"]),
+        "lambda_1": _eigenvalue_str(pred["lambda_1"]),
+        "lambda_2": _eigenvalue_str(pred["lambda_2"]),
+    }
 
 
 def _pq_jsonsafe_list(pq) -> list | None:
@@ -114,12 +157,11 @@ AttributeComputer = Callable[["TrajectoryAttributesHandler"], Any]
 ATTRIBUTE_REGISTRY: Dict[str, AttributeComputer] = {
     # ----- Tier-1 — core scalars (cheap: walk-based), computed on the main thread. -----
     "delta":                       lambda h: float(h.delta()),
-    "limit":                       lambda h: float(h.limit()),
     "identified":                  lambda h: bool(h.identified()),
     "p_vector":                    lambda h: _pq_jsonsafe_list(h.p_vector()),
     "q_vector":                    lambda h: _pq_jsonsafe_list(h.q_vector()),
     "traj_size":                   lambda h: int(h.traj_size()),
-    "limit_rational":              lambda h: str(h.limit_rational()),
+    "projection_column":           lambda h: _opt_int(h.projection_column()),
 
     # ----- Tier-2 — heavier numerical / spectral / recurrence attributes. -----
     # ``order`` / ``formula`` / ``relation`` / ``coeff_degrees`` / ``recurrence_coeffs``
@@ -130,17 +172,23 @@ ATTRIBUTE_REGISTRY: Dict[str, AttributeComputer] = {
     "coeff_degrees":               lambda h: _list_of_int(h.coeff_degrees()),
     "relation":                    lambda h: _list_of_str(h.relation()),
     "recurrence_coeffs":           lambda h: _list_of_str(h.recurrence_coeffs()),
-    "eigenvalues":                 lambda h: _list_of_str(h.sorted_eigenvalues()),
-    "eigenvalue_errors":           lambda h: _list_of_str(h.eigenvalue_errors()),
+    "eigenvalues":                 lambda h: _list_of_eigenvalue_str(h.sorted_eigenvalues()),
+    "eigenvalue_errors":           lambda h: _list_of_float(h.eigenvalue_errors()),
     "spectral_gap":                lambda h: _opt_float(h.spectral_gap()),
     "companion_coboundary_rank":   lambda h: int(h.companion_coboundary_rank()),
-    "asymptotics":                 lambda h: _list_of_str(h.asymptotics()),
-    "convergence_class":           lambda h: h.convergence_class(),
-    "gcd_slope": lambda h: _opt_float(h.gcd_slope()),
-    "kamidelta":                   lambda h: _list_of_str(h.kamidelta()),
+    # "asymptotics":                 lambda h: _list_of_str(h.asymptotics()),
+    "gcd_slope":                   lambda h: _opt_float(h.gcd_slope()),
+    "delta_prediction":            lambda h: _serialize_delta_prediction(h.delta_prediction()),
+    "error_formula_ratio":         lambda h: _opt_float(h.error_formula_ratio()),
+    # Eigenvalue-based digit predictions (per-step and at the walk depth).
+    "approximated_digits_per_step": lambda h: _opt_float(h.approximated_digits_per_step()),
+    "digits_approximation":        lambda h: _opt_float(h.digits_approximation()),
 
     # ----- Tier-3 — symbolic / expensive attributes (post-process). -----
-    "precision_at":                lambda h: int(h.precision_at()),
+    "precision_at":                lambda h: _opt_int(h.precision_at()),
+    # Walk-based correct digits of p/q vs. the constant, and its per-step average.
+    "digits_computed":             lambda h: _opt_float(h.digits_computed()),
+    "avg_computed_digits_per_step": lambda h: _opt_float(h.avg_computed_digits_per_step()),
     # ``delta_sequence`` defaults to the handler's full walk depth (often
     # 1500) and compares each step against the constant at 50 000 digits —
     # that is hours per trajectory in practice.  Cap the registry-driven
@@ -152,7 +200,6 @@ ATTRIBUTE_REGISTRY: Dict[str, AttributeComputer] = {
         h.delta_sequence(min(h._depth, 100))
     ),
     "digits_per_step":             lambda h: [[int(k), int(d)] for k, d in h.digits_per_step()],
-    "asymptotic_digits_per_step":  lambda h: _opt_float(h.asymptotic_digits_per_step()),
 }
 
 
@@ -230,17 +277,15 @@ def attribute_name(spec: AttributeSpec) -> str:
 def _resolve_predicate(pred: Union[str, Predicate]) -> Predicate:
     """Resolve a predicate reference to a callable.
 
-    Strings are looked up in :data:`PREDICATES`; callables are returned
-    as-is.  Raises ``KeyError`` on unknown names so misspelled configs fail
-    loudly.
+    Delegates to :func:`dreamer.utils.storage.predicate_specs.parse_predicate_spec`,
+    which understands the declarative grammar (``"max_degree below N"``,
+    ``"top N highest <metric> in shard|cmf"``) and falls back to the named
+    :data:`PREDICATES` registry for plain keys (``"if_identified"``, ...).
+    Callables are returned as-is.  Raises ``KeyError`` on unknown names/metrics
+    so misspelled configs fail loudly.
     """
-    if callable(pred):
-        return pred
-    if pred not in PREDICATES:
-        raise KeyError(
-            f"Unknown predicate '{pred}'. Registered: {sorted(PREDICATES)}"
-        )
-    return PREDICATES[pred]
+    from dreamer.utils.storage.predicate_specs import parse_predicate_spec
+    return parse_predicate_spec(pred)
 
 
 def _predicate_arity(pred: Predicate) -> int:
@@ -290,6 +335,7 @@ def compute_attributes(
     specs,
     on_error: str = "store",
     context: Optional[dict] = None,
+    watchdog_detail: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Compute many attributes and collect them into a dict keyed by name.
 
@@ -307,7 +353,7 @@ def compute_attributes(
           (e.g. ``"if_identified"``, ``"if_top_n_delta"``).
 
         Mixed lists are supported, so a config can be plain data:
-        ``("delta", "limit", ("eigenvalues", "if_identified"))``.
+        ``("delta", "spectral_gap", ("eigenvalues", "if_identified"))``.
     on_error:
         ``'store'`` — record the exception message under ``<name>_error`` and
         continue (default; lets a single misbehaving attribute not poison the
@@ -317,6 +363,11 @@ def compute_attributes(
         shard-level state into predicates that need it (e.g. the set of
         top-N trajectory ids for an ``if_top_n_delta`` gate).  Single-arg
         predicates ignore it.
+    watchdog_detail:
+        Optional descriptor (e.g. ``"traj_id=… start=… direction=…"``) appended
+        to the per-attribute watchdog warning so a heavy/stuck attribute (e.g.
+        ``asymptotics``) can be traced back to its trajectory.  ``None`` keeps
+        the warning generic.
 
     Returns
     -------
@@ -337,7 +388,14 @@ def compute_attributes(
             continue
 
         try:
-            out[name] = compute_attribute(handler, name)
+            from dreamer.utils.logger import Logger
+            from dreamer.configs.logging import logging_config
+            with Logger.watchdog(
+                f"attribute:{name}",
+                logging_config.WATCHDOG_ATTRIBUTE_SECONDS,
+                detail=watchdog_detail,
+            ):
+                out[name] = compute_attribute(handler, name)
         except Exception as exc:  # pragma: no cover — behaviour driven by tests
             if on_error == "raise":
                 raise

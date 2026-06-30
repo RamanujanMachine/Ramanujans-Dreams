@@ -91,7 +91,7 @@ class ShardDTO:
     dimension: int                          # number of free (non-redundant) variables
     found_constants: List[str]
     # --- optional fields (computed lazily or not yet available) ---
-    interior_point: Optional[Tuple[int, ...]] = None
+    interior_point: Optional[Tuple[int | str, ...]] = None  # str for rational coords (e.g. "7/2")
     orthogonality_defect: Optional[float] = None  # LLL-based; None when fpylll unavailable
 
     def to_json_line(self) -> str:
@@ -135,9 +135,6 @@ class TrajectoryDTO:
     start_point: Tuple[int | str, ...]
     direction: Tuple[int | str, ...]
 
-    # Tier-1 base attribute — cheap (uses the walk, not the symbolic recurrence).
-    limit_value: float
-
     # Per-constant attributes — dicts keyed by constant name so that one
     # trajectory record covers all constants searched in this shard.
     # ``delta_estimate``: irrationality measure δ per constant.
@@ -162,6 +159,16 @@ class TrajectoryDTO:
     # recomputed on next encounter).
     walk_depth: Optional[int] = None
     config_fingerprint: Optional[str] = None
+
+    # Tier-1 — the walk-matrix column index the p/q vectors were projected onto
+    # (see ``TrajectoryAttributesHandler._select_projection_column``).  Stored so
+    # the exact p/q reconstruction can be reproduced later: the same column must
+    # be used as the ``Limit.final_projection`` to recover the identical
+    # p_n / q_n sequence.  This is geometry (the first normalisable walk column),
+    # selected independently of identification, so it can be set even when the
+    # trajectory was not identified.  ``None`` only when the walk failed / no
+    # column was normalisable, or on legacy records.
+    projection_column: Optional[int] = None
 
     # Recurrence attributes — **Tier-2 / optional**.  Building the symbolic
     # ``LinearRecurrence`` (companion matrix + relation string) dominates the
@@ -196,7 +203,6 @@ class TrajectoryDTO:
             shard_id=d["shard_id"],
             start_point=tuple(d["start_point"]),
             direction=tuple(d["direction"]),
-            limit_value=d["limit_value"],
             delta_estimate=d.get("delta_estimate") or {},
             p_vector=_restore_pq(d.get("p_vector")),
             q_vector=_restore_pq(d.get("q_vector")),
@@ -204,6 +210,7 @@ class TrajectoryDTO:
             walk_type=int(d.get("walk_type", 1)),
             walk_depth=d.get("walk_depth"),
             config_fingerprint=d.get("config_fingerprint"),
+            projection_column=d.get("projection_column"),
             recurrence_relation=d.get("recurrence_relation"),
             recurrence_order=d.get("recurrence_order"),
             extended_metrics=d.get("extended_metrics", {}),

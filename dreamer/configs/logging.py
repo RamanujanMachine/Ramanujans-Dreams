@@ -32,6 +32,18 @@ class LogConfig(Configurable):
         default=False,
         metadata={"description": "Include stack traces for debug-level diagnostic logs."},
     )
+    WATCHDOG_ENABLED: bool = field(
+        default=True,
+        metadata={"description": "Enable background watchdog warnings for procedures that run past their threshold (hang detection)."},
+    )
+    WATCHDOG_TRAJECTORY_SECONDS: float = field(
+        default=300.0,
+        metadata={"description": "Seconds after which a still-running per-trajectory Tier-1 compute (walk + LIReC identify + delta) triggers a watchdog warning."},
+    )
+    WATCHDOG_ATTRIBUTE_SECONDS: float = field(
+        default=120.0,
+        metadata={"description": "Seconds after which a still-running single trajectory attribute (e.g. asymptotics) triggers a watchdog warning."},
+    )
 
 
 logging_config: LogConfig = LogConfig()

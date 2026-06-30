@@ -11,6 +11,8 @@ Coverage:
   - Per-constant module orchestration + NoInitialPopulation catch
 """
 
+import random
+
 import numpy as np
 import pytest
 import sympy as sp
@@ -103,14 +105,15 @@ class TestGeneticOperators:
     def test_crossover_child_length(self):
         z1 = np.array([1, 2, 3, 4], dtype=np.int64)
         z2 = np.array([5, 6, 7, 8], dtype=np.int64)
-        c1, c2 = _crossover(z1, z2)
+        c1, c2 = _crossover(z1, z2, random.Random(0))
         assert len(c1) == 4 and len(c2) == 4
 
     def test_crossover_genes_come_from_parents(self):
         z1 = np.array([1, 2, 3], dtype=np.int64)
         z2 = np.array([10, 20, 30], dtype=np.int64)
+        rng = random.Random(0)
         for _ in range(20):
-            c1, c2 = _crossover(z1, z2)
+            c1, c2 = _crossover(z1, z2, rng)
             for i in range(3):
                 assert c1[i] in (z1[i], z2[i])
                 assert c2[i] in (z1[i], z2[i])
@@ -118,31 +121,31 @@ class TestGeneticOperators:
     def test_crossover_trivial_dim(self):
         z1 = np.array([1], dtype=np.int64)
         z2 = np.array([2], dtype=np.int64)
-        c1, c2 = _crossover(z1, z2)
+        c1, c2 = _crossover(z1, z2, random.Random(0))
         # Single-element — returns copies.
         assert list(c1) == [1] and list(c2) == [2]
 
     def test_mutate_refine_doubles(self):
-        import random as rnd
-        rnd.seed(0)
         z = np.array([3, 4], dtype=np.int64)
         # Force refine mode always.
-        result = _mutate(z, max_step=5, mutation_prob=0.5, refine_prob=1.0, refine_coord_prob=0.0)
+        result = _mutate(z, max_step=5, mutation_prob=0.5, refine_prob=1.0,
+                         refine_coord_prob=0.0, rng=random.Random(0))
         # Guaranteed change applied to at least one coord.
         assert np.any(result != z)
 
     def test_mutate_coarse_bounded(self):
-        import random as rnd
-        rnd.seed(42)
         z = np.array([0, 0, 0], dtype=np.int64)
+        rng = random.Random(42)
         for _ in range(50):
-            r = _mutate(z, max_step=3, mutation_prob=1.0, refine_prob=0.0, refine_coord_prob=0.0)
+            r = _mutate(z, max_step=3, mutation_prob=1.0, refine_prob=0.0,
+                        refine_coord_prob=0.0, rng=rng)
             assert all(abs(int(v)) <= 3 for v in r)
 
     def test_mutate_no_reduction(self):
         """Mutation must NOT GCD-reduce — raw integer vectors."""
         z = np.array([6, 0], dtype=np.int64)
-        result = _mutate(z, max_step=1, mutation_prob=0.0, refine_prob=1.0, refine_coord_prob=1.0)
+        result = _mutate(z, max_step=1, mutation_prob=0.0, refine_prob=1.0,
+                         refine_coord_prob=1.0, rng=random.Random(0))
         # 2*[6,0] = [12,0], then each coord gets ±1 → no GCD reduction.
         assert result[0] in (11, 12, 13)
 
@@ -245,7 +248,7 @@ class TestGALoop:
         method = GeneticSearch(whole_space_shard, e, use_LIReC=False)
         init_pop = [np.array([i, 0], dtype=np.int64) for i in range(1, 5)]
         monkeypatch.setattr(method, "_init_population",
-                            lambda g, ps, sid, c: init_pop[:ps])
+                            lambda g, ps, sid, c, initial_trajectory=None: init_pop[:ps])
         monkeypatch.setattr(method, "_eval_genome", counting_eval)
 
         method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",
@@ -274,7 +277,7 @@ class TestGALoop:
         method = GeneticSearch(whole_space_shard, e, use_LIReC=False)
         init_pop = [np.array([1, 0], dtype=np.int64), np.array([0, 1], dtype=np.int64)]
         monkeypatch.setattr(method, "_init_population",
-                            lambda g, ps, sid, c: init_pop[:ps])
+                            lambda g, ps, sid, c, initial_trajectory=None: init_pop[:ps])
         monkeypatch.setattr(method, "_eval_genome", constant_eval)
 
         method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",
@@ -310,7 +313,7 @@ class TestGALoop:
 
         method = GeneticSearch(whole_space_shard, e, use_LIReC=False)
         monkeypatch.setattr(method, "_init_population",
-                            lambda g, ps, sid, c: init_pop[:ps])
+                            lambda g, ps, sid, c, initial_trajectory=None: init_pop[:ps])
         monkeypatch.setattr(method, "_eval_genome", tracking_eval)
 
         method.run(constant=e, cmf_id="", shard_id="t", shard_encoding_str="",

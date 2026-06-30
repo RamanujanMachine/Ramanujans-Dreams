@@ -49,6 +49,16 @@ class SystemConfig(Configurable):
         default=None,
         metadata={"description": "Optional directory path for persisting analyzed shard priorities."},
     )
+    EXPORT_GRAPHS: str = field(
+        default='graphs.tempdir',
+        metadata={
+            "description": (
+                "Directory the post-process graphing stage writes figures and "
+                "tables to (delta-sequence plots, delta histograms, bumpiness "
+                "tables). Only used when GraphConfig enables at least one graph."
+            )
+        },
+    )
     EXPORT_SEARCH_RESULTS: str = field(
         default='search_results.tempdir',
         metadata={"description": "Directory used by search stage to save discovered results and metadata."},
@@ -61,10 +71,12 @@ class SystemConfig(Configurable):
         default='analysis_results.tempdir',
         metadata={
             "description": (
-                "Legacy directory for the analyzer's shard-level audit trail. "
-                "Unused since the analyzer was switched to per-trajectory dedup "
-                "and writes directly to EXPORT_SEARCH_RESULTS. Retained for "
-                "backward compatibility / ad-hoc tools."
+                "Directory for the analysis stage's separate per-trajectory store, "
+                "used only when analysis.STORE_TRAJECTORIES_SEPARATELY is True. "
+                "Each analysed shard is written to <shard_id>.jsonl here instead of "
+                "in EXPORT_SEARCH_RESULTS. When the flag is False (default) the "
+                "analyzer writes directly to EXPORT_SEARCH_RESULTS and this path is "
+                "unused."
             )
         },
     )
@@ -86,7 +98,7 @@ class SystemConfig(Configurable):
         metadata={"description": "Number of background worker processes that compute Tier-2 trajectory attributes during search. When Tier-2 is active these (plus 1 writer/sink) are the cores reserved from TOTAL_CORES."},
     )
     WRITER_BATCH_SIZE: int = field(
-        default=100,
+        default=50,
         metadata={
             "description": (
                 "Number of records the JSONL writer accumulates before issuing "

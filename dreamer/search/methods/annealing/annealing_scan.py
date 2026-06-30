@@ -21,7 +21,6 @@ Algorithm is faithful to ``context/resources/code/algos/annealing.py`` and
 """
 
 import math
-import random
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -32,7 +31,9 @@ from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
+from dreamer.search.methods.flatland.seed import resolve_injected_seed
 from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
+from dreamer.utils.rand import derive_py_random
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
@@ -123,6 +124,7 @@ class SimulatedAnnealingSearch(SearchMethod):
         geom: Optional[FlatlandGeometry] = None,
         start=None,
         pool=None,
+        initial_trajectory: Optional[Position] = None,
     ) -> None:
         """
         Run SA for a single constant, emitting Tier-1 DTOs to *sink*.
@@ -149,10 +151,23 @@ class SimulatedAnnealingSearch(SearchMethod):
         :param pool: Optional persistent per-shard :class:`multiprocessing.Pool`;
             each step's neighbour batch is walked across worker processes.  ``None``
             evaluates serially.
+        :param initial_trajectory: Optional user-supplied seed direction.  Defaults
+            to the shard's ``selected_trajectory``.  When valid (a non-zero recession
+            direction) it seeds SA instead of the reservoir (bypassing the
+            valid-neighbour guard — the user chose it explicitly; the reseed/stop
+            logic handles an immediate stall).  An invalid one falls back to
+            reservoir seeding (see :func:`resolve_injected_seed`).
         :raises NoInitialIdentification: if no reservoir seed identifies *constant*.
         """
         if handler_cache is None:
             handler_cache = {}
+
+        # Per-(shard, method, constant) reproducible RNG for the Metropolis accept.
+        # Same GLOBAL_SEED + shard + constant => identical SA trajectory; different
+        # shards/constants get independent streams.  Nondeterministic when
+        # GLOBAL_SEED is None.  (Neighbour generation is deterministic; the seed
+        # reservoir comes from the already-seeded sampler.)
+        self._rng_py = derive_py_random(shard_id, "annealing", str(constant))
 
         shard: Shard = self.space
         if geom is None:
@@ -173,24 +188,33 @@ class SimulatedAnnealingSearch(SearchMethod):
             handler_cache=handler_cache,
         )
 
-        cur_z = self._select_seed(geom, eval_ctx, shard_id, constant)
-        cur_delta, _ = evaluate_in_flatland(cur_z, **eval_ctx)
-        best_delta = cur_delta
-
         T0 = search_config.ANNEAL_T0
         Tmin = search_config.ANNEAL_TMIN
         schedule = search_config.ANNEAL_SCHEDULE
         max_iters = search_config.ANNEAL_MAX_ITERS
         max_doublings = search_config.ANNEAL_MAX_DOUBLINGS
         max_total_steps = search_config.ANNEAL_MAX_TOTAL_STEPS
+        max_reseeds = search_config.ANNEAL_MAX_RESEEDS
         tabu_size = search_config.ANNEAL_TABU_SIZE
-        max_traj_len = search_config.ANNEAL_MAX_TRAJ_LEN
-        traj_norm = search_config.ANNEAL_TRAJ_NORM
+        max_traj_len = search_config.SEARCH_MAX_TRAJ_LEN
+        traj_norm_name = search_config.SEARCH_TRAJ_NORM
+
+        if initial_trajectory is None:
+            initial_trajectory = getattr(shard, "selected_trajectory", None)
+        cur_z = resolve_injected_seed(
+            geom, initial_trajectory, shard_id, constant,
+            identify_fn=lambda z: evaluate_in_flatland(z, **eval_ctx)[1],
+        )
+        if cur_z is None:
+            cur_z = self._select_seed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
+        cur_delta, _ = evaluate_in_flatland(cur_z, **eval_ctx)
+        best_delta = cur_delta
 
         T = T0
         iter_left = max_iters
         doubling_count = 0
         total_steps = 0
+        consecutive_failed_reseeds = 0
 
         # Tabu: bounded recent-position list (reference update_old_list_neighs).
         old_pos_list: List[bytes] = [cur_z.tobytes()]
@@ -212,7 +236,7 @@ class SimulatedAnnealingSearch(SearchMethod):
                     continue
                 if cand.tobytes() in old_pos_list:
                     continue
-                if geom.traj_norm(cand, traj_norm) > max_traj_len:
+                if geom.traj_norm(cand, traj_norm_name) > max_traj_len:
                     continue
                 neighbours.append(cand)
 
@@ -220,14 +244,24 @@ class SimulatedAnnealingSearch(SearchMethod):
                 # No valid neighbour: double and continue (reference adaptive scaling).
                 if doubling_count >= max_doublings:
                     doubling_count = 0
-                    fresh = self._try_reseed(geom, eval_ctx, shard_id, constant)
+                    fresh = self._try_reseed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
                     if fresh is not None:
+                        consecutive_failed_reseeds = 0
                         cur_z = fresh
                         cur_delta, _ = evaluate_in_flatland(cur_z, **eval_ctx)
                         # Full tabu clear on reseed: old region's history is
                         # irrelevant to the new starting point and would otherwise
                         # block all of its neighbours (tabu deadlock).
                         old_pos_list = [cur_z.tobytes()]
+                    else:
+                        consecutive_failed_reseeds += 1
+                        if consecutive_failed_reseeds >= max_reseeds:
+                            Logger(
+                                f"Simulated Annealing: {max_reseeds} consecutive failed reseeds "
+                                f"in shard {shard_id} — terminating early.",
+                                Logger.Levels.debug,
+                            ).log()
+                            break
                 else:
                     cur_z = cur_z * 2  # no GCD reduce
                     doubling_count += 1
@@ -263,7 +297,7 @@ class SimulatedAnnealingSearch(SearchMethod):
                 iter_left -= 1
             else:
                 diff = new_delta - cur_delta
-                if random.random() < math.exp(diff / T):
+                if self._rng_py.random() < math.exp(diff / T):
                     cur_z = new_z
                     cur_delta = new_delta
                     accepted = True
@@ -279,12 +313,22 @@ class SimulatedAnnealingSearch(SearchMethod):
                 # Adaptive scaling: double on rejection (reference).
                 if doubling_count >= max_doublings:
                     doubling_count = 0
-                    fresh = self._try_reseed(geom, eval_ctx, shard_id, constant)
+                    fresh = self._try_reseed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
                     if fresh is not None:
+                        consecutive_failed_reseeds = 0
                         cur_z = fresh
                         cur_delta, _ = evaluate_in_flatland(cur_z, **eval_ctx)
                         # Full tabu clear on reseed (same reason as above).
                         old_pos_list = [cur_z.tobytes()]
+                    else:
+                        consecutive_failed_reseeds += 1
+                        if consecutive_failed_reseeds >= max_reseeds:
+                            Logger(
+                                f"Simulated Annealing: {max_reseeds} consecutive failed reseeds "
+                                f"in shard {shard_id} — terminating early.",
+                                Logger.Levels.debug,
+                            ).log()
+                            break
                 else:
                     cur_z = cur_z * 2  # no GCD reduce
                     doubling_count += 1
@@ -298,15 +342,26 @@ class SimulatedAnnealingSearch(SearchMethod):
         eval_ctx: dict,
         shard_id: str,
         constant: Constant,
+        max_traj_len: float,
+        traj_norm_name: str,
     ) -> np.ndarray:
         """
-        Pick the first reservoir trajectory (ascending L2 norm) that identifies.
+        Pick the first reservoir trajectory (ascending L2 norm) that identifies
+        *and* has at least one valid neighbour within the trajectory-length cap.
+
+        A seed whose entire neighbourhood is filtered by the traj-len cap would
+        immediately enter the no-neighbours stall loop (doubling → reseed → repeat),
+        causing the 12-hour stall.  Skipping such seeds here ensures every accepted
+        seed can actually make a step.
 
         :param geom: Flatland geometry for the current shard.
         :param eval_ctx: Evaluation context dict (forwarded to evaluate_in_flatland).
         :param shard_id: Shard identifier used in the exception message.
         :param constant: The constant to identify.
-        :raises NoInitialIdentification: if no reservoir trajectory identifies *constant*.
+        :param max_traj_len: Maximum allowed trajectory norm (``SEARCH_MAX_TRAJ_LEN``).
+        :param traj_norm_name: Which norm to use (``SEARCH_TRAJ_NORM``).
+        :raises NoInitialIdentification: if no reservoir trajectory identifies *constant*
+            while also having a reachable neighbourhood.
         :return: Flatland coordinate vector of the seed trajectory.
         """
         trajectories = ShardSamplingOrchestrator(self.space).sample_trajectories(
@@ -322,6 +377,14 @@ class SimulatedAnnealingSearch(SearchMethod):
             z = geom.to_flatland(t)
             if not np.any(z):
                 continue
+            # Skip seeds whose entire neighbourhood is outside the traj-len cap —
+            # they would immediately enter the no-neighbours stall cycle.
+            has_valid_neighbour = any(
+                geom.is_inside(nb) and geom.traj_norm(nb, traj_norm_name) <= max_traj_len
+                for nb in geom.perturbations(z, reduce=False)
+            )
+            if not has_valid_neighbour:
+                continue
             _, identified = evaluate_in_flatland(z, **eval_ctx)
             if identified:
                 return z
@@ -334,6 +397,8 @@ class SimulatedAnnealingSearch(SearchMethod):
         eval_ctx: dict,
         shard_id: str,
         constant: Constant,
+        max_traj_len: float,
+        traj_norm_name: str,
     ) -> Optional[np.ndarray]:
         """
         Attempt to find a fresh seed when the doubling budget is exhausted.
@@ -342,9 +407,11 @@ class SimulatedAnnealingSearch(SearchMethod):
         :param eval_ctx: Evaluation context dict.
         :param shard_id: Shard identifier.
         :param constant: The constant to identify.
+        :param max_traj_len: Maximum allowed trajectory norm.
+        :param traj_norm_name: Which norm to use.
         :return: New flatland seed vector, or ``None`` if no identifying trajectory found.
         """
         try:
-            return self._select_seed(geom, eval_ctx, shard_id, constant)
+            return self._select_seed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
         except NoInitialIdentification:
             return None

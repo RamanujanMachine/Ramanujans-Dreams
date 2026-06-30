@@ -1,13 +1,68 @@
 # Ramanujan's Dreams
 Ramanujan's Dreams is a modular system for advanced search in CMFs.
 
+## Table of Contents
+
+1. [Installation](#installation) - Download and setup your runtime environment.
+2. [Structure](#structure)  
+    2.1. [System](#system-structure) - Overview of the system's design.  
+    2.2. [Project](#project-structure) - Structure of the repository. 
+3. [Usage](#usage)  
+    3.1. [Configuration](#configuration) - How to configure the system and explore options.  
+    3.2. [Run](#run) - Running the system, simple example.
+4. [Contribution](#contribution) - How to customize the system and add your own modules.
+5. [License](#license)
+
 ## Installation
-* This project is supported fully only on Mac-OS and Linux.  
+* This project is supported only on Mac-OS and Linux.  
 If you are a Windows user, it is recommended to use [Windows Subsystem for Linux](https://learn.microsoft.com/en-us/windows/wsl/install) (WSL).
-* Install via:
+* Install the package via:
     ```bash
     pip install git+https://github.com/UriKH/RamanujansDreams.git
     ```
+
+**Note:** If you are developing using an IDE the output might look a bit off due to terminal default configurations.  
+If you are a PyCharm user, an easy fix is:
+1. Select: `Run -> Edit Configurations -> Modify Options`
+2. And then: `Emulate terminal in output console`
+
+## Structure
+
+### System Structure
+The system is a pipeline composed of 5 stages:
+1. Loading - storing and retrieving mapping from a constant to the inspiration functions.
+2. Extraction - extraction of the searchables from the CMF of the inspiration functions.
+3. Analysis - analysis of each of the CMFs i.e., filtering and prioritization of shards, borders, etc. 
+4. Search - deep and full search within the searchable spaces. This stage (will) contain further logic and particularly ascend logic.
+5. Post-process (optional) - computes expensive per-trajectory attributes for the already-found trajectories, and (optionally) renders graphs/tables. See [Post-processing configuration](#post-processing-configuration).
+
+### Project Structure
+
+```
+dreamer    --> The system itself
+examples   --> Examples of how to run and templates for customized modules
+data_utils --> Results exploration tools
+graphs     --> Utility scripts for analysis of 3D CMFs and statistics
+tests      --> System tests
+```
+
+#### Where to read more
+
+Each pipeline stage has its own README explaining what it does and what its
+directory contains. Start with the one matching what you're working on:
+
+| Stage | README |
+|-------|--------|
+| Loading | [`dreamer/loading/`](dreamer/loading/README.md) |
+| Extraction | [`dreamer/extraction/`](dreamer/extraction/README.md) |
+| Analysis | [`dreamer/analysis/`](dreamer/analysis/README.md) |
+| Search | [`dreamer/search/`](dreamer/search/README.md) |
+| Post-process | [`dreamer/post_process/`](dreamer/post_process/README.md) |
+| Graphing (post-process renderer) | [`dreamer/graphing/`](dreamer/graphing/README.md) |
+| **All configuration** | [`dreamer/configs/`](dreamer/configs/README.md) |
+
+To extend the system with your own modules, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 
 ## Usage
 Interaction with the system is via the System class (`from dreamer import System`) and using the config files.
@@ -15,25 +70,21 @@ Interaction with the system is via the System class (`from dreamer import System
 [//]: # (Common usage example with detailed instructions in [colab]&#40;https://colab.research.google.com/drive/1t6qo0LBBHTHTQyojXH566cNJRBhziN_3?usp=sharing&#41;.  )
 [//]: # (**Note**: The Colab might be slow and unstable as it's running online. For stable run download the colab as a Jupyter notebook.)
 
-### Structure:
-The system is composed of 4 stages:
-1. Loading - storing and retrieving mapping from a constant to the inspiration functions.
-2. Extraction - extraction of the searchables from the CMF of the inspiration functions.
-3. Analysis - analysis of each of the CMFs i.e., filtering and prioritization of shards, borders, etc. 
-4. Search - deep and full search within the searchable spaces. This stage (will) contain further logic and particularly ascend logic.
-
 [//]: # (**Note:** each module could be executed independently of the others. In its current version, the system only wraps the modules together and connects them. )
 
 ### Configuration
-Configuration management is done using distinct configuration categories which are all accessed via a global configuration manager:
+Configuration management is done using distinct configuration **categories**, all accessed via a single global configuration manager. Each category is a flat group of named settings; changing a setting never requires importing the category object directly.
+
 ```python
 from dreamer import config
 
 # Access different categories of configurations
-config.extraction.<CONFIG> 
-config.analysis.<CONFIG> 
-config.search.<CONFIG>
-config.system.<CONFIG>
+config.system.<CONFIG>        # paths, core budget, export directories
+config.extraction.<CONFIG>    # shard extraction strategy / sampling
+config.analysis.<CONFIG>      # shard filtering / prioritization
+config.search.<CONFIG>        # deep search + Tier-2 attributes
+config.post_process.<CONFIG>  # Tier-3 attributes (see below)
+config.graph.<CONFIG>         # post-process graphing (see below)
 config.logging.<CONFIG>
 config.database.<CONFIG>
 
@@ -44,7 +95,7 @@ config.configure(
     ...
 )
 
-# Checkout possible configurations using the terminal 
+# Checkout possible configurations (with descriptions) using the terminal
 config.<CATEGORY>.display()
 ```
 
@@ -52,6 +103,41 @@ There are a few important configurations you might want to change:
 - `config.search.NUM_TRAJECTORIES_FROM_DIM` - a lambda function of the form `lambda dim: int(...)` which computes the number of trajectories to be generated from a given dimension.
 - `config.analysis.NUM_TRAJECTORIES_FROM_DIM` - same configuration as above but for analysis stage.
 - `config.analysis.IDENTIFY_THRESHOLD` - "what fraction of the shard was identified as containing the constant?"
+
+> For the **full, annotated list of every configuration category and field**,
+> see the [configuration README](dreamer/configs/README.md). In a running
+> session, `config.<category>.display()` prints the live values and descriptions.
+
+> **How attributes are stored.** Every searched trajectory is one JSON line in
+> `<EXPORT_SEARCH_RESULTS>/<shard_id>.jsonl`. Cheap **Tier-1** values
+> (`delta`, `identified`, `limit`, …) are always written. Heavier **Tier-2**
+> attributes (`eigenvalues`, `spectral_gap`, `convergence_class`, …) are
+> computed during Search when listed in `config.search.TIER2_ATTRIBUTES`, and
+> land in each record's open `extended_metrics` dict. The optional **post-process
+> stage** below adds the most expensive **Tier-3** attributes afterwards.
+
+### Post-processing configuration
+
+The post-process stage (`post_process.Tier3PostProcessModV1`, passed as
+`post_processor=` to `System`) runs **once after Search** and has two
+independent jobs, each off by default:
+
+1. **Tier-3 attributes** — `config.post_process.TIER3_ATTRIBUTES`: the most
+   expensive per-trajectory attributes, each optionally restricted to a subset
+   of trajectories via a predicate (e.g. `if_identified`, or
+   `top 10 highest delta in shard`).
+2. **Graphing** — `config.graph`: δ-sequence plots, δ histograms, and a per-shard
+   δ-roughness ("bumpiness") table, written under `config.system.EXPORT_GRAPHS`.
+
+It reads the existing JSONL, computes only what's missing, and appends *patch*
+records (it never rewrites your data). An empty `TIER3_ATTRIBUTES` **and** a
+disabled `graph` config make the whole stage a no-op.
+
+The full attribute/predicate grammar, the rankable metrics, and the graph
+parameters are documented in the
+[configuration README](dreamer/configs/README.md#post_process) and the
+[post-process](dreamer/post_process/README.md) / [graphing](dreamer/graphing/README.md)
+stage READMEs.
 
 [//]: # (Each `<X>_config` contains the configurations for this section. You can access those directly in order to view the current values.  )
 [//]: # (In order to change them you can use: `<X>_config.<property> = <new-value>`  )
@@ -63,19 +149,18 @@ A classic run would look something like this:
 
 ```python
 from dreamer import System, config, log
-from dreamer import analysis, search, extraction, loading
+from dreamer import analysis, search, extraction, loading, post_process
 
 # Optional reconfigure
 config.configure(...)
 
-my_system = System(
-    function_sources=[loading.pFq(log(2), 2, 1, -1)],  # Set up the loading stage - provide inspiration functions
-    extractor=extraction.extractor.ShardExtractorMod,  # Choose an extraction module
-    analyzers=[analysis.AnalyzerModV1],  # Choose an analysis module(s)
-    searcher=search.SearcherModV1  # Choose the search module
-)
-
-my_system.run(constants=[log(2)])
+System(
+    function_sources=[loading.pFq(log(2), 2, 1, -1)],    # Set up the loading stage - provide inspiration functions
+    extractor=extraction.extractor.ShardExtractorMod,    # Choose an extraction module
+    analyzers=[analysis.AnalyzerModV1],                  # Choose an analysis module(s)
+    searcher=search.SearcherModV1,                       # Choose the search module
+    post_processor=post_process.Tier3PostProcessModV1,   # Optional: Tier-3 attributes + graphs (see Post-processing configuration)
+).run(constants=[log(2)])
 ```
 
 Advanced options are:
@@ -83,12 +168,6 @@ Advanced options are:
 * Using pickled inspiration function objects from past runs as inspiration functions source.
 * Using pickled past analysis results as input to the analysis stage.
 
-### Terminal Setup
-
-If you are a PyCharm user, the output might look a bit off due to `tqdm` default configurations.  
-To make sure the output console looks right:
-1. Enter: `Run > Edit Configurations > Modify Options`
-2. Select: `Emulate terminal in output console`
 
 [//]: # (#### Notes: )
 [//]: # (- When loading inspiration functions, you can use formerly computed CMFs using pickle files &#40;might be unstable&#41;, maunally list the inspiration functions or using a DB &#40;instructions below&#41;.)

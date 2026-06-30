@@ -616,9 +616,14 @@ class System:
         # and compute only the identified constants per shard.
         self.searcher(priorities, sys_config.USE_LIReC).execute()
 
-        # Print best delta for each constant by scanning the flat JSONL dir.
+        # Print best delta for each constant — scoped to *this run's* searched
+        # shards so a previous run on a different CMF (same constant) sharing the
+        # flat results dir cannot bleed its best delta into this report.
         for const in priorities.keys():
-            best_record, best_delta_val = self.__best_trajectory_record(const)
+            run_shard_ids: Set[str] = {
+                derive_cmf_and_shard_ids(s)[1] for s in priorities.get(const, [])
+            }
+            best_record, best_delta_val = self.__best_trajectory_record(const, run_shard_ids)
             if best_record is None:
                 Logger(
                     f'No trajectory results found for "{const.name}"',
@@ -643,14 +648,22 @@ class System:
                     pass
 
     @staticmethod
-    def __best_trajectory_record(const: Constant):
-        """Scan the flat JSONL search-results dir and return the record with the
-        largest ``delta_estimate`` for *const*, plus that delta value.
+    def __best_trajectory_record(const: Constant, shard_ids: Set[str]):
+        """Return the record with the largest ``delta_estimate`` for *const*
+        among **this run's** searched shards, plus that delta value.
 
-        Returns ``(None, None)`` when no JSONL file is found or no record
-        carries a finite delta for this constant.  The JSONL files now live
-        at ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` (no constant subdir)
-        and ``delta_estimate`` is a ``{const_name: float}`` dict.
+        Only the JSONL files ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` for
+        ``shard_id in shard_ids`` are scanned.  ``shard_ids`` must be the set of
+        shard ids searched for *const* in the current run (derived from the
+        ``priorities`` dict).  This scoping is essential: the results directory
+        is flat and **persists across runs**, so a previous run on a different
+        CMF (but the same constant) leaves ``<other_shard_id>.jsonl`` files
+        behind; scanning the whole directory would report that stale run's best
+        delta.  Mirrors how the summary stage scopes to ``this_run_shards``.
+
+        Returns ``(None, None)`` when the dir is missing, no listed shard file
+        exists, or no record carries a finite delta for this constant.
+        ``delta_estimate`` is a ``{const_name: float}`` dict.
         """
         import math as _math
         dir_path = sys_config.EXPORT_SEARCH_RESULTS
@@ -661,10 +674,12 @@ class System:
         best_delta: float = -float('inf')
         best_record = None
 
-        for fname in sorted(os.listdir(dir_path)):
-            if not fname.endswith(jsonl_ext):
+        for shard_id in sorted(shard_ids):
+            fpath = os.path.join(dir_path, f"{shard_id}{jsonl_ext}")
+            if not os.path.isfile(fpath):
+                # Shard produced no JSONL (e.g. no trajectories searched).
                 continue
-            records = Importer.imprt(os.path.join(dir_path, fname))
+            records = Importer.imprt(fpath)
             for record in records:
                 delta_raw = record.get("delta_estimate")
                 if isinstance(delta_raw, dict):
