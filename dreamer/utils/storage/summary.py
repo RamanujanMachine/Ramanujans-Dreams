@@ -84,32 +84,22 @@ class _ShardStats:
         # ``EXPORT_CMFS`` sidecar is available.
         self.interior_point: Optional[Tuple[int, ...]] = None
 
-    def add(self, record: dict, constant_name: Optional[str] = None) -> None:
-        """Accumulate one trajectory record.
+    def add(self, record: dict) -> None:
+        """Accumulate one flat ``(trajectory, constant)`` *record* for this constant.
 
-        *constant_name* indexes the per-constant dict fields (``delta_estimate``,
-        ``identified``, ``objective_value``).  The best trajectory is chosen by the
-        active objective's signed score; the δ-positive count is tracked separately.
+        The best trajectory is chosen by the active objective's signed score; the
+        δ-positive count is tracked separately (δ is always meaningful).
         """
         self.trajectories += 1
-        identified_raw = record.get("identified")
-        if isinstance(identified_raw, dict) and constant_name:
-            identified_val = identified_raw.get(constant_name, False)
-        else:
-            identified_val = identified_raw
-        if bool(identified_val):
+        if bool(record.get("identified")):
             self.identified += 1
 
-        # δ-specific positive count (δ is always present and meaningful).
-        delta_raw = record.get("delta_estimate")
-        if isinstance(delta_raw, dict) and constant_name:
-            delta_raw = delta_raw.get(constant_name)
-        delta = _finite_float(delta_raw)
+        delta = _finite_float(record.get("delta"))
         if delta is not None and delta > 0:
             self.positive_delta += 1
 
         # Best trajectory by the active objective's signed score.
-        scored = score_record(record, constant_name, self.objective_name)
+        scored = score_record(record, self.objective_name)
         if scored is None:
             return
         score, _identified = scored
@@ -118,7 +108,7 @@ class _ShardStats:
         if self.best_score is None or score > self.best_score:
             self.best_score = score
             self.best_value = _finite_float(
-                record_raw_value(record, constant_name, self.objective_name)
+                record_raw_value(record, self.objective_name)
             )
             self.best_trajectory_id = record.get("trajectory_id")
             self.best_start = record.get("start_point")
@@ -266,23 +256,22 @@ def _collect_shard_stats(
             continue
 
         cmf_id = shard_id.rsplit("__", 1)[0] if "__" in shard_id else shard_id
+        # merged: {trajectory_id: {constant: flat_record}}
         merged = load_seen_trajectories(os.path.join(search_results_root, fname))
         if not merged:
             continue
 
-        # Determine which constants appear in this shard's records.
+        # Determine which constants appear in this shard's rows.
         const_names_in_file: Set[str] = set()
-        for record in merged.values():
-            delta = record.get("delta_estimate")
-            if isinstance(delta, dict):
-                const_names_in_file.update(delta.keys())
+        for by_const in merged.values():
+            const_names_in_file.update(by_const.keys())
 
         # If this_run_shards is given, restrict to its constant keys.
         if this_run_shards is not None:
             const_names_in_file = const_names_in_file & set(this_run_shards.keys())
             # Also include constants for which shard_id is listed even if the
-            # JSONL has no record yet for that constant (e.g. analyzed but
-            # threshold not met — will be backfilled as empty below).
+            # JSONL has no row yet for that constant (e.g. analyzed but threshold
+            # not met — will be backfilled as empty below).
             for c_name, ids in this_run_shards.items():
                 if shard_id in ids:
                     const_names_in_file.add(c_name)
@@ -291,8 +280,10 @@ def _collect_shard_stats(
             if this_run_shards is not None and shard_id not in this_run_shards.get(const_name, set()):
                 continue
             stats = _ShardStats(shard_id, cmf_id, const_name, objective_name)
-            for record in merged.values():
-                stats.add(record, constant_name=const_name)
+            for by_const in merged.values():
+                rec = by_const.get(const_name)
+                if rec is not None:
+                    stats.add(rec)
             out[const_name][cmf_id].append(stats)
 
     # Backfill empty rows for extracted-but-not-yet-searched shards.

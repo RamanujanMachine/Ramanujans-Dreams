@@ -75,10 +75,13 @@ def _best_records_for_constant(
     :return: ``(max_score, best_records)``; ``(-inf, [])`` when none qualify.
     """
     candidates: List[Tuple[float, dict]] = []
-    for rec in seen.values():
+    for by_const in seen.values():           # seen: {trajectory_id: {constant: record}}
+        rec = by_const.get(constant_name)
+        if rec is None:
+            continue
         # Rank by the active objective via the shared record scorer; identification
         # stays a hard prerequisite (a record only qualifies when identified).
-        scored = score_record(rec, constant_name, objective_name)
+        scored = score_record(rec, objective_name)
         if scored is None:
             continue
         score, identified = scored

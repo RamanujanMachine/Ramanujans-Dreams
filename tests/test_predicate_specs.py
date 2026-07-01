@@ -117,30 +117,27 @@ class TestIterTopNSelectors:
 
 class TestMetricExtractors:
     def test_delta_metric_reads_per_constant(self):
-        rec = {"delta_estimate": {"pi": 0.5, "log2": 0.2}}
+        # Flat per-constant row: δ is the core ``delta`` column.
+        rec = {"constant": "pi", "delta": 0.5}
         assert delta_metric(rec, "pi") == 0.5
-        assert delta_metric(rec, "log2") == 0.2
-        assert delta_metric(rec, "missing") is None
         assert delta_metric({}, "pi") is None
-        assert delta_metric(rec, None) is None
 
     def test_delta_metric_drops_non_finite(self):
-        rec = {"delta_estimate": {"pi": float("-inf")}}
+        rec = {"constant": "pi", "delta": float("-inf")}
         assert delta_metric(rec, "pi") is None
 
     def test_convergence_rate_reads_stored_value(self):
-        # Single definition: the extractor reads the handler-computed
-        # convergence_rate straight out of extended_metrics (no recomputation).
+        # Single definition: read the handler-computed convergence_rate straight
+        # out of its flat top-level column (no recomputation).
         extractor = METRIC_EXTRACTORS["convergence_rate"]
-        rec = {"extended_metrics": {"convergence_rate": 1.25}}
+        rec = {"convergence_rate": 1.25}
         assert extractor(rec, None) == 1.25
 
     def test_convergence_rate_missing_returns_none(self):
         extractor = METRIC_EXTRACTORS["convergence_rate"]
         assert extractor({"direction": [1, 0]}, None) is None
-        assert extractor({"extended_metrics": {}}, None) is None
-        # Non-finite stored value is dropped like every other _extended_float.
-        assert extractor({"extended_metrics": {"convergence_rate": float("inf")}}, None) is None
+        # Non-finite stored value is dropped like every other numeric column.
+        assert extractor({"convergence_rate": float("inf")}, None) is None
 
     def test_registry_complete(self):
         for name in ("delta", "convergence_rate", "approximated_digits_per_step",

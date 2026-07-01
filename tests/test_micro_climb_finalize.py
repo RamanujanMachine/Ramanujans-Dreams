@@ -52,15 +52,26 @@ def whole_space_shard(simple_cmf, symbols):
     return Shard(simple_cmf, e, [], [], zero_shift)
 
 
-def _rec(tid, direction, delta, identified=True, const="e"):
+def _rec(tid, direction, delta, identified=True, const="e", **extra):
+    # One flat per-(trajectory, constant) row; metrics are top-level columns.
     return {
         "trajectory_id": tid,
+        "constant": const,
         "start_point": [0, 0],
         "direction": list(direction),
-        "delta_estimate": {const: delta},
-        "identified": {const: identified},
+        "delta": delta,
+        "identified": identified,
         "config_fingerprint": "fp",
+        **extra,
     }
+
+
+def _seen(*recs):
+    """Nest flat records into the ``{trajectory_id: {constant: record}}`` shape."""
+    out = {}
+    for r in recs:
+        out.setdefault(r["trajectory_id"], {})[r["constant"]] = r
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -69,22 +80,22 @@ def _rec(tid, direction, delta, identified=True, const="e"):
 
 class TestBestRecordsForConstant:
     def test_selects_ties_within_two_decimals(self):
-        seen = {
-            "a": _rec("a", (3, 1), 0.204),   # max
-            "b": _rec("b", (1, 3), 0.196),   # ties at 0.20
-            "c": _rec("c", (1, 1), 0.101),   # 0.10 — not tied
-        }
+        seen = _seen(
+            _rec("a", (3, 1), 0.204),   # max
+            _rec("b", (1, 3), 0.196),   # ties at 0.20
+            _rec("c", (1, 1), 0.101),   # 0.10 — not tied
+        )
         max_delta, best = _best_records_for_constant(seen, "e", "delta")
         assert max_delta == pytest.approx(0.204)
         ids = {r["trajectory_id"] for r in best}
         assert ids == {"a", "b"}
 
     def test_ignores_unidentified_and_other_constants(self):
-        seen = {
-            "a": _rec("a", (3, 1), 0.5, identified=False),     # not identified
-            "b": _rec("b", (1, 3), 0.4, const="pi"),           # other constant
-            "c": _rec("c", (1, 1), 0.3),                       # the only valid one
-        }
+        seen = _seen(
+            _rec("a", (3, 1), 0.5, identified=False),     # not identified
+            _rec("b", (1, 3), 0.4, const="pi"),           # other constant
+            _rec("c", (1, 1), 0.3),                       # the only valid one
+        )
         max_delta, best = _best_records_for_constant(seen, "e", "delta")
         assert max_delta == pytest.approx(0.3)
         assert [r["trajectory_id"] for r in best] == ["c"]
@@ -94,22 +105,19 @@ class TestBestRecordsForConstant:
         assert best == []
         assert max_delta == float("-inf")
 
-    def test_ranks_by_objective_value_when_objective_active(self):
-        """Under a non-δ objective, ranking follows objective_value — the record
-        with the worse δ but better convergence_rate wins."""
-        seen = {
-            "a": {**_rec("a", (3, 1), 0.9), "objective_name": "convergence_rate",
-                  "objective_value": {"e": 0.10}},
-            "b": {**_rec("b", (1, 3), 0.2), "objective_name": "convergence_rate",
-                  "objective_value": {"e": 0.50}},
-        }
+    def test_ranks_by_objective_column_when_objective_active(self):
+        """Under a non-δ objective, ranking follows the convergence_rate column —
+        the record with the worse δ but better convergence_rate wins."""
+        seen = _seen(
+            _rec("a", (3, 1), 0.9, convergence_rate=0.10),
+            _rec("b", (1, 3), 0.2, convergence_rate=0.50),
+        )
         max_score, best = _best_records_for_constant(seen, "e", "convergence_rate")
         assert max_score == pytest.approx(0.50)
         assert [r["trajectory_id"] for r in best] == ["b"]
 
-    def test_falls_back_to_delta_for_legacy_records(self):
-        """Records without objective_value are ranked by δ under the δ objective."""
-        seen = {"a": _rec("a", (1, 1), 0.7), "b": _rec("b", (2, 1), 0.3)}
+    def test_ranks_by_delta_under_delta_objective(self):
+        seen = _seen(_rec("a", (1, 1), 0.7), _rec("b", (2, 1), 0.3))
         max_score, best = _best_records_for_constant(seen, "e", "delta")
         assert max_score == pytest.approx(0.7)
         assert [r["trajectory_id"] for r in best] == ["a"]

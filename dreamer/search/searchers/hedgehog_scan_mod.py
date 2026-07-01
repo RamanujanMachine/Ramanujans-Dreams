@@ -29,6 +29,7 @@ which ``const`` passed the threshold, so the intersection of constants in
 the set to compute delta for.
 """
 
+import json
 import os
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Set
@@ -47,7 +48,7 @@ from dreamer.utils.storage.attribute_registry import attribute_name
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     _position_to_tuple,
-    build_trajectory_dto,
+    build_trajectory_dtos,
     derive_cmf_and_shard_ids,
     derive_trajectory_id,
     tier1_config_fingerprint,
@@ -200,9 +201,6 @@ class SearcherModV1(SearcherModScheme):
             return
 
         desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
-        # Use the primary identified constant's sympy form for worker items
-        # (Tier-2 workers use it for delta_sequence etc.).
-        primary_sympy = identified_consts[0].value_sympy if identified_consts else None
 
         for traj, start in SmartTQDM(
             pairs,
@@ -215,53 +213,25 @@ class SearcherModV1(SearcherModScheme):
             trajectory_id = derive_trajectory_id(
                 shard_id, shard.cmf_name, shard_encoding_str, start_t, dir_t,
             )
-
-            # A cached record is only honoured when its Tier-1 values were
-            # computed under the current config; otherwise (e.g. a deeper walk
-            # was requested) it is stale and we fall through to Case 3 to
-            # recompute the full Tier-1 DTO.
             current_fp = tier1_config_fingerprint(walk_depth_for(shard.cmf, traj))
-            seen_record = seen_trajectories.get(trajectory_id)
-            if seen_record is not None and seen_record.get("config_fingerprint") != current_fp:
-                seen_record = None
-            if seen_record is not None:
-                existing_keys = set((seen_record.get("extended_metrics") or {}).keys())
-                missing = desired - existing_keys
-                if not missing:
-                    # Case 1: fully covered.
-                    continue
+            bucket = seen_trajectories.get(trajectory_id, {})
 
-                # Case 2: partial coverage — emit patch.
-                try:
-                    with Logger.watchdog(
-                        f"Tier-1 trajectory compute (shard {shard_id})",
-                        logging_config.WATCHDOG_TRAJECTORY_SECONDS,
-                        detail=lambda: f"traj_id={trajectory_id} start={start_t} direction={dir_t}",
-                    ):
-                        handler = TrajectoryAttributesHandler.from_cmf(
-                            shard.cmf, traj, start,
-                            constant=primary_sympy,
-                            searchable=shard,
-                        )
-                except Exception as e:
-                    Logger(
-                        f"Handler error — shard {shard_id}, traj={traj}, start={start}: {e}",
-                        Logger.Levels.warning,
-                    ).log()
-                    continue
+            # Classify each searched constant against its cached (traj, const) row:
+            #   'new'      — no fresh row (needs the full Tier-1 DTO), or
+            #   'partial'  — fresh row but missing some Tier-2 attributes (patch), or
+            #   'complete' — fresh row with every desired attribute (skip).
+            new_consts: List[Constant] = []
+            partial_consts: List[Constant] = []
+            for c in identified_consts:
+                rec = bucket.get(c.name)
+                if rec is None or rec.get("config_fingerprint") != current_fp:
+                    new_consts.append(c)
+                elif desired - set(rec.keys()):
+                    partial_consts.append(c)
+            if not new_consts and not partial_consts:
+                continue  # every constant fully covered
 
-                patch: dict = {
-                    "trajectory_id": trajectory_id,
-                    "extended_metrics": {},
-                }
-                sink((handler.trajectory_matrix, primary_sympy, patch))
-                seen_trajectories[trajectory_id] = {
-                    "extended_metrics": dict.fromkeys(existing_keys | missing),
-                    "config_fingerprint": current_fp,
-                }
-                continue
-
-            # Case 3: new trajectory.
+            # Build the (shared) handler once for whichever constants need work.
             try:
                 with Logger.watchdog(
                     f"Tier-1 trajectory compute (shard {shard_id})",
@@ -269,11 +239,9 @@ class SearcherModV1(SearcherModScheme):
                     detail=lambda: f"traj_id={trajectory_id} start={start_t} direction={dir_t}",
                 ):
                     handler = TrajectoryAttributesHandler.from_cmf(
-                        shard.cmf, traj, start,
-                        constant=None,
-                        searchable=shard,
+                        shard.cmf, traj, start, constant=None, searchable=shard,
                     )
-                    dto = build_trajectory_dto(
+                    dtos = build_trajectory_dtos(
                         handler,
                         cmf_id=cmf_id,
                         shard_id=shard_id,
@@ -281,8 +249,8 @@ class SearcherModV1(SearcherModScheme):
                         shard_encoding_str=shard_encoding_str,
                         start=start,
                         direction=traj,
-                        constants=identified_consts,  # Constant objects → keys are c.name
-                    )
+                        constants=new_consts,
+                    ) if new_consts else []
             except Exception as e:
                 Logger(
                     f"Handler error — shard {shard_id}, traj={traj}, start={start}: {e}",
@@ -290,8 +258,18 @@ class SearcherModV1(SearcherModScheme):
                 ).log()
                 continue
 
-            seen_trajectories[trajectory_id] = {
-                "extended_metrics": dict.fromkeys(desired),
-                "config_fingerprint": current_fp,
-            }
-            sink((handler.trajectory_matrix, primary_sympy, dto))
+            # New constants — emit the full flat DTO (Tier-2 filled by the worker).
+            for c, dto in zip(new_consts, dtos):
+                sink((handler.trajectory_matrix, c.value_sympy, dto))
+                seen_trajectories.setdefault(trajectory_id, {})[c.name] = (
+                    json.loads(dto.to_json_line())
+                )
+            # Partial constants — emit a patch; the worker fills missing Tier-2.
+            # Carry the direction / start so the worker can compute
+            # direction-normalised attributes (e.g. convergence_rate).
+            for c in partial_consts:
+                patch = {
+                    "trajectory_id": trajectory_id, "constant": c.name,
+                    "direction": dir_t, "start_point": start_t,
+                }
+                sink((handler.trajectory_matrix, c.value_sympy, patch))

@@ -18,7 +18,7 @@ Design rules:
 import json
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -119,113 +119,112 @@ class ShardDTO:
 
 @dataclass(frozen=True)
 class TrajectoryDTO:
-    """
-    A single trajectory through a shard, with its Tier-1 base attributes.
+    """A single **(trajectory, constant)** result — one flat JSONL line.
 
-    ``extended_metrics`` is populated asynchronously by Tier-2 background
-    workers (and later by the Tier-3 post-process stage).  Even though the
-    dataclass is frozen, the dict itself is mutable — workers can do
-    ``dto.extended_metrics[k] = v`` without breaking the frozen contract.
+    The unit of a stored result is a (trajectory, constant) pair, because almost
+    every attribute is constant-dependent: identification (LIReC → p/q) is coupled
+    to the target constant, and it is identification that selects which eigenvalue
+    pair the spectral metrics use.  So each constant a trajectory was evaluated
+    against gets its **own** row.  The underlying walk (the trajectory matrix /
+    limit) is constant-independent and computed **once** per trajectory — the rows
+    for a trajectory's several constants share that walk at compute time and merely
+    duplicate the constant-independent columns (``start_point``, ``direction``,
+    walk metadata) on disk.
+
+    Layout is a **flat dict** on disk (no nested ``extended_metrics``): the fixed
+    *core* fields below plus any number of registry-computed metrics carried in
+    ``extra`` and serialised at top level.  ``extra`` keeps the schema open — Tier-2
+    workers and user-registered attributes add keys without a schema change — while
+    every metric still lands as its own top-level column (DB-migration friendly).
+
+    Composite key: ``(trajectory_id, constant)``.  ``trajectory_id`` is
+    constant-independent (identifies the walk) and is shared across a trajectory's
+    per-constant rows.  ``extra`` is mutable so background workers can add metrics
+    to a frozen DTO without breaking the frozen contract.
     """
     trajectory_id: str
     cmf_id: str
     shard_id: str
+    constant: str                             # the constant this row is a result for
 
     # Raw parameters (tuples instead of Position objects for JSON compatibility)
     start_point: Tuple[int | str, ...]
     direction: Tuple[int | str, ...]
 
-    # Per-constant attributes — dicts keyed by constant name so that one
-    # trajectory record covers all constants searched in this shard.
-    # ``delta_estimate``: irrationality measure δ per constant.
-    # ``p_vector`` / ``q_vector``: LIReC projection vectors per constant
-    #   (None entry = constant not identified for this trajectory).
-    # ``identified``: whether LIReC found a convergent p/q for this constant.
-    delta_estimate: Dict[str, float]
-    p_vector: Optional[Dict[str, Optional[Tuple[int | str, ...]]]]
-    q_vector: Optional[Dict[str, Optional[Tuple[int | str, ...]]]]
-    identified: Dict[str, bool] = field(default_factory=dict)
+    # Per-constant Tier-1 scalars.
+    # ``delta``: irrationality measure δ (``-inf`` = non-converged sentinel).
+    # ``identified``: LIReC found a convergent p/q for this constant.
+    # ``p_vector`` / ``q_vector``: LIReC projection vectors (``None`` = unidentified).
+    identified: bool = False
+    delta: float = float("-inf")
+    p_vector: Optional[Tuple[int | str, ...]] = None
+    q_vector: Optional[Tuple[int | str, ...]] = None
 
-    # Optimisation-objective provenance + value.  ``objective_name`` records which
-    # numeric attribute this trajectory was scored under (system-wide
-    # ``OPTIMIZATION_OBJECTIVE``); ``objective_value`` is that attribute's raw
-    # (unsigned) value per constant — a **separate** field from ``delta_estimate``,
-    # which always stays the irrationality measure.  When the objective is
-    # ``"delta"`` the value equals δ; for e.g. ``convergence_rate`` it is the
-    # spectral rate.  ``None`` per-constant entry = objective unavailable for that
-    # trajectory (e.g. non-identified).  ``objective_name`` is provenance only
-    # (acquisition method), so it never affects the validity of the stored data.
-    objective_name: Optional[str] = None
-    objective_value: Optional[Dict[str, Optional[float]]] = None
-
-    # Walk-style flag: 1 → ``inv().T`` applied after walking the trajectory
-    # matrix (the dual recurrence); 2 → walked directly.
+    # Walk metadata (constant-independent; duplicated across a trajectory's rows).
+    # ``walk_type``: 1 → ``inv().T`` applied after the walk; 2 → walked directly.
+    # ``config_fingerprint``: hash of the config knobs that influenced the Tier-1
+    #   values, so a later run under a changed config recomputes instead of reusing
+    #   a stale row.  ``projection_column``: the walk-matrix column p/q was
+    #   projected onto (needed to reproduce the exact p_n/q_n sequence).
     walk_type: int = 1
-
-    # Walk depth used for this trajectory's Tier-1 values, and a fingerprint of
-    # all config knobs that influenced them (see
-    # ``trajectory_attributes.tier1_config_fingerprint``).  Stored so a later
-    # run with a different configuration (e.g. a deeper walk) can detect that a
-    # cached record is stale and recompute it instead of silently reusing the
-    # old δ / identification.  ``None`` on legacy records (treated as stale →
-    # recomputed on next encounter).
     walk_depth: Optional[int] = None
     config_fingerprint: Optional[str] = None
-
-    # Tier-1 — the walk-matrix column index the p/q vectors were projected onto
-    # (see ``TrajectoryAttributesHandler._select_projection_column``).  Stored so
-    # the exact p/q reconstruction can be reproduced later: the same column must
-    # be used as the ``Limit.final_projection`` to recover the identical
-    # p_n / q_n sequence.  This is geometry (the first normalisable walk column),
-    # selected independently of identification, so it can be set even when the
-    # trajectory was not identified.  ``None`` only when the walk failed / no
-    # column was normalisable, or on legacy records.
     projection_column: Optional[int] = None
 
-    # Recurrence attributes — **Tier-2 / optional**.  Building the symbolic
-    # ``LinearRecurrence`` (companion matrix + relation string) dominates the
-    # per-trajectory cost (~80% in profiling), so it is **not** computed on the
-    # hot path.  They stay ``None`` unless ``build_trajectory_dto`` is called
-    # with ``compute_recurrence=True``, or the ``"formula"`` / ``"order"``
-    # attributes are requested through the Tier-2 worker pipeline.
+    # Recurrence (symbolic ``LinearRecurrence``) — optional/heavy; ``None`` unless
+    # ``build_trajectory_dto(..., compute_recurrence=True)`` or requested as a
+    # Tier-2 attribute.  Constant-independent, duplicated across rows.
     recurrence_relation: Optional[str] = None
     recurrence_order: Optional[int] = None
 
-    # Open extension field for Tier-2+ attributes added by background workers
-    extended_metrics: Dict[str, Any] = field(default_factory=dict, hash=False)
+    # Open, flat extension: registry-computed metrics (gcd_slope, delta_prediction,
+    # convergence_rate, eigenvalues, ...) keyed by attribute name.  Serialised at
+    # top level (not nested) so each is its own column; mutated in place by workers.
+    extra: Dict[str, Any] = field(default_factory=dict, hash=False)
+
+    #: The fixed (non-``extra``) fields, in declaration order — used to partition a
+    #: flat JSON dict back into core vs. extension keys on read.
+    CORE_FIELDS: ClassVar[Tuple[str, ...]] = (
+        "trajectory_id", "cmf_id", "shard_id", "constant",
+        "start_point", "direction",
+        "identified", "delta", "p_vector", "q_vector",
+        "walk_type", "walk_depth", "config_fingerprint", "projection_column",
+        "recurrence_relation", "recurrence_order",
+    )
 
     def to_json_line(self) -> str:
-        """Serialize this record to a single JSON line for JSONL storage."""
-        return json.dumps(dataclasses.asdict(self))
+        """Serialize this record to a single **flat** JSON line for JSONL storage."""
+        flat = {k: getattr(self, k) for k in self.CORE_FIELDS}
+        flat.update(self.extra)          # metrics at top level, not nested
+        return json.dumps(flat)
 
     @classmethod
     def from_dict(cls, d: dict) -> "TrajectoryDTO":
-        """Reconstruct from a JSON-parsed dict."""
-        # p_vector / q_vector: dict of {const: tuple-or-None} or None
-        def _restore_pq(raw) -> Optional[Dict[str, Optional[tuple]]]:
-            if raw is None:
-                return None
-            if isinstance(raw, dict):
-                return {k: (tuple(v) if v is not None else None) for k, v in raw.items()}
-            return None  # unexpected format — discard gracefully
+        """Reconstruct from a flat JSON-parsed dict.
 
+        Known ``CORE_FIELDS`` are pulled into the dataclass; every other key is
+        treated as an extension metric and collected into ``extra``.
+        """
+        def _restore_vec(raw) -> Optional[tuple]:
+            return tuple(raw) if isinstance(raw, (list, tuple)) else None
+
+        extra = {k: v for k, v in d.items() if k not in cls.CORE_FIELDS}
         return cls(
             trajectory_id=d["trajectory_id"],
-            cmf_id=d["cmf_id"],
-            shard_id=d["shard_id"],
-            start_point=tuple(d["start_point"]),
-            direction=tuple(d["direction"]),
-            delta_estimate=d.get("delta_estimate") or {},
-            p_vector=_restore_pq(d.get("p_vector")),
-            q_vector=_restore_pq(d.get("q_vector")),
-            identified=d.get("identified") or {},
-            objective_name=d.get("objective_name"),
-            objective_value=d.get("objective_value"),
+            cmf_id=d.get("cmf_id", ""),
+            shard_id=d.get("shard_id", ""),
+            constant=d.get("constant", ""),
+            start_point=tuple(d.get("start_point", ())),
+            direction=tuple(d.get("direction", ())),
+            identified=bool(d.get("identified", False)),
+            delta=float(d["delta"]) if d.get("delta") is not None else float("-inf"),
+            p_vector=_restore_vec(d.get("p_vector")),
+            q_vector=_restore_vec(d.get("q_vector")),
             walk_type=int(d.get("walk_type", 1)),
             walk_depth=d.get("walk_depth"),
             config_fingerprint=d.get("config_fingerprint"),
             projection_column=d.get("projection_column"),
             recurrence_relation=d.get("recurrence_relation"),
             recurrence_order=d.get("recurrence_order"),
-            extended_metrics=d.get("extended_metrics", {}),
+            extra=extra,
         )

@@ -80,12 +80,13 @@ Mostly **where things go** and **how many cores to use**.
 gates which attributes are optimisable (numeric, with a known optimal direction)
 and stores that direction. Shipped objectives: `delta` (max) and
 `convergence_rate` (max, the length-normalised spectral rate
-`approximated_digits_per_step / ‖direction‖₂`). The chosen objective's raw value
-is stored per constant on each trajectory record as `objective_value` (with
-`objective_name` provenance) — a field **separate from** `delta_estimate`, which
-always remains the irrationality measure. To add an objective: add a handler
-method + an `ATTRIBUTE_REGISTRY` entry, then register it in `OBJECTIVES` with its
-direction.
+`approximated_digits_per_step / ‖direction‖₂`). Since a stored result is one flat
+row per `(trajectory, constant)`, the objective is simply a **column** on that row
+(`delta` is the core field; `convergence_rate` etc. are their own key). Ranking
+reads it via `optimization_objectives.score_record`; the objective is **not** part
+of the config hash, so switching it never invalidates δ. To add an objective: add
+a handler method + an `ATTRIBUTE_REGISTRY` entry, then register it in `OBJECTIVES`
+with its direction.
 
 ## `database`
 

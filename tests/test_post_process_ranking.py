@@ -33,16 +33,26 @@ def _write_jsonl(path, records):
             f.write(json.dumps(r) + "\n")
 
 
-def _rec(tid, cmf_id, shard_id, delta, direction=(1, 0, 0), extended=None):
+def _rec(tid, cmf_id, shard_id, delta, direction=(1, 0, 0), const="pi", **extended):
+    # One flat per-(trajectory, constant) row; metrics are top-level columns.
     return {
         "trajectory_id": tid,
         "cmf_id": cmf_id,
         "shard_id": shard_id,
+        "constant": const,
         "start_point": [0, 0, 0],
         "direction": list(direction),
-        "delta_estimate": {"pi": delta},
-        "extended_metrics": extended or {},
+        "delta": delta,
+        **extended,
     }
+
+
+def _nest(*recs):
+    """Nest flat records into ``{trajectory_id: {constant: record}}``."""
+    out = {}
+    for r in recs:
+        out.setdefault(r["trajectory_id"], {})[r.get("constant")] = r
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -52,29 +62,27 @@ def _rec(tid, cmf_id, shard_id, delta, direction=(1, 0, 0), extended=None):
 class TestRankInto:
     def test_top_n_highest(self):
         target = set()
-        records = {
-            "a": _rec("a", "C", "S", 0.1),
-            "b": _rec("b", "C", "S", 0.9),
-            "c": _rec("c", "C", "S", 0.5),
-            "d": _rec("d", "C", "S", 0.3),
-        }
+        records = _nest(
+            _rec("a", "C", "S", 0.1), _rec("b", "C", "S", 0.9),
+            _rec("c", "C", "S", 0.5), _rec("d", "C", "S", 0.3),
+        )
         sel = parse_predicate_spec("top 2 highest delta in shard")
         Tier3PostProcessModV1._rank_into(target, records, sel, "pi")
         assert target == {"b", "c"}
 
     def test_top_n_lowest(self):
         target = set()
-        records = {k: _rec(k, "C", "S", d) for k, d in [("a", 0.1), ("b", 0.9), ("c", 0.5)]}
+        records = _nest(*[_rec(k, "C", "S", d) for k, d in [("a", 0.1), ("b", 0.9), ("c", 0.5)]])
         sel = parse_predicate_spec("top 1 lowest delta in shard")
         Tier3PostProcessModV1._rank_into(target, records, sel, "pi")
         assert target == {"a"}
 
     def test_skips_missing_metric(self):
         target = set()
-        records = {
-            "a": _rec("a", "C", "S", 0.5),
-            "b": {"trajectory_id": "b", "delta_estimate": {}},  # no pi → excluded
-        }
+        records = _nest(
+            _rec("a", "C", "S", 0.5),
+            {"trajectory_id": "b", "constant": "pi"},  # no delta → excluded
+        )
         sel = parse_predicate_spec("top 2 highest delta in shard")
         Tier3PostProcessModV1._rank_into(target, records, sel, "pi")
         assert target == {"a"}

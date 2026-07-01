@@ -77,12 +77,16 @@ ValueFn = Callable[[Dict[str, Any]], Optional[float]]
 def delta_value(constant: Constant) -> ValueFn:
     """Value function returning δ for *constant* (the default, classic behaviour).
 
-    :param constant: the constant whose entry to read from ``delta_estimate``.
-    :return: a :data:`ValueFn` extracting ``record["delta_estimate"][name]``.
+    Rows are flat, one per ``(trajectory, constant)``, so this reads the core
+    ``delta`` column of the rows that belong to *constant*.
+
+    :param constant: the constant whose rows to read δ from.
+    :return: a :data:`ValueFn` extracting ``record["delta"]``.
     """
     def _fn(rec: Dict[str, Any]) -> Optional[float]:
-        d = rec.get("delta_estimate") or {}
-        v = d.get(constant.name)
+        if rec.get("constant") != constant.name:
+            return None
+        v = rec.get("delta")
         return None if v is None else float(v)
     return _fn
 
@@ -118,10 +122,10 @@ def extended_metric_value(
     :return: a :data:`ValueFn`.
     """
     def _fn(rec: Dict[str, Any]) -> Optional[float]:
-        em = rec.get("extended_metrics") or {}
-        if key not in em:
+        # Rows are flat: metrics are top-level columns.
+        if key not in rec:
             return None
-        raw = em[key]
+        raw = rec[key]
         if raw is None:
             return None
         return float(transform(raw)) if transform is not None else float(raw)
@@ -154,8 +158,8 @@ def sympy_attribute_value(
     sym_subs = {sp.Symbol(k): v for k, v in subs.items()}
 
     def _fn(rec: Dict[str, Any]) -> Optional[float]:
-        container = (rec.get("extended_metrics") or {}) if in_extended_metrics else rec
-        raw = container.get(key)
+        # Rows are flat, so both cases read the top-level record.
+        raw = rec.get(key)
         if not isinstance(raw, str) or not raw.strip():
             return None
         try:
@@ -189,7 +193,7 @@ def eigenvalue_lognorm_value(index: int = 0) -> ValueFn:
     import sympy as sp
 
     def _fn(rec: Dict[str, Any]) -> Optional[float]:
-        eigs = (rec.get("extended_metrics") or {}).get("eigenvalues")
+        eigs = rec.get("eigenvalues")   # flat column
         if not isinstance(eigs, (list, tuple)) or index >= len(eigs):
             return None
         direction = rec.get("direction")
@@ -209,9 +213,23 @@ def eigenvalue_lognorm_value(index: int = 0) -> ValueFn:
     return _fn
 
 def convergence_rate(neg: bool) -> ValueFn:
+    """Value function for the **stored** single-definition convergence rate.
+
+    Reads the ``convergence_rate`` column (the length-normalised spectral rate
+    ``approximated_digits_per_step / ||v||₂`` computed by
+    ``TrajectoryAttributesHandler.convergence_rate``) rather than recomputing a raw
+    eigenvalue gap — so the sphere matches the rest of the system's definition.
+    ``neg=True`` flips the sign (for a "lower is better" colouring).
+    """
     def _fn(rec: Dict[str, Any]) -> Optional[float]:
-        result = eigenvalue_lognorm_value(1)(rec) - eigenvalue_lognorm_value(0)(rec)
-        return -result if neg else result
+        raw = rec.get("convergence_rate")
+        if raw is None:
+            return None
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return -val if neg else val
     return _fn
 
 
@@ -494,23 +512,18 @@ def _available_cmf_ids(export_cmfs: str, constant: Constant) -> List[str]:
     return sorted(f.stem for f in const_dir.glob("*.json"))
 
 
-def _merge_jsonl(path: Path) -> Dict[str, dict]:
-    """Read a per-shard JSONL, folding patch lines into base records.
+def _merge_jsonl(path: Path) -> Dict[Tuple[str, str], dict]:
+    """Read a per-shard JSONL, folding patch lines into base rows.
 
-    Mirrors ``data_utils/search_data.py._merge_jsonl`` (last-write-wins on scalar
-    fields, **union** on ``extended_metrics``).  The union is essential: the
-    Tier-2/Tier-3 attributes (eigenvalues, gcd_slope, ...) arrive on a *separate*
-    patch line written by the background worker, and the base line for the same
-    trajectory carries ``extended_metrics: {}``.  A plain ``dict.update`` would
-    let whichever line comes last win outright, so an empty ``{}`` could wipe the
-    attributes - which is exactly why attribute spheres came out blank.  Unioning
-    the two ``extended_metrics`` dicts preserves the populated keys regardless of
-    line order.
+    Rows are flat, one per ``(trajectory_id, constant)`` — every attribute is a
+    top-level column — so folding a Tier-2/Tier-3 patch (which carries only the new
+    columns) into its base row is a plain last-write-wins ``dict.update`` (no more
+    special-cased ``extended_metrics`` union).
 
     :param path: the ``<shard_id>.jsonl`` file.
-    :return: ``{trajectory_id: merged_record}``.
+    :return: ``{(trajectory_id, constant): merged_record}``.
     """
-    merged: Dict[str, dict] = {}
+    merged: Dict[Tuple[str, str], dict] = {}
     with open(path, "r") as f:
         for line in f:
             line = line.strip()
@@ -521,15 +534,14 @@ def _merge_jsonl(path: Path) -> Dict[str, dict]:
             except json.JSONDecodeError:
                 continue
             tid = record.get("trajectory_id")
-            if tid is None:
+            const = record.get("constant")
+            if tid is None or const is None:
                 continue
-            if tid not in merged:
-                merged[tid] = record
+            key = (tid, const)
+            if key not in merged:
+                merged[key] = record
             else:
-                existing_em = dict(merged[tid].get("extended_metrics") or {})
-                new_em = dict(record.get("extended_metrics") or {})
-                merged[tid].update(record)
-                merged[tid]["extended_metrics"] = {**existing_em, **new_em}
+                merged[key].update(record)
     return merged
 
 
@@ -616,6 +628,9 @@ def load_shard_samples(
     values: List[float] = []
     identified: List[bool] = []
     for rec in merged.values():
+        # Rows are per-(trajectory, constant); only this constant's rows.
+        if rec.get("constant") != constant.name:
+            continue
         direction = rec.get("direction")
         if direction is None:
             continue
@@ -623,7 +638,7 @@ def load_shard_samples(
             val = value_fn(rec)
         except Exception:
             val = None
-        ident = bool((rec.get("identified") or {}).get(constant.name))
+        ident = bool(rec.get("identified"))   # flat scalar
         directions.append([float(v) for v in direction])
         values.append(float(val) if val is not None and np.isfinite(val) else np.nan)
         identified.append(ident)
@@ -652,8 +667,7 @@ def shard_has_identified(shard, constant: Constant, results_root: str) -> bool:
     if not path.is_file():
         return False
     for rec in _merge_jsonl(path).values():
-        ident = rec.get("identified") or {}
-        if ident.get(constant.name):
+        if rec.get("constant") == constant.name and rec.get("identified"):
             return True
     return False
 

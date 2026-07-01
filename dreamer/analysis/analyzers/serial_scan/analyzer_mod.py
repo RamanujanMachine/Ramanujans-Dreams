@@ -44,7 +44,7 @@ from dreamer.extraction.shard import Shard
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     _position_to_tuple,
-    build_trajectory_dto,
+    build_trajectory_dtos,
     derive_cmf_and_shard_ids,
     derive_trajectory_id,
     tier1_config_fingerprint,
@@ -271,25 +271,34 @@ class AnalyzerModV1(AnalyzerModScheme):
         best_score: Dict[str, Optional[float]] = {c.name: None for c in shard.consts}
         processed_tids: set = set()
 
-        def _accumulate(record: dict) -> None:
-            """Fold one trajectory *record* into the identified counts + best score.
+        def _accumulate(record: dict, const_name: str) -> None:
+            """Fold one ``(trajectory, constant)`` *record* into the counts + best.
 
             Identification is counted independently of the objective (it is a hard
-            prerequisite we care about regardless), while the ranking uses the
-            active objective's signed score via the shared ``score_record``.
+            prerequisite we care about regardless); ranking uses the active
+            objective's signed score via the shared ``score_record``.
             """
-            for c in shard.consts:
-                scored = score_record(record, c.name, objective_name)
-                if scored is None:
-                    continue
-                sc, identified_val = scored
-                if not identified_val:
-                    continue
-                identified_count[c.name] += 1
-                if math.isfinite(sc):
-                    cur = best_score.get(c.name)
-                    if cur is None or sc > cur:
-                        best_score[c.name] = sc
+            scored = score_record(record, objective_name)
+            if scored is None:
+                return
+            sc, identified_val = scored
+            if not identified_val:
+                return
+            identified_count[const_name] += 1
+            if math.isfinite(sc):
+                cur = best_score.get(const_name)
+                if cur is None or sc > cur:
+                    best_score[const_name] = sc
+
+        def _reusable(rec: Optional[dict], fp: str) -> bool:
+            """A cached per-constant row is reusable when it is fresh (matching
+            config fingerprint) *and* carries the active objective's column —
+            ``score_record`` returns ``None`` only when that column is absent."""
+            return (
+                rec is not None
+                and rec.get("config_fingerprint") == fp
+                and score_record(rec, objective_name) is not None
+            )
 
         with open(jsonl_path, "a") as fout:
             for traj, start in SmartTQDM(
@@ -310,39 +319,15 @@ class AnalyzerModV1(AnalyzerModScheme):
                     continue
                 processed_tids.add(tid)
 
-                # Reuse a cached record only when it was computed under the same
-                # configuration — a changed walk depth / walk type / identification
-                # tolerance makes the stored δ stale and forces recomputation.
                 current_fp = tier1_config_fingerprint(walk_depth_for(shard.cmf, traj))
+                bucket = seen_trajectories.get(tid, {})
 
-                cached = seen_trajectories.get(tid)
-                # Reuse a cached record only when the active objective is also
-                # covered: δ (fallback via delta_estimate) always is; a non-δ
-                # objective requires the record to have been written under the same
-                # objective with objective_value for every shard constant — else we
-                # recompute so the objective is (re)derived.
-                objective_covered = (
-                    objective_name == "delta"
-                    or (
-                        cached is not None
-                        and cached.get("objective_name") == objective_name
-                        and isinstance(cached.get("objective_value"), dict)
-                        and all(c.name in cached["objective_value"] for c in shard.consts)
-                    )
-                )
-                if (
-                    cached is not None
-                    and cached.get("config_fingerprint") == current_fp
-                    and "delta_estimate" in cached
-                    and isinstance(cached["delta_estimate"], dict)
-                    and "identified" in cached
-                    and isinstance(cached["identified"], dict)
-                    # All shard constants must be covered in the cached record.
-                    and all(c.name in cached["delta_estimate"] for c in shard.consts)
-                    and objective_covered
-                ):
-                    # Reuse cached record — no handler, no walk.
-                    _accumulate(cached)
+                # Reuse only when *every* shard constant has a fresh, objective-
+                # covered row — else recompute (a changed walk depth / walk type /
+                # identification tolerance, or a switched objective column).
+                if all(_reusable(bucket.get(c.name), current_fp) for c in shard.consts):
+                    for c in shard.consts:
+                        _accumulate(bucket[c.name], c.name)
                     total += 1
                     continue
 
@@ -354,10 +339,10 @@ class AnalyzerModV1(AnalyzerModScheme):
                     ):
                         handler = TrajectoryAttributesHandler.from_cmf(
                             shard.cmf, traj, start,
-                            constant=None,  # constant injected per-constant in build_trajectory_dto
+                            constant=None,  # injected per-constant in build_trajectory_dtos
                             searchable=shard,
                         )
-                        dto = build_trajectory_dto(
+                        dtos = build_trajectory_dtos(
                             handler,
                             cmf_id=cmf_id,
                             shard_id=shard_id,
@@ -365,7 +350,7 @@ class AnalyzerModV1(AnalyzerModScheme):
                             shard_encoding_str=encoding_str,
                             start=start,
                             direction=traj,
-                            constants=shard.consts,  # Constant objects → keys are c.name
+                            constants=shard.consts,  # one flat row per constant
                         )
                 except Exception as e:
                     Logger(
@@ -375,13 +360,13 @@ class AnalyzerModV1(AnalyzerModScheme):
                     ).log()
                     continue
 
-                line = dto.to_json_line()
-                fout.write(line + "\n")
+                for c, dto in zip(shard.consts, dtos):
+                    line = dto.to_json_line()
+                    fout.write(line + "\n")
+                    record = json.loads(line)
+                    seen_trajectories.setdefault(tid, {})[c.name] = record
+                    _accumulate(record, c.name)
                 fout.flush()
-                record = json.loads(line)
-                seen_trajectories[tid] = record
-
-                _accumulate(record)
                 total += 1
 
         Logger(

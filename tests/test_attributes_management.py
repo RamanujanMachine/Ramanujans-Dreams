@@ -35,7 +35,7 @@ from dreamer.utils.storage.trajectory_attributes import (
     _position_to_tuple,
     _serialize_encoding,
     _stable_id,
-    build_trajectory_dto,
+    build_trajectory_dtos,
     derive_cmf_and_shard_ids,
     derive_trajectory_id,
     tier1_config_fingerprint,
@@ -147,19 +147,20 @@ class TestDTOFieldOrdering:
 class TestDTOSerializationRoundTrips:
 
     def test_trajectory_dto_round_trip(self):
-        """JSON serialise → deserialise → fields are equal."""
+        """JSON serialise → deserialise → fields are equal (flat per-constant row)."""
         dto = TrajectoryDTO(
             trajectory_id="abc123",
             cmf_id="4F3",
             shard_id="sh1",
+            constant="e",
             start_point=(1, 2),
             direction=(0, 1),
             recurrence_relation="a(n)*f(n) + b(n)*f(n-1) = 0",
             recurrence_order=1,
-            delta_estimate={"e": 1.5, "log2": 0.7},
-            p_vector={"e": (1, 0), "log2": (2, 1)},
-            q_vector={"e": (0, 1), "log2": (1, 0)},
-            identified={"e": True, "log2": False},
+            identified=True,
+            delta=1.5,
+            p_vector=(1, 0),
+            q_vector=(0, 1),
             walk_type=2,
         )
         restored = TrajectoryDTO.from_dict(json.loads(dto.to_json_line()))
@@ -167,45 +168,45 @@ class TestDTOSerializationRoundTrips:
         assert restored == dto
         assert isinstance(restored.start_point, tuple)
         assert isinstance(restored.direction, tuple)
-        assert isinstance(restored.delta_estimate, dict)
-        assert isinstance(restored.p_vector, dict)
-        # New reconstruction-critical field survives the round trip:
+        assert restored.constant == "e"
+        assert restored.delta == 1.5
+        assert isinstance(restored.p_vector, tuple)
         assert restored.walk_type == 2
 
     def test_trajectory_dto_walk_type_default(self):
-        """Older JSONL records missing ``walk_type`` deserialise with default 1."""
+        """A flat record missing ``walk_type`` deserialises with default 1."""
         d = {
             "trajectory_id": "old",
             "cmf_id": "c",
             "shard_id": "s",
+            "constant": "e",
             "start_point": [1],
             "direction": [0],
-            "recurrence_relation": "",
-            "recurrence_order": 1,
-            "delta_estimate": {"e": 1.0},
-            "identified": {"e": True},
+            "delta": 1.0,
+            "identified": True,
         }
         restored = TrajectoryDTO.from_dict(d)
         assert restored.walk_type == 1
 
-    def test_trajectory_dto_round_trip_with_extended_metrics(self):
-        """extended_metrics survive the round-trip intact."""
+    def test_trajectory_dto_round_trip_flat_metrics(self):
+        """Flat ``extra`` metric columns survive the round-trip at top level."""
         dto = TrajectoryDTO(
             trajectory_id="xyz",
             cmf_id="c",
             shard_id="s",
+            constant="e",
             start_point=(0,),
             direction=(1,),
-            recurrence_relation="",
-            recurrence_order=2,
-            delta_estimate={"e": 1.1},
-            p_vector={"e": ()},
-            q_vector={"e": ()},
-            extended_metrics={"eigenvalues": ["1+0j", "0.5"], "spectral_gap": 0.5},
+            delta=1.1,
+            extra={"eigenvalues": ["1+0j", "0.5"], "spectral_gap": 0.5},
         )
-        restored = TrajectoryDTO.from_dict(json.loads(dto.to_json_line()))
-        assert restored.extended_metrics["spectral_gap"] == 0.5
-        assert restored.extended_metrics["eigenvalues"] == ["1+0j", "0.5"]
+        line = json.loads(dto.to_json_line())
+        # Metrics are serialised at top level (flat), not nested.
+        assert line["spectral_gap"] == 0.5
+        assert "extra" not in line
+        restored = TrajectoryDTO.from_dict(line)
+        assert restored.extra["spectral_gap"] == 0.5
+        assert restored.extra["eigenvalues"] == ["1+0j", "0.5"]
 
     def test_shard_dto_round_trip(self):
         dto = ShardDTO(
@@ -250,17 +251,16 @@ class TestDTOSerializationRoundTrips:
             "trajectory_id": "t",
             "cmf_id": "c",
             "shard_id": "s",
+            "constant": "e",
             "start_point": [1],
             "direction": [0],
-            "recurrence_relation": "",
-            "recurrence_order": 1,
-            "delta_estimate": {"e": 1.0},
-            "identified": {"e": True},
+            "delta": 1.0,
+            "identified": True,
         }
         dto = TrajectoryDTO.from_dict(d)
         assert dto.p_vector is None
         assert dto.q_vector is None
-        assert dto.extended_metrics == {}
+        assert dto.extra == {}
 
 
 # ---------------------------------------------------------------------------
@@ -483,10 +483,10 @@ class TestHandlerStubs:
 
 class TestBuildTrajectoryDto:
 
-    def test_produces_trajectory_dto(self, minimal_handler, symbols):
+    def test_produces_one_dto_per_constant(self, minimal_handler, symbols):
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
-        dto = build_trajectory_dto(
+        dtos = build_trajectory_dtos(
             minimal_handler,
             cmf_id="1F1",
             shard_id="sh1",
@@ -495,7 +495,10 @@ class TestBuildTrajectoryDto:
             start=start,
             direction=direction,
         )
-        assert isinstance(dto, TrajectoryDTO)
+        # minimal_handler has a single constant → exactly one flat row.
+        assert len(dtos) == 1
+        assert isinstance(dtos[0], TrajectoryDTO)
+        assert dtos[0].constant == str(e.value_sympy)
 
     def test_trajectory_id_is_deterministic(self, minimal_handler, symbols):
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
@@ -504,13 +507,11 @@ class TestBuildTrajectoryDto:
             cmf_id="1F1", shard_id="sh", cmf_name="1F1",
             shard_encoding_str="enc", start=start, direction=direction,
         )
-        dto_a = build_trajectory_dto(minimal_handler, **kwargs)
-        dto_b = build_trajectory_dto(minimal_handler, **kwargs)
+        dto_a = build_trajectory_dtos(minimal_handler, **kwargs)[0]
+        dto_b = build_trajectory_dtos(minimal_handler, **kwargs)[0]
         assert dto_a.trajectory_id == dto_b.trajectory_id
 
     def test_different_starts_give_different_ids(self, minimal_handler, symbols, simple_cmf):
-        # Use direction=(1,1) — the (1,0) direction is degenerate for 1F1
-        # (singular trajectory matrix → ZeroDivisionError on walk).
         start_a = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         start_b = Position({symbols[0]: sp.Integer(2), symbols[1]: sp.Integer(3)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
@@ -518,109 +519,90 @@ class TestBuildTrajectoryDto:
             simple_cmf, direction, start_b, constant=e.value_sympy,
         )
         kwargs_base = dict(cmf_id="c", shard_id="s", cmf_name="c", shard_encoding_str="e")
-        dto_a = build_trajectory_dto(minimal_handler, **kwargs_base, start=start_a, direction=direction)
-        dto_b = build_trajectory_dto(handler_b, **kwargs_base, start=start_b, direction=direction)
+        dto_a = build_trajectory_dtos(minimal_handler, **kwargs_base, start=start_a, direction=direction)[0]
+        dto_b = build_trajectory_dtos(handler_b, **kwargs_base, start=start_b, direction=direction)[0]
         assert dto_a.trajectory_id != dto_b.trajectory_id
 
     def test_base_tier1_fields_populated(self, minimal_handler, symbols):
-        """build_trajectory_dto fills the cheap Tier-1 fields.
+        """The flat row carries the cheap Tier-1 scalars.
 
-        ``delta_estimate`` (a per-constant dict) is Tier-1.  The recurrence
-        (``recurrence_relation`` / ``recurrence_order``) is **Tier-2** and stays
-        ``None`` unless ``compute_recurrence=True`` (it builds the expensive
-        symbolic ``LinearRecurrence``).  ``extended_metrics`` stays empty until
-        Tier-2 workers (if any) write to it.
+        ``delta`` is Tier-1.  The recurrence stays ``None`` unless
+        ``compute_recurrence=True`` (it builds the expensive symbolic
+        ``LinearRecurrence``).  ``extra`` stays empty for the default δ objective
+        (no synchronous non-core metric is required).
         """
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
-        dto = build_trajectory_dto(
+        dto = build_trajectory_dtos(
             minimal_handler,
             cmf_id="c", shard_id="s", cmf_name="c",
             shard_encoding_str="enc", start=start, direction=direction,
-        )
-        # Recurrence is NOT computed on the default (hot) path.
+        )[0]
         assert dto.recurrence_relation is None
         assert dto.recurrence_order is None
-        # ``delta_estimate`` is a dict; each value is finite or the -inf sentinel.
-        assert isinstance(dto.delta_estimate, dict)
-        for delta_val in dto.delta_estimate.values():
-            assert abs(delta_val) < 1e9 or delta_val == float("-inf")
-        assert dto.extended_metrics == {}   # workers haven't run yet
+        assert isinstance(dto.delta, float)
+        assert abs(dto.delta) < 1e9 or dto.delta == float("-inf")
+        assert dto.extra == {}   # δ objective needs no extra metric
 
-    def test_objective_defaults_to_delta_and_mirrors_delta_estimate(
-        self, minimal_handler, symbols
-    ):
-        """With the default ``delta`` objective, ``objective_value`` equals the
-        (raw) δ per constant and is a *separate* field from ``delta_estimate``."""
+    def test_objective_default_delta_no_extra(self, minimal_handler, symbols):
+        """The default ``delta`` objective is the core column — no extra metric."""
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
-        dto = build_trajectory_dto(
+        dto = build_trajectory_dtos(
             minimal_handler,
             cmf_id="c", shard_id="s", cmf_name="c",
             shard_encoding_str="enc", start=start, direction=direction,
-        )
-        assert dto.objective_name == "delta"
-        assert isinstance(dto.objective_value, dict)
-        assert set(dto.objective_value) == set(dto.delta_estimate)
-        # δ objective's raw value is δ itself (delta_estimate == raw δ when
-        # USE_DELTA_PREDICTION is off, which is the default).
-        for name, val in dto.objective_value.items():
-            assert val == dto.delta_estimate[name]
+        )[0]
+        assert "convergence_rate" not in dto.extra
 
-    def test_objective_override_stores_that_attribute(
+    def test_objective_override_stores_as_flat_column(
         self, minimal_handler, symbols, monkeypatch
     ):
-        """A non-δ objective is computed within the constant-set scope and stored
-        under ``objective_value`` / ``objective_name`` (δ still in delta_estimate)."""
+        """A non-δ objective is computed within the constant scope and stored as a
+        flat ``extra`` column under its own name (δ still in the ``delta`` field)."""
         from dreamer.configs import config
         monkeypatch.setattr(config.system, "OPTIMIZATION_OBJECTIVE", "convergence_rate")
-        # Avoid depending on LIReC: pin the spectral rate to a known value.
         monkeypatch.setattr(minimal_handler, "convergence_rate", lambda *a, **k: 0.375)
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
-        dto = build_trajectory_dto(
+        dto = build_trajectory_dtos(
             minimal_handler,
             cmf_id="c", shard_id="s", cmf_name="c",
             shard_encoding_str="enc", start=start, direction=direction,
-        )
-        assert dto.objective_name == "convergence_rate"
-        assert dto.objective_value is not None
-        assert all(v == 0.375 for v in dto.objective_value.values())
-        # delta_estimate is untouched — still the irrationality measure, not the rate.
-        assert set(dto.delta_estimate) == set(dto.objective_value)
+        )[0]
+        assert dto.extra.get("convergence_rate") == 0.375
+        # Serialised flat: the metric is a top-level column.
+        assert json.loads(dto.to_json_line())["convergence_rate"] == 0.375
 
     def test_compute_recurrence_opt_in_populates_recurrence(self, minimal_handler, symbols):
-        """``compute_recurrence=True`` populates the Tier-2 recurrence fields."""
+        """``compute_recurrence=True`` populates the recurrence fields."""
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
-        dto = build_trajectory_dto(
+        dto = build_trajectory_dtos(
             minimal_handler,
             cmf_id="c", shard_id="s", cmf_name="c",
             shard_encoding_str="enc", start=start, direction=direction,
             compute_recurrence=True,
-        )
+        )[0]
         assert isinstance(dto.recurrence_relation, str)
         assert dto.recurrence_relation != ""
         assert dto.recurrence_order >= 1
 
-    def test_p_and_q_vectors_are_dicts_or_none(self, minimal_handler, symbols):
-        """``build_trajectory_dto`` stores p/q as dicts (const→tuple) or ``None``."""
+    def test_p_and_q_vectors_are_tuples_or_none(self, minimal_handler, symbols):
+        """p/q are per-row tuples (or ``None`` when unidentified)."""
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
-        dto = build_trajectory_dto(
+        dto = build_trajectory_dtos(
             minimal_handler,
             cmf_id="c", shard_id="s", cmf_name="c",
             shard_encoding_str="enc", start=start, direction=direction,
-        )
+        )[0]
         if dto.p_vector is None:
             assert dto.q_vector is None
         else:
-            assert isinstance(dto.p_vector, dict)
-            assert isinstance(dto.q_vector, dict)
-            for pv in dto.p_vector.values():
-                if pv is not None:
-                    assert isinstance(pv, tuple)
-                    assert len(pv) == minimal_handler.traj_size()
+            assert isinstance(dto.p_vector, tuple)
+            assert isinstance(dto.q_vector, tuple)
+            assert len(dto.p_vector) == minimal_handler.traj_size()
 
 
 # ---------------------------------------------------------------------------
@@ -725,36 +707,20 @@ class TestLoadSeenTrajectoryIds:
 
 class TestExtendedMetricsMutation:
 
-    def test_frozen_dto_extended_metrics_is_mutable(self):
-        """frozen=True blocks field reassignment but not in-place dict mutation."""
+    def test_frozen_dto_extra_is_mutable(self):
+        """frozen=True blocks field reassignment but not in-place ``extra`` mutation."""
         dto = TrajectoryDTO(
-            trajectory_id="t",
-            cmf_id="c",
-            shard_id="s",
-            start_point=(0,),
-            direction=(1,),
-            recurrence_relation="",
-            recurrence_order=1,
-            delta_estimate={"e": 1.0},
-            p_vector={"e": ()},
-            q_vector={"e": ()},
+            trajectory_id="t", cmf_id="c", shard_id="s", constant="e",
+            start_point=(0,), direction=(1,), delta=1.0,
         )
-        dto.extended_metrics["eigenvalues"] = ["1+0j"]
-        assert dto.extended_metrics["eigenvalues"] == ["1+0j"]
+        dto.extra["eigenvalues"] = ["1+0j"]
+        assert dto.extra["eigenvalues"] == ["1+0j"]
 
     def test_frozen_dto_field_reassignment_raises(self):
         """Reassigning a field on a frozen DTO must raise FrozenInstanceError."""
         dto = TrajectoryDTO(
-            trajectory_id="t",
-            cmf_id="c",
-            shard_id="s",
-            start_point=(0,),
-            direction=(1,),
-            recurrence_relation="",
-            recurrence_order=1,
-            delta_estimate={"e": 1.0},
-            p_vector={"e": ()},
-            q_vector={"e": ()},
+            trajectory_id="t", cmf_id="c", shard_id="s", constant="e",
+            start_point=(0,), direction=(1,), delta=1.0,
         )
         with pytest.raises(Exception):  # FrozenInstanceError is a dataclasses internal
             dto.trajectory_id = "new_id"
@@ -764,20 +730,19 @@ class TestExtendedMetricsMutation:
 # 8. JSONL Exporter / Importer round-trip
 # ---------------------------------------------------------------------------
 
-def _make_dto(trajectory_id: str = "t1", delta: float = 1.0) -> TrajectoryDTO:
-    """Build a minimal TrajectoryDTO with the given id and delta."""
+def _make_dto(trajectory_id: str = "t1", delta: float = 1.0, constant: str = "e") -> TrajectoryDTO:
+    """Build a minimal flat per-(traj, constant) TrajectoryDTO."""
     return TrajectoryDTO(
         trajectory_id=trajectory_id,
         cmf_id="cmf",
         shard_id="shard",
+        constant=constant,
         start_point=(1, 2),
         direction=(0, 1),
         recurrence_relation="a*f(n) + b*f(n-1) = 0",
         recurrence_order=1,
-        delta_estimate={"e": delta},
-        p_vector={"e": ()},
-        q_vector={"e": ()},
-        identified={"e": True},
+        identified=True,
+        delta=delta,
     )
 
 
@@ -795,8 +760,8 @@ class TestJsonlRoundTrip:
         assert len(records) == 3
         ids = [r["trajectory_id"] for r in records]
         assert ids == ["a", "b", "c"]
-        deltas = [r["delta_estimate"] for r in records]
-        assert deltas == [{"e": 1.0}, {"e": 2.0}, {"e": 3.0}]
+        deltas = [r["delta"] for r in records]
+        assert deltas == [1.0, 2.0, 3.0]
 
     def test_jsonl_export_then_dto_from_dict(self, tmp_path):
         """Records returned by Importer can be rebuilt into typed DTOs."""
@@ -1307,14 +1272,14 @@ class TestBestTrajectoryRecord:
 
         # Two shards, three trajectories — best delta lives in shard B.
         (tmp_path / "cmfA__sh1.jsonl").write_text(
-            json.dumps({"trajectory_id": "a1", "delta_estimate": {"e": 1.2},
-                        "start_point": [0, 0], "direction": [1, 0]}) + "\n"
-            + json.dumps({"trajectory_id": "a2", "delta_estimate": {"e": 2.5},
-                          "start_point": [0, 1], "direction": [1, 0]}) + "\n"
+            json.dumps({"trajectory_id": "a1", "constant": "e", "delta": 1.2,
+                        "identified": True, "start_point": [0, 0], "direction": [1, 0]}) + "\n"
+            + json.dumps({"trajectory_id": "a2", "constant": "e", "delta": 2.5,
+                          "identified": True, "start_point": [0, 1], "direction": [1, 0]}) + "\n"
         )
         (tmp_path / "cmfB__sh2.jsonl").write_text(
-            json.dumps({"trajectory_id": "b1", "delta_estimate": {"e": 4.7},
-                        "start_point": [2, 2], "direction": [0, 1]}) + "\n"
+            json.dumps({"trajectory_id": "b1", "constant": "e", "delta": 4.7,
+                        "identified": True, "start_point": [2, 2], "direction": [0, 1]}) + "\n"
         )
 
         class _Const:
@@ -1338,13 +1303,13 @@ class TestBestTrajectoryRecord:
 
         # Run 1 (CMF A) left a high-delta file behind in the flat dir.
         (tmp_path / "cmfA__sh1.jsonl").write_text(
-            json.dumps({"trajectory_id": "a1", "delta_estimate": {"e": 9.9},
-                        "start_point": [0, 0], "direction": [1, 0]}) + "\n"
+            json.dumps({"trajectory_id": "a1", "constant": "e", "delta": 9.9,
+                        "identified": True, "start_point": [0, 0], "direction": [1, 0]}) + "\n"
         )
         # Run 2 (CMF B) — the only shard this run actually searched.
         (tmp_path / "cmfB__sh2.jsonl").write_text(
-            json.dumps({"trajectory_id": "b1", "delta_estimate": {"e": 1.0},
-                        "start_point": [2, 2], "direction": [0, 1]}) + "\n"
+            json.dumps({"trajectory_id": "b1", "constant": "e", "delta": 1.0,
+                        "identified": True, "start_point": [2, 2], "direction": [0, 1]}) + "\n"
         )
 
         class _Const:
@@ -1389,9 +1354,9 @@ class TestBestTrajectoryRecord:
 
         monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
         (tmp_path / "f.jsonl").write_text(
-            json.dumps({"trajectory_id": "no_delta"}) + "\n"
-            + json.dumps({"trajectory_id": "has_delta", "delta_estimate": {"e": 1.0},
-                          "start_point": [0], "direction": [1]}) + "\n"
+            json.dumps({"trajectory_id": "no_delta", "constant": "e"}) + "\n"
+            + json.dumps({"trajectory_id": "has_delta", "constant": "e", "delta": 1.0,
+                          "identified": True, "start_point": [0], "direction": [1]}) + "\n"
         )
 
         class _Const:
@@ -1408,13 +1373,11 @@ class TestBestTrajectoryRecord:
 
         monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
         (tmp_path / "cmfA__sh.jsonl").write_text(
-            json.dumps({"trajectory_id": "hi_delta", "delta_estimate": {"e": 5.0},
-                        "identified": {"e": True}, "objective_name": "convergence_rate",
-                        "objective_value": {"e": 0.10},
+            json.dumps({"trajectory_id": "hi_delta", "constant": "e", "delta": 5.0,
+                        "identified": True, "convergence_rate": 0.10,
                         "start_point": [0, 0], "direction": [1, 0]}) + "\n"
-            + json.dumps({"trajectory_id": "hi_rate", "delta_estimate": {"e": 0.3},
-                          "identified": {"e": True}, "objective_name": "convergence_rate",
-                          "objective_value": {"e": 0.80},
+            + json.dumps({"trajectory_id": "hi_rate", "constant": "e", "delta": 0.3,
+                          "identified": True, "convergence_rate": 0.80,
                           "start_point": [0, 1], "direction": [0, 1]}) + "\n"
         )
 
@@ -1476,32 +1439,46 @@ class TestMergeOnRead:
         path = tmp_path / "t.jsonl"
         base = {
             "trajectory_id": "abc",
-            "delta_estimate": 1.5,
-            "extended_metrics": {"eigenvalues": ["1+0j"]},
+            "constant": "e",
+            "delta": 1.5,
+            "eigenvalues": ["1+0j"],   # flat metric column
         }
         path.write_text(json.dumps(base) + "\n")
         result = load_seen_trajectories(str(path))
         assert set(result) == {"abc"}
-        assert result["abc"]["delta_estimate"] == 1.5
-        assert result["abc"]["extended_metrics"] == {"eigenvalues": ["1+0j"]}
+        assert set(result["abc"]) == {"e"}      # nested by constant
+        assert result["abc"]["e"]["delta"] == 1.5
+        assert result["abc"]["e"]["eigenvalues"] == ["1+0j"]
 
-    def test_patch_merges_new_extended_metrics_key(self, tmp_path):
-        """Patch line adds a new key to extended_metrics without removing existing ones."""
+    def test_patch_merges_new_flat_metric_key(self, tmp_path):
+        """A patch line adds a new flat column without removing existing ones."""
         path = tmp_path / "t.jsonl"
-        base = {"trajectory_id": "t1", "extended_metrics": {"eigenvalues": ["1+0j"]}}
-        patch = {"trajectory_id": "t1", "extended_metrics": {"spectral_gap": 0.5}}
+        base = {"trajectory_id": "t1", "constant": "e", "eigenvalues": ["1+0j"]}
+        patch = {"trajectory_id": "t1", "constant": "e", "spectral_gap": 0.5}
         path.write_text(json.dumps(base) + "\n" + json.dumps(patch) + "\n")
-        merged = load_seen_trajectories(str(path))["t1"]
-        assert merged["extended_metrics"] == {"eigenvalues": ["1+0j"], "spectral_gap": 0.5}
+        merged = load_seen_trajectories(str(path))["t1"]["e"]
+        assert merged["eigenvalues"] == ["1+0j"]
+        assert merged["spectral_gap"] == 0.5
 
-    def test_patch_overwrites_conflicting_extended_metrics_key(self, tmp_path):
-        """Later patch wins when a key exists in both base and patch."""
+    def test_patch_overwrites_conflicting_flat_key(self, tmp_path):
+        """Later patch wins when a column exists in both base and patch."""
         path = tmp_path / "t.jsonl"
-        base = {"trajectory_id": "t1", "extended_metrics": {"eigenvalues": ["old"]}}
-        patch = {"trajectory_id": "t1", "extended_metrics": {"eigenvalues": ["new"]}}
+        base = {"trajectory_id": "t1", "constant": "e", "eigenvalues": ["old"]}
+        patch = {"trajectory_id": "t1", "constant": "e", "eigenvalues": ["new"]}
         path.write_text(json.dumps(base) + "\n" + json.dumps(patch) + "\n")
+        merged = load_seen_trajectories(str(path))["t1"]["e"]
+        assert merged["eigenvalues"] == ["new"]
+
+    def test_same_trajectory_different_constants_are_separate_rows(self, tmp_path):
+        """Two constants of one trajectory land under distinct nested keys."""
+        path = tmp_path / "t.jsonl"
+        path.write_text(
+            json.dumps({"trajectory_id": "t1", "constant": "e", "delta": 0.5}) + "\n"
+            + json.dumps({"trajectory_id": "t1", "constant": "log2", "delta": 0.2}) + "\n"
+        )
         merged = load_seen_trajectories(str(path))["t1"]
-        assert merged["extended_metrics"]["eigenvalues"] == ["new"]
+        assert set(merged) == {"e", "log2"}
+        assert merged["e"]["delta"] == 0.5 and merged["log2"]["delta"] == 0.2
 
     def test_missing_file_returns_empty_dict(self, tmp_path):
         path = str(tmp_path / "nonexistent.jsonl")
@@ -1522,25 +1499,24 @@ class TestMergeOnRead:
     # Importer._read_jsonl(merge=True)
     # ------------------------------------------------------------------
 
-    def test_importer_read_jsonl_merge_combines_same_id(self, tmp_path):
+    def test_importer_read_jsonl_merge_combines_same_key(self, tmp_path):
         path = tmp_path / "t.jsonl"
-        r1 = {"trajectory_id": "t1", "delta_estimate": 1.0,
-              "extended_metrics": {"eigenvalues": ["1"]}}
-        r2 = {"trajectory_id": "t1", "extended_metrics": {"spectral_gap": 0.3}}
-        r3 = {"trajectory_id": "t2", "delta_estimate": 2.0, "extended_metrics": {}}
+        r1 = {"trajectory_id": "t1", "constant": "e", "delta": 1.0, "eigenvalues": ["1"]}
+        r2 = {"trajectory_id": "t1", "constant": "e", "spectral_gap": 0.3}
+        r3 = {"trajectory_id": "t2", "constant": "e", "delta": 2.0}
         path.write_text("\n".join(json.dumps(r) for r in [r1, r2, r3]) + "\n")
         merged = Importer._read_jsonl(str(path), merge=True)
         assert len(merged) == 2
         t1 = next(r for r in merged if r.get("trajectory_id") == "t1")
-        assert t1["delta_estimate"] == 1.0
-        assert t1["extended_metrics"]["eigenvalues"] == ["1"]
-        assert t1["extended_metrics"]["spectral_gap"] == 0.3
+        assert t1["delta"] == 1.0
+        assert t1["eigenvalues"] == ["1"]
+        assert t1["spectral_gap"] == 0.3
 
     def test_importer_read_jsonl_merge_false_returns_raw_lines(self, tmp_path):
         """merge=False (default) returns one entry per JSON line, including duplicates."""
         path = tmp_path / "t.jsonl"
-        r1 = {"trajectory_id": "t1", "extended_metrics": {"eigenvalues": ["1"]}}
-        r2 = {"trajectory_id": "t1", "extended_metrics": {"spectral_gap": 0.3}}
+        r1 = {"trajectory_id": "t1", "constant": "e", "eigenvalues": ["1"]}
+        r2 = {"trajectory_id": "t1", "constant": "e", "spectral_gap": 0.3}
         path.write_text(json.dumps(r1) + "\n" + json.dumps(r2) + "\n")
         raw = Importer._read_jsonl(str(path), merge=False)
         assert len(raw) == 2
@@ -1562,19 +1538,18 @@ class TestMergeOnRead:
 
         patch = {
             "trajectory_id": "existing_t1",
-            "extended_metrics": {
-                "eigenvalues": ["pre-computed"],
-                "spectral_gap": 0.5,
-                "gcd_slope": 0.1,
-                "approximated_digits_per_step": 8.0,
-            },
+            "constant": "e",
+            "eigenvalues": ["pre-computed"],
+            "spectral_gap": 0.5,
+            "gcd_slope": 0.1,
+            "approximated_digits_per_step": 8.0,
         }
         out = compute_tier2_for_item((None, None, patch))
 
         assert out["trajectory_id"] == "existing_t1"
         # Pre-computed values must not be replaced by error entries.
-        assert out["extended_metrics"]["eigenvalues"] == ["pre-computed"]
-        assert "eigenvalues_error" not in out["extended_metrics"]
+        assert out["eigenvalues"] == ["pre-computed"]
+        assert "eigenvalues_error" not in out
 
     def test_worker_full_dto_input_is_passthrough_when_nothing_missing(
         self, minimal_handler, symbols, monkeypatch,
@@ -1588,15 +1563,15 @@ class TestMergeOnRead:
 
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
         direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
-        dto = build_trajectory_dto(
+        dto = build_trajectory_dtos(
             minimal_handler,
             cmf_id="c", shard_id="s", cmf_name="c",
             shard_encoding_str="enc", start=start, direction=direction,
-        )
+        )[0]
 
         out = compute_tier2_for_item((None, None, dto))
         assert out is dto, "Worker must return the same DTO object unchanged"
-        assert out.extended_metrics == {}
+        assert out.extra == {}
 
     def test_worker_with_none_traj_matrix_does_not_crash(self, monkeypatch):
         """When traj_matrix=None and attrs are missing, the worker is a no-op.
@@ -1609,10 +1584,10 @@ class TestMergeOnRead:
 
         monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ("eigenvalues",))
 
-        patch = {"trajectory_id": "t1", "extended_metrics": {}}
+        patch = {"trajectory_id": "t1", "constant": "e"}
         out = compute_tier2_for_item((None, None, patch))
-        # No computation happened; extended_metrics stays empty.
-        assert out["extended_metrics"] == {}
+        # No computation happened; the flat patch gained no metric columns.
+        assert set(out.keys()) == {"trajectory_id", "constant"}
 
     def test_tier3_worker_direct_call(self, simple_shard, monkeypatch):
         """``compute_tier3_for_item`` computes registered attrs into a patch dict."""
@@ -1634,16 +1609,13 @@ class TestMergeOnRead:
             searchable=simple_shard,
         )
 
-        patch = {"trajectory_id": "t1", "extended_metrics": {}}
+        patch = {"trajectory_id": "t1", "constant": "e"}
         out = compute_tier3_for_item((handler.trajectory_matrix, e.value_sympy, patch, None))
 
         assert out is patch  # same dict, mutated in place
-        # kamidelta either computed successfully or recorded as an error;
+        # kamidelta either computed successfully or recorded as an error (flat keys);
         # either path is acceptable — what matters is that one of them is present.
-        assert (
-            "kamidelta" in out["extended_metrics"]
-            or "kamidelta_error" in out["extended_metrics"]
-        )
+        assert "kamidelta" in out or "kamidelta_error" in out
 
     # ------------------------------------------------------------------
     # Writer: handles plain patch dicts
@@ -1654,7 +1626,7 @@ class TestMergeOnRead:
         from dreamer.utils.multi_processing import write_jsonl_line
 
         output_path = tmp_path / "out.jsonl"
-        patch = {"trajectory_id": "p1", "extended_metrics": {"spectral_gap": 0.7}}
+        patch = {"trajectory_id": "p1", "constant": "e", "spectral_gap": 0.7}
         with open(output_path, "a") as fout:
             write_jsonl_line(patch, fout)
 
@@ -1662,7 +1634,7 @@ class TestMergeOnRead:
         assert len(lines) == 1
         record = json.loads(lines[0])
         assert record["trajectory_id"] == "p1"
-        assert record["extended_metrics"]["spectral_gap"] == 0.7
+        assert record["spectral_gap"] == 0.7
 
     # ------------------------------------------------------------------
     # Producer: smart deduplication
@@ -1715,7 +1687,8 @@ class TestMergeOnRead:
 
         cmf_id, shard_id, enc_str = derive_cmf_and_shard_ids(simple_shard)
 
-        # Pre-populate every trajectory as fully covered for "eigenvalues".
+        # Pre-populate every (trajectory, constant) row as fully covered for
+        # "eigenvalues" (flat column present + matching fingerprint).
         seen_trajectories = {}
         for traj_p, start_p in pairs:
             start_t = tuple(int(v) for v in start_p.values())
@@ -1723,9 +1696,9 @@ class TestMergeOnRead:
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
             fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
             seen_trajectories[tid] = {
-                "trajectory_id": tid,
-                "extended_metrics": {"eigenvalues": "dummy"},
-                "config_fingerprint": fp,
+                c.name: {"trajectory_id": tid, "constant": c.name,
+                         "eigenvalues": "dummy", "config_fingerprint": fp}
+                for c in simple_shard.consts
             }
 
         sink, items = self._collecting_sink()
@@ -1771,7 +1744,8 @@ class TestMergeOnRead:
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
             fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
             seen_trajectories[tid] = {
-                "trajectory_id": tid, "extended_metrics": {}, "config_fingerprint": fp,
+                c.name: {"trajectory_id": tid, "constant": c.name, "config_fingerprint": fp}
+                for c in simple_shard.consts
             }
 
         # Count handler constructions.
@@ -1850,8 +1824,10 @@ class TestMergeOnRead:
         )
 
         assert len(seen) > 0, "Producer must record emitted trajectories in seen_trajectories"
-        for record in seen.values():
-            assert "extended_metrics" in record
+        for by_const in seen.values():           # {tid: {const: record}}
+            assert by_const                       # at least one constant row
+            for record in by_const.values():
+                assert "trajectory_id" in record and "constant" in record
 
     def test_load_seen_trajectories_patch_only_no_base(self, tmp_path):
         """A file containing only a patch (no prior base record) is still readable.
@@ -1860,26 +1836,24 @@ class TestMergeOnRead:
         the merge logic must not crash and the patch becomes the merged record.
         """
         path = tmp_path / "patch_only.jsonl"
-        patch = {"trajectory_id": "orphan", "extended_metrics": {"spectral_gap": 0.5}}
+        patch = {"trajectory_id": "orphan", "constant": "e", "spectral_gap": 0.5}
         path.write_text(json.dumps(patch) + "\n")
         merged = load_seen_trajectories(str(path))
-        assert merged["orphan"]["extended_metrics"] == {"spectral_gap": 0.5}
+        assert merged["orphan"]["e"]["spectral_gap"] == 0.5
 
     def test_load_seen_trajectories_three_way_merge(self, tmp_path):
-        """Three records sharing the same id are merged left-to-right."""
+        """Three rows sharing the same (id, constant) merge left-to-right (flat)."""
         path = tmp_path / "three.jsonl"
         records = [
-            {"trajectory_id": "t", "delta_estimate": 1.0,
-             "extended_metrics": {"a": 1}},
-            {"trajectory_id": "t", "extended_metrics": {"b": 2}},
-            {"trajectory_id": "t", "delta_estimate": 9.9,
-             "extended_metrics": {"c": 3}},
+            {"trajectory_id": "t", "constant": "e", "delta": 1.0, "a": 1},
+            {"trajectory_id": "t", "constant": "e", "b": 2},
+            {"trajectory_id": "t", "constant": "e", "delta": 9.9, "c": 3},
         ]
         path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
-        merged = load_seen_trajectories(str(path))["t"]
-        assert merged["extended_metrics"] == {"a": 1, "b": 2, "c": 3}
-        # Top-level keys: later wins.
-        assert merged["delta_estimate"] == 9.9
+        merged = load_seen_trajectories(str(path))["t"]["e"]
+        assert merged["a"] == 1 and merged["b"] == 2 and merged["c"] == 3
+        # Later wins for a repeated column.
+        assert merged["delta"] == 9.9
 
     def test_producer_patch_path_does_not_compute_recurrence_relation(
         self, simple_shard, monkeypatch,
@@ -1902,15 +1876,17 @@ class TestMergeOnRead:
 
         cmf_id, shard_id, enc_str = derive_cmf_and_shard_ids(simple_shard)
 
-        # Mark every trajectory as known with the configured Tier-2 attr missing.
+        # Mark every (trajectory, constant) row as known+fresh with the Tier-2 attr
+        # missing → the partial (patch) path.
         seen_trajectories: dict = {}
         for traj_p, start_p in pairs:
             start_t = tuple(int(v) for v in start_p.values())
             dir_t = tuple(int(v) for v in traj_p.values())
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
+            fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
             seen_trajectories[tid] = {
-                "trajectory_id": tid,
-                "extended_metrics": {},  # eigenvalues missing → patch path
+                c.name: {"trajectory_id": tid, "constant": c.name, "config_fingerprint": fp}
+                for c in simple_shard.consts
             }
 
         calls = {"formula_str": 0, "order": 0}
@@ -1968,9 +1944,9 @@ class TestMergeOnRead:
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
             fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
             seen_trajectories[tid] = {
-                "trajectory_id": tid,
-                "extended_metrics": {present_attr: "pre-computed"},
-                "config_fingerprint": fp,
+                c.name: {"trajectory_id": tid, "constant": c.name,
+                         present_attr: "pre-computed", "config_fingerprint": fp}
+                for c in simple_shard.consts
             }
 
         sink, items = self._collecting_sink()
@@ -1989,10 +1965,10 @@ class TestMergeOnRead:
             assert isinstance(payload, dict), (
                 f"Expected patch dict, got {type(payload).__name__}"
             )
-            assert "trajectory_id" in payload
-            # The patch is empty (workers fill it); the already-present attr
-            # must not be in it.
-            assert present_attr not in payload["extended_metrics"]
+            assert "trajectory_id" in payload and "constant" in payload
+            # The flat patch carries only structural keys (workers fill metrics);
+            # the already-present attr must not be in it.
+            assert present_attr not in payload
 
 
 # ---------------------------------------------------------------------------
@@ -2106,10 +2082,11 @@ class TestAnalyzerDedup:
                 start_t = tuple(int(v) for v in start_p.values())
                 dir_t = tuple(int(v) for v in traj_p.values())
                 tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
+                fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
                 fout.write(json.dumps({
-                    "trajectory_id": tid,
-                    "delta_estimate": {e.name: 1.0},
-                    "identified": {e.name: True},
+                    "trajectory_id": tid, "constant": e.name,
+                    "delta": 1.0, "identified": True,
+                    "config_fingerprint": fp,
                 }) + "\n")
 
         sample_calls = [0]
@@ -2156,17 +2133,17 @@ class TestAnalyzerDedup:
         )
 
         class _FakeDTO:
-            delta_estimate = {e.name: 1.0}
-            identified = {e.name: True}
+            constant = e.name
+            delta = 1.0
+            identified = True
 
             def to_json_line(self):
                 return json.dumps({
-                    "trajectory_id": "x",
-                    "delta_estimate": self.delta_estimate,
-                    "identified": self.identified,
+                    "trajectory_id": "x", "constant": e.name,
+                    "delta": 1.0, "identified": True,
                 })
 
-        monkeypatch.setattr(am, "build_trajectory_dto", lambda *a, **k: _FakeDTO())
+        monkeypatch.setattr(am, "build_trajectory_dtos", lambda *a, **k: [_FakeDTO()])
 
         # Extraction wrote the shard with no constants confirmed found.
         write_shard_records(str(tmp_path), simple_shard.cmf_name, [simple_shard],
@@ -2256,9 +2233,8 @@ class TestAnalyzerDedup:
                 tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
                 fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
                 fout.write(json.dumps({
-                    "trajectory_id": tid,
-                    "delta_estimate": {e.name: 2.5},
-                    "identified": {e.name: True},
+                    "trajectory_id": tid, "constant": e.name,
+                    "delta": 2.5, "identified": True,
                     "config_fingerprint": fp,
                 }) + "\n")
 
@@ -2329,7 +2305,8 @@ class TestAnalyzerDedup:
         for line in lines:
             record = json.loads(line)
             assert "trajectory_id" in record
-            assert "delta_estimate" in record
+            assert "constant" in record
+            assert "delta" in record
             assert "identified" in record
             assert "shard_id" in record
             assert record["shard_id"] == shard_id
@@ -2402,9 +2379,8 @@ class TestAnalyzerDedup:
         fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
         with open(jsonl_path, "w") as fout:
             fout.write(json.dumps({
-                "trajectory_id": tid,
-                "delta_estimate": {e.name: 1.0},
-                "identified": {e.name: True},
+                "trajectory_id": tid, "constant": e.name,
+                "delta": 1.0, "identified": True,
                 "config_fingerprint": fp,
             }) + "\n")
 
@@ -2766,14 +2742,14 @@ class TestTier3PostProcess:
         )
 
         cmf_id, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
-        # Flat layout: JSONL directly in EXPORT_SEARCH_RESULTS (no const subdir).
+        # Flat per-(traj, constant) row directly in EXPORT_SEARCH_RESULTS.
         jsonl = tmp_path / f"{shard_id}.jsonl"
         base_record = {
             "trajectory_id": "t-needs-tier3",
             "cmf_id": cmf_id,
+            "constant": e.name,
             "start_point": [1, 1],
             "direction": [1, 1],
-            "extended_metrics": {},
         }
         jsonl.write_text(json.dumps(base_record) + "\n")
 
@@ -2781,14 +2757,13 @@ class TestTier3PostProcess:
 
         lines = [ln for ln in jsonl.read_text().splitlines() if ln.strip()]
         assert len(lines) >= 2, "Expected at least one patch appended"
-        # The last line should be the patch.
+        # The last line should be the flat patch.
         patch = json.loads(lines[-1])
         assert patch["trajectory_id"] == "t-needs-tier3"
-        assert "extended_metrics" in patch
+        assert patch.get("constant") == e.name
         # Either kamidelta computed, or it errored — either is fine; what matters
-        # is that the patch line exists and carries the trajectory id.
-        em = patch["extended_metrics"]
-        assert "kamidelta" in em or "kamidelta_error" in em
+        # is that the patch line exists (flat column) and carries the trajectory id.
+        assert "kamidelta" in patch or "kamidelta_error" in patch
 
     def test_cmf_lookup_built_from_priorities(self, simple_shard):
         """Searchables in priorities feed the in-memory CMF lookup."""
@@ -3114,9 +3089,23 @@ class TestSummaryWriter:
 
     @staticmethod
     def _write_jsonl(path, records):
+        """Write records, expanding any legacy ``delta_estimate``-dict record into
+        one **flat per-(trajectory, constant)** row (the current schema)."""
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        flat = []
+        for r in records:
+            de = r.get("delta_estimate")
+            if isinstance(de, dict):
+                ided = r.get("identified") or {}
+                base = {k: v for k, v in r.items()
+                        if k not in ("delta_estimate", "identified")}
+                for const, dval in de.items():
+                    flat.append({**base, "constant": const, "delta": dval,
+                                 "identified": bool(ided.get(const, False))})
+            else:
+                flat.append(r)
         with open(path, "w") as f:
-            for r in records:
+            for r in flat:
                 f.write(json.dumps(r) + "\n")
 
     def test_returns_none_when_root_missing(self, tmp_path):

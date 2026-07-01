@@ -74,14 +74,15 @@ def _make_ctx(shard, constant):
 
 def _stub_walk(monkeypatch):
     """Stub the pool worker: δ = sum of the primitive direction's coords."""
+    from dreamer.utils.storage.dtos import TrajectoryDTO
+
     def fake_pool_walk(args):
-        direction, constant, *_ = args
+        direction, constant, cmf_id, shard_id, shard_encoding_str = args
         val = float(sum(int(v) for v in direction.values()))
-        dto = SimpleNamespace(
-            delta_estimate={constant.name: val},
-            identified={constant.name: True},
-            objective_name="delta",
-            objective_value={constant.name: val},
+        dto = TrajectoryDTO(
+            trajectory_id="t", cmf_id=cmf_id, shard_id=shard_id,
+            constant=constant.name, start_point=(), direction=(),
+            identified=True, delta=val,
         )
         return ("MATRIX", constant.value_sympy, dto)
 
@@ -93,43 +94,23 @@ def _deltas(results):
 
 
 class TestScoreFromRecord:
-    """The evaluator's objective-aware cache reader."""
+    """The evaluator's objective-aware cache reader (flat per-constant rows)."""
 
-    def test_reads_objective_value_under_matching_objective(self):
-        rec = {
-            "objective_name": "convergence_rate",
-            "objective_value": {"e": 0.4},
-            "identified": {"e": True},
-            "delta_estimate": {"e": 0.9},
-        }
-        assert _score_from_record(rec, "e", "convergence_rate") == (0.4, True)
+    def test_reads_metric_column(self):
+        rec = {"convergence_rate": 0.4, "identified": True}
+        assert _score_from_record(rec, "convergence_rate") == (0.4, True)
 
-    def test_delta_fallback_for_legacy_record(self):
-        # No objective fields at all → still scores under the delta objective.
-        rec = {"delta_estimate": {"e": 1.7}, "identified": {"e": True}}
-        assert _score_from_record(rec, "e", "delta") == (1.7, True)
+    def test_reads_delta_core_column(self):
+        rec = {"delta": 1.7, "identified": True}
+        assert _score_from_record(rec, "delta") == (1.7, True)
 
-    def test_no_fallback_for_non_delta_objective(self):
-        # A record lacking objective_value cannot be scored for convergence_rate.
-        rec = {"delta_estimate": {"e": 1.7}, "identified": {"e": True}}
-        assert _score_from_record(rec, "e", "convergence_rate") is None
+    def test_missing_column_returns_none(self):
+        rec = {"delta": 1.7, "identified": True}
+        assert _score_from_record(rec, "convergence_rate") is None
 
-    def test_stale_objective_name_falls_through(self):
-        rec = {
-            "objective_name": "delta",
-            "objective_value": {"e": 1.0},
-            "identified": {"e": True},
-        }
-        # Active objective differs and no delta_estimate to fall back on → None.
-        assert _score_from_record(rec, "e", "convergence_rate") is None
-
-    def test_none_raw_maps_to_worst_score(self):
-        rec = {
-            "objective_name": "convergence_rate",
-            "objective_value": {"e": None},   # unavailable for this trajectory
-            "identified": {"e": False},
-        }
-        assert _score_from_record(rec, "e", "convergence_rate") == (float("-inf"), False)
+    def test_none_value_maps_to_worst_score(self):
+        rec = {"convergence_rate": None, "identified": False}
+        assert _score_from_record(rec, "convergence_rate") == (float("-inf"), False)
 
 
 class TestEvaluateBatch:
@@ -168,9 +149,10 @@ class TestEvaluateBatch:
             shard_id="s", shard_encoding_str="",
         )
         ctx["seen_trajectories"][tid] = {
-            "delta_estimate": {e.name: 42.0},
-            "identified": {e.name: True},
-            "config_fingerprint": fp,
+            e.name: {
+                "trajectory_id": tid, "constant": e.name,
+                "delta": 42.0, "identified": True, "config_fingerprint": fp,
+            }
         }
         # Two genomes so the parallel path runs; both share the cached ray.
         results = pe.evaluate_batch([z.copy(), z.copy()], eval_ctx=ctx, pool=_DummyPool())

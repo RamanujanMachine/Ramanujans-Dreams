@@ -8,14 +8,15 @@ from dreamer.utils.storage.summary import build_summary_markdown
 
 
 def _rec(tid, direction, delta, conv_rate, *, const="e"):
+    # One flat row per (trajectory, constant): every metric is a top-level column.
     return {
         "trajectory_id": tid,
+        "constant": const,
         "start_point": [1, 1],
         "direction": list(direction),
-        "delta_estimate": {const: delta},
-        "identified": {const: True},
-        "objective_name": "convergence_rate",
-        "objective_value": {const: conv_rate},
+        "delta": delta,
+        "identified": True,
+        "convergence_rate": conv_rate,
         "config_fingerprint": "fp",
     }
 

@@ -691,7 +691,10 @@ class System:
                 continue
             records = Importer.imprt(fpath)
             for record in records:
-                scored = score_record(record, const.name, objective_name)
+                # Rows are per-(trajectory, constant); only this constant's rows.
+                if record.get("constant") != const.name:
+                    continue
+                scored = score_record(record, objective_name)
                 if scored is None:
                     continue
                 score, _ = scored
@@ -702,7 +705,7 @@ class System:
                     best_record = record
         if best_record is None:
             return None, None
-        return best_record, record_raw_value(best_record, const.name, objective_name)
+        return best_record, record_raw_value(best_record, objective_name)
 
     @staticmethod
     def __compact_analysis_results(dicts: List[Dict[Constant, List[Searchable]]]) -> Dict[Constant, List[Searchable]]:

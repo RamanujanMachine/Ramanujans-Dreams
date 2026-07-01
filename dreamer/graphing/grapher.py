@@ -212,17 +212,20 @@ class Grapher:
         rows: List[dict] = []
         for (const_name, cmf_id), grp in groups.items():
             for enc, path in grp["shards"]:
-                records = load_seen_trajectories(path)
+                records = load_seen_trajectories(path)  # {tid: {const: record}}
                 directions: List[list] = []
                 deltas: List[float] = []
                 seqs: List[list] = []
-                for rec in records.values():
+                for by_const in records.values():
+                    rec = by_const.get(const_name)
+                    if rec is None:
+                        continue
                     d = delta_metric(rec, const_name)
                     direction = rec.get("direction")
                     if d is not None and direction:
                         directions.append(direction)
                         deltas.append(d)
-                    seq = (rec.get("extended_metrics") or {}).get("delta_sequence")
+                    seq = rec.get("delta_sequence")
                     if isinstance(seq, (list, tuple)) and len(seq) >= 2:
                         seqs.append(seq)
 
@@ -292,9 +295,12 @@ class Grapher:
     # ------------------------------------------------------------------
 
     def _shard_deltas(self, path: str, const_name: Optional[str]) -> List[float]:
-        records = load_seen_trajectories(path)
+        records = load_seen_trajectories(path)  # {tid: {const: record}}
         out: List[float] = []
-        for rec in records.values():
+        for by_const in records.values():
+            rec = by_const.get(const_name)
+            if rec is None:
+                continue
             d = delta_metric(rec, const_name)
             if d is not None:
                 out.append(d)
@@ -314,8 +320,11 @@ class Grapher:
         best_score = -float("inf")
         best: Optional[Tuple[float, dict]] = None
         for _enc, path in shards:
-            for rec in load_seen_trajectories(path).values():
-                scored = score_record(rec, const_name, objective_name)
+            for by_const in load_seen_trajectories(path).values():
+                rec = by_const.get(const_name)
+                if rec is None:
+                    continue
+                scored = score_record(rec, objective_name)
                 if scored is None:
                     continue
                 score, _identified = scored
@@ -323,6 +332,6 @@ class Grapher:
                     continue
                 if best is None or score > best_score:
                     best_score = score
-                    raw = record_raw_value(rec, const_name, objective_name)
+                    raw = record_raw_value(rec, objective_name)
                     best = (raw if raw is not None else score, rec)
         return best
