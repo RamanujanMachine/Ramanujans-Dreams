@@ -28,6 +28,7 @@ genuinely-new Case-C walks, de-duplicating directions that share a primitive
 ray.  ``pool=None`` evaluates serially in-process.
 """
 
+import json
 import multiprocessing as mp
 from collections import namedtuple
 from multiprocessing import Pool
@@ -35,12 +36,13 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from dreamer.configs import config
 from dreamer.search.methods.flatland.evaluator import (
+    active_objective,
     evaluate_in_flatland,
     flatland_trajectory_key,
 )
 from dreamer.utils.logger import Logger
 from dreamer.utils.multi_processing import search_worker_budget
-from dreamer.utils.storage.attribute_registry import attribute_name
+from dreamer.utils.storage.optimization_objectives import score_record
 
 search_config = config.search
 
@@ -89,7 +91,7 @@ def _pool_walk(args):
     """
     from dreamer.utils.storage.trajectory_attributes import (
         TrajectoryAttributesHandler,
-        build_trajectory_dto,
+        build_trajectory_dtos,
     )
 
     direction, constant, cmf_id, shard_id, shard_encoding_str = args
@@ -99,7 +101,7 @@ def _pool_walk(args):
         handler = TrajectoryAttributesHandler.from_cmf(
             shard.cmf, direction, start, constant=None, searchable=shard
         )
-        dto = build_trajectory_dto(
+        dtos = build_trajectory_dtos(
             handler,
             cmf_id=cmf_id,
             shard_id=shard_id,
@@ -109,7 +111,9 @@ def _pool_walk(args):
             direction=direction,
             constants=[constant],
         )
-        return (handler.trajectory_matrix, constant.value_sympy, dto)
+        if not dtos:
+            return WalkError("no DTO produced")
+        return (handler.trajectory_matrix, constant.value_sympy, dtos[0])
     except Exception as exc:  # noqa: BLE001 — mirror serial evaluator resilience
         return WalkError(str(exc))
 
@@ -231,10 +235,10 @@ def evaluate_batch(
     cmf_id: str = eval_ctx["cmf_id"]
     shard_id: str = eval_ctx["shard_id"]
     shard_encoding_str: str = eval_ctx["shard_encoding_str"]
-    desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
+    objective_name = active_objective()
 
     results: List[Optional[Tuple[float, bool]]] = [None] * n
-    # trajectory_id -> (direction, fingerprint, [batch indices]) for Case C.
+    # trajectory_id -> (direction, fingerprint, [batch indices]) for the walk group.
     groups: Dict[str, tuple] = {}
 
     for i, z in enumerate(z_list):
@@ -245,18 +249,16 @@ def evaluate_batch(
             z, geom=geom, shard=shard, start=start,
             shard_id=shard_id, shard_encoding_str=shard_encoding_str,
         )
-        rec = seen.get(tid)
+        rec = seen.get(tid, {}).get(constant.name)
         if rec is not None and rec.get("config_fingerprint") == fp:
-            dmap = rec.get("delta_estimate") or {}
-            if constant.name in dmap:  # Case A
-                imap = rec.get("identified") or {}
-                results[i] = (float(dmap[constant.name]),
-                              bool(imap.get(constant.name, False)))
+            cached = score_record(rec, objective_name)
+            if cached is not None:  # already scored for this constant
+                results[i] = cached
                 continue
-        if tid in handler_cache:  # Case B — cheap recompute, no new walk
+        if tid in handler_cache:  # walk cached — cheap recompute, no new walk
             results[i] = evaluate_in_flatland(z, **eval_ctx)
             continue
-        # Case C — dedupe directions that share a primitive ray.
+        # Needs a walk — dedupe directions that share a primitive ray.
         grp = groups.get(tid)
         if grp is None:
             groups[tid] = (direction, fp, [i])
@@ -281,15 +283,12 @@ def evaluate_batch(
                 continue
             matrix, vsym, dto = res
             sink((matrix, vsym, dto))
-            seen[tid] = {
-                "extended_metrics": dict.fromkeys(desired),
-                "delta_estimate": dict(dto.delta_estimate),
-                "identified": dict(dto.identified),
-                "config_fingerprint": fp,
-            }
-            d = float(dto.delta_estimate.get(constant.name, float("-inf")))
-            ided = bool(dto.identified.get(constant.name, False))
+            record = json.loads(dto.to_json_line())
+            seen.setdefault(tid, {})[constant.name] = record
+            scored = score_record(record, objective_name)
+            if scored is None:
+                scored = (float("-inf"), bool(dto.identified))
             for i in idxs:
-                results[i] = (d, ided)
+                results[i] = scored
 
     return [r if r is not None else (float("-inf"), False) for r in results]

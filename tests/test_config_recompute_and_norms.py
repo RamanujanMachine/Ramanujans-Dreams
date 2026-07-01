@@ -15,6 +15,8 @@ Tests for three connected, critical pieces of the search pipeline:
   not the flatland LLL basis.
 """
 
+import json
+
 import numpy as np
 import pytest
 import sympy as sp
@@ -132,25 +134,22 @@ class TestTier1Fingerprint:
 class TestDtoFingerprintRoundTrip:
     def test_walk_depth_and_fingerprint_round_trip(self):
         dto = TrajectoryDTO(
-            trajectory_id="t", cmf_id="c", shard_id="s",
+            trajectory_id="t", cmf_id="c", shard_id="s", constant="e",
             start_point=(0, 0), direction=(1, 2),
-            delta_estimate={"e": 2.0},
-            p_vector=None, q_vector=None, identified={"e": True},
+            delta=2.0, identified=True,
             walk_depth=321, config_fingerprint="abc123",
         )
-        back = TrajectoryDTO.from_dict(dto.__dict__ | {})
+        back = TrajectoryDTO.from_dict(json.loads(dto.to_json_line()))
         assert back.walk_depth == 321
         assert back.config_fingerprint == "abc123"
 
-    def test_legacy_record_has_none_fingerprint(self):
-        """A record without the new fields parses with None (→ treated stale)."""
-        legacy = {
-            "trajectory_id": "t", "cmf_id": "c", "shard_id": "s",
-            "start_point": [0, 0], "direction": [1, 2],
-            "delta_estimate": {"e": 2.0}, "p_vector": None, "q_vector": None,
-            "identified": {"e": True},
+    def test_record_without_fingerprint_parses_none(self):
+        """A flat row without the walk-metadata columns parses with None."""
+        rec = {
+            "trajectory_id": "t", "cmf_id": "c", "shard_id": "s", "constant": "e",
+            "start_point": [0, 0], "direction": [1, 2], "delta": 2.0, "identified": True,
         }
-        back = TrajectoryDTO.from_dict(legacy)
+        back = TrajectoryDTO.from_dict(rec)
         assert back.walk_depth is None
         assert back.config_fingerprint is None
 
@@ -172,8 +171,9 @@ class TestEvaluatorRespectsFingerprint:
 
     def test_matching_fingerprint_short_circuits(self, whole_space_shard, symbols):
         method, geom, z, start, tid, fp = self._setup(whole_space_shard, symbols)
-        seen = {tid: {"extended_metrics": {}, "delta_estimate": {e.name: 2.5},
-                      "identified": {e.name: True}, "config_fingerprint": fp}}
+        seen = {tid: {e.name: {"trajectory_id": tid, "constant": e.name,
+                               "delta": 2.5, "identified": True,
+                               "config_fingerprint": fp}}}
         built = []
         from dreamer.search.methods.small_angle import small_angle_scan as sas
         orig = sas.TrajectoryAttributesHandler.from_cmf
@@ -193,8 +193,9 @@ class TestEvaluatorRespectsFingerprint:
     def test_stale_fingerprint_forces_recompute(self, whole_space_shard, symbols):
         method, geom, z, start, tid, _ = self._setup(whole_space_shard, symbols)
         # Record stored under a DIFFERENT (stale) config → must not be reused.
-        seen = {tid: {"extended_metrics": {}, "delta_estimate": {e.name: 2.5},
-                      "identified": {e.name: True}, "config_fingerprint": "STALE"}}
+        seen = {tid: {e.name: {"trajectory_id": tid, "constant": e.name,
+                               "delta": 2.5, "identified": True,
+                               "config_fingerprint": "STALE"}}}
         built = []
         from dreamer.search.methods.small_angle import small_angle_scan as sas
         orig = sas.TrajectoryAttributesHandler.from_cmf

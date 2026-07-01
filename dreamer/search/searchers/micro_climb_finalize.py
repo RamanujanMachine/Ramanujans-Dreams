@@ -34,8 +34,9 @@ from dreamer.search.methods.flatland.discrete_local_max import (
     discrete_micro_climb,
     primitive_ray_key,
 )
-from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
+from dreamer.search.methods.flatland.evaluator import active_objective, evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
+from dreamer.utils.storage.optimization_objectives import score_record
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.multi_processing import (
@@ -53,41 +54,48 @@ search_config = config.search
 #: lattice improvement while ignoring floating-point noise.
 _IMPROVE_EPS = 1e-9
 
-#: Decimal places at which two best trajectories count as "the same δ" (tie).
+#: Decimal places at which two best trajectories count as "the same score" (tie).
 _TIE_DECIMALS = 2
 
 
-def _best_records_for_constant(seen: dict, constant_name: str) -> Tuple[float, List[dict]]:
-    """Best δ and the records tied with it (to ``_TIE_DECIMALS`` places).
+def _best_records_for_constant(
+    seen: dict, constant_name: str, objective_name: str,
+) -> Tuple[float, List[dict]]:
+    """Best objective score and the records tied with it (to ``_TIE_DECIMALS``).
 
-    Scans the flushed per-shard records for identified, finite-δ trajectories of
-    *constant_name*, returning the maximum δ and every record whose δ rounds to
-    the same two decimals as that maximum (so a plurality of equally-good
-    trajectories are all refined, not just one).
+    Scans the flushed per-shard records for identified trajectories of
+    *constant_name* with a finite **signed** objective score (oriented so larger
+    is better — see
+    :func:`dreamer.utils.storage.optimization_objectives.signed_score`), returning
+    the maximum score and every record whose score rounds to the same two decimals
+    as that maximum (so a plurality of equally-good trajectories are all refined,
+    not just one).  Ranking follows the active objective, but identification stays
+    a hard prerequisite regardless of the objective.
 
-    :return: ``(max_delta, best_records)``; ``(-inf, [])`` when none qualify.
+    :return: ``(max_score, best_records)``; ``(-inf, [])`` when none qualify.
     """
     candidates: List[Tuple[float, dict]] = []
-    for rec in seen.values():
-        d_map = rec.get("delta_estimate") or {}
-        id_map = rec.get("identified") or {}
-        if constant_name not in d_map or not id_map.get(constant_name):
+    for by_const in seen.values():           # seen: {trajectory_id: {constant: record}}
+        rec = by_const.get(constant_name)
+        if rec is None:
             continue
-        try:
-            delta = float(d_map[constant_name])
-        except (TypeError, ValueError):
+        # Rank by the active objective via the shared record scorer; identification
+        # stays a hard prerequisite (a record only qualifies when identified).
+        scored = score_record(rec, objective_name)
+        if scored is None:
             continue
-        if not math.isfinite(delta):
+        score, identified = scored
+        if not identified or not math.isfinite(score):
             continue
-        candidates.append((delta, rec))
+        candidates.append((score, rec))
 
     if not candidates:
         return float("-inf"), []
 
-    max_delta = max(d for d, _ in candidates)
-    threshold = round(max_delta, _TIE_DECIMALS)
-    best = [rec for d, rec in candidates if round(d, _TIE_DECIMALS) == threshold]
-    return max_delta, best
+    max_score = max(s for s, _ in candidates)
+    threshold = round(max_score, _TIE_DECIMALS)
+    best = [rec for s, rec in candidates if round(s, _TIE_DECIMALS) == threshold]
+    return max_score, best
 
 
 def finalize_best_trajectories(
@@ -137,6 +145,7 @@ def finalize_best_trajectories(
     # already explored, so the endgame never walks or re-checks the same trajectory.
     visited: Set[Tuple[int, ...]] = set()
     handler_cache: dict = {}
+    objective_name = active_objective()
 
     with worker_pool(
         num_workers=num_workers,
@@ -147,7 +156,9 @@ def finalize_best_trajectories(
         parallel=bool(cfg.TIER2_ATTRIBUTES),
     ) as push:
         for const in identified_consts:
-            max_delta, best_recs = _best_records_for_constant(seen, const.name)
+            max_delta, best_recs = _best_records_for_constant(
+                seen, const.name, objective_name
+            )
             if not best_recs:
                 continue
 
@@ -205,7 +216,7 @@ def finalize_best_trajectories(
                 continue
             if improved_to > max_delta + _IMPROVE_EPS:
                 Logger(
-                    f"Micro-hill-climb finalization improved best δ for "
+                    f"Micro-hill-climb finalization improved best {objective_name} for "
                     f"'{const.name}' on shard {shard_id}: "
                     f"{max_delta:.6g} -> {improved_to:.6g} "
                     f"({climbed} best trajectory(ies) refined).",
@@ -213,8 +224,8 @@ def finalize_best_trajectories(
                 ).log()
             else:
                 Logger(
-                    f"Micro-hill-climb finalization confirmed best δ for "
-                    f"'{const.name}' on shard {shard_id}: δ={max_delta:.6g} "
+                    f"Micro-hill-climb finalization confirmed best {objective_name} for "
+                    f"'{const.name}' on shard {shard_id}: {objective_name}={max_delta:.6g} "
                     f"({climbed} tied trajectory(ies) certified).",
                     Logger.Levels.debug,
                 ).log()

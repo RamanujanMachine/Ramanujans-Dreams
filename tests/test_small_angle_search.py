@@ -268,8 +268,9 @@ class TestWalkReuse:
             tier1_config_fingerprint, walk_depth_for,
         )
         fp = tier1_config_fingerprint(walk_depth_for(whole_space_shard.cmf, geom.to_real_primitive(z)))
-        seen = {tid: {"extended_metrics": {}, "delta_estimate": {e.name: 2.5},
-                      "identified": {e.name: True}, "config_fingerprint": fp}}
+        seen = {tid: {e.name: {"trajectory_id": tid, "constant": e.name,
+                               "delta": 2.5, "identified": True,
+                               "config_fingerprint": fp}}}
         built = []
 
         from dreamer.search.methods.small_angle import small_angle_scan as sas
@@ -304,32 +305,31 @@ class TestWalkReuse:
         dir_t = _position_to_tuple(geom.to_real(z))
         tid = derive_trajectory_id("sid", whole_space_shard.cmf_name, "", start_t, dir_t)
 
-        # Simulate: trajectory was computed for pi in a previous constant's climb.
-        from dreamer import pi
+        # Simulate: this trajectory's walk was already done (handler cached this run).
         from unittest.mock import MagicMock
+        from dreamer.utils.storage.dtos import TrajectoryDTO
         cached_handler = MagicMock()
-        cached_handler.trajectory_matrix.return_value = MagicMock()
-        cached_handler.compute_for_constant.return_value = (1.5, None, None, True)
+        cached_handler.trajectory_matrix = "MATRIX"
 
-        from dreamer.utils.storage.trajectory_attributes import (
-            tier1_config_fingerprint, walk_depth_for,
-        )
-        fp = tier1_config_fingerprint(walk_depth_for(whole_space_shard.cmf, geom.to_real_primitive(z)))
-        seen = {tid: {"extended_metrics": {}, "delta_estimate": {pi.name: 0.9},
-                      "identified": {pi.name: True}, "config_fingerprint": fp}}
+        seen = {}   # nothing on disk — reuse comes from the handler cache
         emitted = []
 
         from dreamer.search.methods.small_angle import small_angle_scan as sas
-        from dreamer.utils.storage.trajectory_attributes import build_trajectory_dto as orig_build
+        from dreamer.search.methods.flatland import evaluator as ev
 
-        def fake_build(handler, **kw):
-            return orig_build(handler, **kw)
-
+        # Stub the row builder so the cached (mock) handler isn't really walked; the
+        # evaluator must reuse the cached handler rather than build a fresh one.
+        fake_dto = TrajectoryDTO(
+            trajectory_id=tid, cmf_id="", shard_id="sid", constant=e.name,
+            start_point=(), direction=(), identified=True, delta=1.5,
+        )
         built_fresh = []
         orig_from_cmf = sas.TrajectoryAttributesHandler.from_cmf
         sas.TrajectoryAttributesHandler.from_cmf = staticmethod(
             lambda *a, **k: built_fresh.append(1) or orig_from_cmf(*a, **k)
         )
+        orig_build = ev.build_trajectory_dtos
+        ev.build_trajectory_dtos = lambda *a, **k: [fake_dto]
 
         try:
             method._evaluate(
@@ -341,12 +341,12 @@ class TestWalkReuse:
             )
         finally:
             sas.TrajectoryAttributesHandler.from_cmf = staticmethod(orig_from_cmf)
+            ev.build_trajectory_dtos = orig_build
 
         assert not built_fresh, "Should not have built a new handler"
         assert len(emitted) == 1, "Should have emitted one item via sink"
         dto = emitted[0][2]
-        assert e.name in dto.delta_estimate
-        assert pi.name in dto.delta_estimate  # merged from seen_record
+        assert dto.constant == e.name and dto.delta == 1.5
 
     def test_handler_stored_in_cache_after_case_c(self, whole_space_shard, symbols):
         """Case C: new trajectory → handler is stored in handler_cache for future reuse."""
@@ -471,13 +471,16 @@ class TestParallelPerturbation:
 
     def test_parallel_picks_global_best(self, whole_space_shard, monkeypatch):
         from dreamer.search.methods.flatland import parallel_eval as pe
-        from types import SimpleNamespace
+        from dreamer.utils.storage.dtos import TrajectoryDTO
 
         def fake_pool_walk(args):
-            direction, constant, *_ = args
+            direction, constant, cmf_id, shard_id, shard_encoding_str = args
             val = float(sum(int(v) for v in direction.values()))
-            dto = SimpleNamespace(delta_estimate={constant.name: val},
-                                  identified={constant.name: True})
+            dto = TrajectoryDTO(
+                trajectory_id="t", cmf_id=cmf_id, shard_id=shard_id,
+                constant=constant.name, start_point=(), direction=(),
+                identified=True, delta=val,
+            )
             return ("M", constant.value_sympy, dto)
 
         monkeypatch.setattr(pe, "_pool_walk", fake_pool_walk)

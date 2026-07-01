@@ -183,6 +183,11 @@ ATTRIBUTE_REGISTRY: Dict[str, AttributeComputer] = {
     # Eigenvalue-based digit predictions (per-step and at the walk depth).
     "approximated_digits_per_step": lambda h: _opt_float(h.approximated_digits_per_step()),
     "digits_approximation":        lambda h: _opt_float(h.digits_approximation()),
+    # Length-normalised spectral convergence rate: approximated_digits_per_step
+    # divided by the L2 norm of the trajectory direction (see
+    # TrajectoryAttributesHandler.convergence_rate).  The single definition of
+    # "convergence_rate" in the system — record_metrics reads this stored value.
+    "convergence_rate":            lambda h: _opt_float(h.convergence_rate()),
 
     # ----- Tier-3 — symbolic / expensive attributes (post-process). -----
     "precision_at":                lambda h: _opt_int(h.precision_at()),

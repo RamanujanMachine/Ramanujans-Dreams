@@ -73,6 +73,20 @@ Mostly **where things go** and **how many cores to use**.
 | `*_FORMAT` | `'pkl'` or `'json'` for the corresponding export. |
 | `TOTAL_CORES` / `NUM_BACKGROUND_WORKERS` | The core budget (`None` ⇒ `os.cpu_count()`); workers reserved for Tier-2. |
 | `CONSTANTS` | Default constants to search when `run()` is given none. |
+| `OPTIMIZATION_OBJECTIVE` | The numeric trajectory attribute the **whole pipeline** optimises for — both the analysis-stage shard ranking and the search-stage optimisers. `'delta'` (default) reproduces the historical behaviour exactly. Must be a registered objective (see below); each objective knows whether its optimum is the highest or lowest value, so "smaller is better" metrics work without inverting the search. Identification (LIReC) is always required regardless of the objective. |
+
+**Optimisation objectives.** `OPTIMIZATION_OBJECTIVE` must name an entry in
+`dreamer.utils.storage.optimization_objectives.OBJECTIVES` — the registry that
+gates which attributes are optimisable (numeric, with a known optimal direction)
+and stores that direction. Shipped objectives: `delta` (max) and
+`convergence_rate` (max, the length-normalised spectral rate
+`approximated_digits_per_step / ‖direction‖₂`). Since a stored result is one flat
+row per `(trajectory, constant)`, the objective is simply a **column** on that row
+(`delta` is the core field; `convergence_rate` etc. are their own key). Ranking
+reads it via `optimization_objectives.score_record`; the objective is **not** part
+of the config hash, so switching it never invalidates δ. To add an objective: add
+a handler method + an `ATTRIBUTE_REGISTRY` entry, then register it in `OBJECTIVES`
+with its direction.
 
 ## `database`
 
@@ -96,7 +110,7 @@ Mostly **where things go** and **how many cores to use**.
 | Field | Meaning |
 |-------|---------|
 | `NUM_TRAJECTORIES_FROM_DIM` | `lambda dim: int(...)` — how many trajectories to sample per shard. |
-| `IDENTIFY_THRESHOLD` | Minimum identified-fraction to keep a shard (`-1` disables filtering). |
+| `IDENTIFY_THRESHOLD` | Minimum identified-fraction to keep a shard (`-1` disables filtering). Independent of the objective — identification is always a prerequisite; the shard is then *ranked* by `system.OPTIMIZATION_OBJECTIVE`. |
 | `SAMPLING_METHOD` | `'pt'` / `'discrete'` / `'raycast'` — sampler for analysis (independent of the search sampler). |
 | `STORE_TRAJECTORIES_SEPARATELY` | Write analysis records to their own store instead of the shared one. |
 | `USE_LIReC` | Use LIReC for identification. |
@@ -155,9 +169,12 @@ config.configure(post_process={'TIER3_ATTRIBUTES': (
 
 The `<metric>` for a `top N …` selector **must already be stored** in the JSONL
 (the ranking pass only *reads* values — it never re-walks). Available metrics:
-`delta` (always present), `convergence_rate`, `asymptotic_digits_per_step`,
-`spectral_gap`, `gcd_slope`, `precision_at`. To rank on one that isn't stored
-yet, add it to `search.TIER2_ATTRIBUTES` (or as a bare Tier-3 attribute) first.
+`delta` (always present), `convergence_rate` (in the default `TIER2_ATTRIBUTES`),
+`approximated_digits_per_step`, `spectral_gap`, `gcd_slope`, `precision_at`. Each
+reads the handler-computed value straight from the record — `convergence_rate` is
+the single system-wide definition (`approximated_digits_per_step / ‖direction‖₂`),
+not recomputed here. To rank on one that isn't stored yet, add it to
+`search.TIER2_ATTRIBUTES` (or as a bare Tier-3 attribute) first.
 
 ## `graph`
 

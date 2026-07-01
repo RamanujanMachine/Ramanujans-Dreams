@@ -344,16 +344,28 @@ def compute_tier2_for_item(item):
 
     traj_matrix, constant, dto_or_patch = item
     is_patch = isinstance(dto_or_patch, dict)
-    extended_metrics = (
-        dto_or_patch["extended_metrics"]
-        if is_patch
-        else dto_or_patch.extended_metrics
-    )
-    tid = (
-        dto_or_patch.get("trajectory_id", "?")
-        if is_patch
-        else dto_or_patch.trajectory_id
-    )
+    # Records are flat: a DTO keeps its metrics in ``extra``; a patch dict carries
+    # them as top-level keys.  ``container`` is the mutable metrics target and
+    # ``present`` the attribute names already computed (so we compute only the
+    # missing ones).  For a patch the structural keys are excluded from ``present``
+    # by simply not appearing among the Tier-2 attribute names.
+    if is_patch:
+        container = dto_or_patch
+        present = set(dto_or_patch.keys())
+        tid = dto_or_patch.get("trajectory_id", "?")
+        direction = dto_or_patch.get("direction")
+        start = dto_or_patch.get("start_point")
+        wd_detail = f"traj_id={tid}"
+    else:
+        container = dto_or_patch.extra
+        present = set(dto_or_patch.extra.keys())
+        tid = dto_or_patch.trajectory_id
+        direction = dto_or_patch.direction
+        start = dto_or_patch.start_point
+        wd_detail = (
+            f"traj_id={tid} start={dto_or_patch.start_point} "
+            f"direction={dto_or_patch.direction}"
+        )
 
     attrs_to_compute = config.search.TIER2_ATTRIBUTES
     # Specs may be bare strings or ``(name, predicate)`` tuples; filter on
@@ -361,21 +373,22 @@ def compute_tier2_for_item(item):
     # inside ``compute_attributes``.
     missing = [
         spec for spec in attrs_to_compute
-        if attribute_name(spec) not in extended_metrics
+        if attribute_name(spec) not in present
     ]
     if missing and traj_matrix is not None:
         try:
-            # Descriptor for the per-attribute watchdog so a stuck heavy
-            # attribute (e.g. asymptotics) can be traced to its trajectory.
-            if is_patch:
-                wd_detail = f"traj_id={tid}"
-            else:
-                wd_detail = (
-                    f"traj_id={tid} start={dto_or_patch.start_point} "
-                    f"direction={dto_or_patch.direction}"
-                )
             handler = TrajectoryAttributesHandler(traj_matrix, constant=constant)
-            extended_metrics.update(
+            # Restore the trajectory direction / start on the (otherwise
+            # matrix-only) handler so **direction-normalised** attributes — e.g.
+            # ``convergence_rate`` = approximated_digits_per_step / ‖direction‖₂ —
+            # compute their norm instead of silently returning ``None``.  A plain
+            # dict suffices: the only consumer, ``_trajectory_norm``, just needs
+            # ``.values()`` (the pFq fast eigenvalue path stays disabled — no cmf).
+            if direction is not None:
+                handler._trajectory = {i: v for i, v in enumerate(direction)}
+            if start is not None:
+                handler._start_point = {i: v for i, v in enumerate(start)}
+            container.update(
                 compute_attributes(
                     handler, missing, on_error="store", watchdog_detail=wd_detail
                 )
@@ -385,25 +398,31 @@ def compute_tier2_for_item(item):
                 f"compute_tier2_for_item error on trajectory {tid}: {e}",
                 Logger.Levels.warning,
             ).log()
-            extended_metrics["worker_error"] = str(e)
+            container["worker_error"] = str(e)
     return dto_or_patch
 
 
+#: Structural keys a patch dict may carry for identity / handler reconstruction; a
+#: patch with *only* these adds no new metric and is dropped instead of bloating
+#: the JSONL with a no-op line.
+_PATCH_STRUCTURAL_KEYS = frozenset(
+    {"trajectory_id", "constant", "direction", "start_point"}
+)
+
+
 def write_jsonl_line(item, fout) -> None:
-    """Per-item writer: serialise *item* as one JSON line.
+    """Per-item writer: serialise *item* as one **flat** JSON line.
 
     Dicts (patches) go through ``json.dumps``; DTO objects use their
-    ``to_json_line()`` method.  The caller's open file handle does the
-    actual ``write``.
+    ``to_json_line()`` method.  The caller's open file handle does the actual
+    ``write``.
 
-    A patch with an empty ``extended_metrics`` carries no new information
-    (every attribute was either already present or skipped by its predicate)
-    — silently drop it instead of bloating the JSONL with no-op lines.
-    Full ``TrajectoryDTO`` objects always go through, including when their
-    ``extended_metrics`` is empty: that's the base record for a trajectory.
+    A patch carrying only its structural keys (``trajectory_id`` / ``constant``)
+    has no new metric — silently drop it.  Full ``TrajectoryDTO`` objects always
+    go through: that's the base row for a ``(trajectory, constant)`` pair.
     """
     if isinstance(item, dict):
-        if not (item.get("extended_metrics") or {}):
+        if not (set(item.keys()) - _PATCH_STRUCTURAL_KEYS):
             return
         line = json.dumps(item)
     else:
@@ -415,18 +434,19 @@ def write_jsonl_line(item, fout) -> None:
 # Deduplication helpers
 # ---------------------------------------------------------------------------
 
-def load_seen_trajectories(jsonl_path: str) -> Dict[str, dict]:
-    """Read and merge all trajectory records from an existing JSONL file.
+def load_seen_trajectories(jsonl_path: str) -> Dict[str, Dict[str, dict]]:
+    """Read and merge all ``(trajectory, constant)`` rows from a JSONL file.
 
-    Records sharing the same ``trajectory_id`` are merged left-to-right so
-    that patch records (which contain only ``trajectory_id`` and a partial
-    ``extended_metrics`` dict) are folded into the base record.
-    ``extended_metrics`` is deep-merged; all other top-level keys are
-    shallow-merged with later records winning.
+    Each line is a **flat** record (see :class:`TrajectoryDTO`).  Rows are keyed by
+    the composite ``(trajectory_id, constant)`` and folded into a nested
+    ``{trajectory_id: {constant: record}}`` map — the natural shape for the reuse
+    decision "have I computed this walk, for this constant, under the current
+    config?".  Because the schema is flat, merging a patch into its base row is a
+    plain last-write-wins ``dict.update`` (no special-cased nested dict).
 
     Returns an empty dict if the file does not exist.
     """
-    merged: Dict[str, dict] = {}
+    merged: Dict[str, Dict[str, dict]] = {}
     try:
         with open(jsonl_path, "r") as f:
             for line in f:
@@ -435,18 +455,17 @@ def load_seen_trajectories(jsonl_path: str) -> Dict[str, dict]:
                     continue
                 try:
                     record = json.loads(line)
-                    tid = record.get("trajectory_id")
-                    if tid is None:
-                        continue
-                    if tid not in merged:
-                        merged[tid] = record
-                    else:
-                        existing_metrics = dict(merged[tid].get("extended_metrics") or {})
-                        new_metrics = dict(record.get("extended_metrics") or {})
-                        merged[tid].update(record)
-                        merged[tid]["extended_metrics"] = {**existing_metrics, **new_metrics}
-                except (json.JSONDecodeError, KeyError):
+                except json.JSONDecodeError:
                     continue
+                tid = record.get("trajectory_id")
+                const = record.get("constant")
+                if tid is None or const is None:
+                    continue
+                bucket = merged.setdefault(tid, {})
+                if const not in bucket:
+                    bucket[const] = record
+                else:
+                    bucket[const].update(record)   # flat merge, later wins
     except FileNotFoundError:
         pass
     return merged
@@ -474,7 +493,7 @@ def load_seen_trajectories_for_search(output_path: str, shard_id: str) -> Dict[s
     :param output_path: ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` path the
         search stage reads and writes.
     :param shard_id: Structural shard id; names the analysis-store file.
-    :return: Merged ``{trajectory_id: record}`` cache for the shard.
+    :return: Merged ``{trajectory_id: {constant: record}}`` cache for the shard.
     """
     seen = load_seen_trajectories(output_path)
 
@@ -490,13 +509,18 @@ def load_seen_trajectories_for_search(output_path: str, shard_id: str) -> Dict[s
         return seen
 
     analysis_seen = load_seen_trajectories(analysis_path)
-    carryover = {tid: rec for tid, rec in analysis_seen.items() if tid not in seen}
+    # Carry over each (trajectory, constant) row the search file doesn't yet have.
+    carryover: list = []
+    for tid, by_const in analysis_seen.items():
+        for const, rec in by_const.items():
+            if const not in seen.get(tid, {}):
+                carryover.append(rec)
     if carryover:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         with open(output_path, "a") as fout:
-            for rec in carryover.values():
+            for rec in carryover:
                 fout.write(json.dumps(rec) + "\n")
-        seen.update(carryover)
+                seen.setdefault(rec["trajectory_id"], {})[rec["constant"]] = rec
     return seen
 
 
@@ -532,7 +556,23 @@ def load_seen_shards(jsonl_path: str) -> Dict[str, dict]:
 def load_seen_trajectory_ids(jsonl_path: str) -> set:
     """Return the set of ``trajectory_id`` values in an existing JSONL file.
 
-    Thin wrapper around :func:`load_seen_trajectories` kept for backward
-    compatibility with any call site that only needs the id set.
+    Reads ids directly (independent of the ``constant`` column, unlike
+    :func:`load_seen_trajectories`) since callers here only need the id set.
     """
-    return set(load_seen_trajectories(jsonl_path).keys())
+    ids: set = set()
+    try:
+        with open(jsonl_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                tid = record.get("trajectory_id")
+                if tid is not None:
+                    ids.add(tid)
+    except FileNotFoundError:
+        pass
+    return ids

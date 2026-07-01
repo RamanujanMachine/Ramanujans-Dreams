@@ -105,14 +105,16 @@ def _write_shard(dir_path, shard_id, records):
 
 
 def _rec(tid, cmf, sid, delta, direction, seq=None):
-    em = {}
-    if seq is not None:
-        em["delta_sequence"] = seq
-    return {
+    # One flat per-(trajectory, constant) row; metrics are top-level columns.
+    rec = {
         "trajectory_id": tid, "cmf_id": cmf, "shard_id": sid,
+        "constant": "pi",
         "start_point": [0, 0], "direction": list(direction),
-        "delta_estimate": {"pi": delta}, "extended_metrics": em,
+        "delta": delta, "identified": True,
     }
+    if seq is not None:
+        rec["delta_sequence"] = seq
+    return rec
 
 
 class TestGrapherIO:

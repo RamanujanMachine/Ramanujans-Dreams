@@ -134,6 +134,7 @@ class SearchConfig(Configurable):
             ("delta_prediction", "if_identified"),
             ("gcd_slope", "if_identified"), ("error_formula_ratio", "if_identified"),
             ("approximated_digits_per_step", "if_identified"), ("digits_approximation", "if_identified"),
+            ("convergence_rate", "if_identified"),
             ("digits_computed", "if_identified"), ("avg_computed_digits_per_step", "if_identified"),
         ),
         metadata={"description": "Background-worker attributes computed asynchronously during search. Empty disables the worker/writer subprocesses entirely."},

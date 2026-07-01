@@ -19,7 +19,10 @@ from dreamer import e
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
-from dreamer.search.methods.flatland.evaluator import flatland_trajectory_key
+from dreamer.search.methods.flatland.evaluator import (
+    _score_from_record,
+    flatland_trajectory_key,
+)
 from dreamer.search.methods.flatland import parallel_eval as pe
 
 
@@ -71,12 +74,15 @@ def _make_ctx(shard, constant):
 
 def _stub_walk(monkeypatch):
     """Stub the pool worker: δ = sum of the primitive direction's coords."""
+    from dreamer.utils.storage.dtos import TrajectoryDTO
+
     def fake_pool_walk(args):
-        direction, constant, *_ = args
+        direction, constant, cmf_id, shard_id, shard_encoding_str = args
         val = float(sum(int(v) for v in direction.values()))
-        dto = SimpleNamespace(
-            delta_estimate={constant.name: val},
-            identified={constant.name: True},
+        dto = TrajectoryDTO(
+            trajectory_id="t", cmf_id=cmf_id, shard_id=shard_id,
+            constant=constant.name, start_point=(), direction=(),
+            identified=True, delta=val,
         )
         return ("MATRIX", constant.value_sympy, dto)
 
@@ -85,6 +91,26 @@ def _stub_walk(monkeypatch):
 
 def _deltas(results):
     return [d for d, _ in results]
+
+
+class TestScoreFromRecord:
+    """The evaluator's objective-aware cache reader (flat per-constant rows)."""
+
+    def test_reads_metric_column(self):
+        rec = {"convergence_rate": 0.4, "identified": True}
+        assert _score_from_record(rec, "convergence_rate") == (0.4, True)
+
+    def test_reads_delta_core_column(self):
+        rec = {"delta": 1.7, "identified": True}
+        assert _score_from_record(rec, "delta") == (1.7, True)
+
+    def test_missing_column_returns_none(self):
+        rec = {"delta": 1.7, "identified": True}
+        assert _score_from_record(rec, "convergence_rate") is None
+
+    def test_none_value_maps_to_worst_score(self):
+        rec = {"convergence_rate": None, "identified": False}
+        assert _score_from_record(rec, "convergence_rate") == (float("-inf"), False)
 
 
 class TestEvaluateBatch:
@@ -123,9 +149,10 @@ class TestEvaluateBatch:
             shard_id="s", shard_encoding_str="",
         )
         ctx["seen_trajectories"][tid] = {
-            "delta_estimate": {e.name: 42.0},
-            "identified": {e.name: True},
-            "config_fingerprint": fp,
+            e.name: {
+                "trajectory_id": tid, "constant": e.name,
+                "delta": 42.0, "identified": True, "config_fingerprint": fp,
+            }
         }
         # Two genomes so the parallel path runs; both share the cached ray.
         results = pe.evaluate_batch([z.copy(), z.copy()], eval_ctx=ctx, pool=_DummyPool())
