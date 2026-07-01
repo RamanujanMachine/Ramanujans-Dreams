@@ -115,12 +115,43 @@ class TestProjectionSpec:
         with pytest.raises(ValueError):
             sds.ProjectionSpec.ignoring(5, [9])      # out of range
 
+    def test_ignores_coords_flag(self):
+        # ignoring drops coords → True (cone trim must be skipped in surface mode)
+        assert sds.ProjectionSpec.ignoring(5, [0, 4]).ignores_coords is True
+        # identity / full layout cover every coord → False (cone trim valid)
+        assert sds.ProjectionSpec.identity(3).ignores_coords is False
+        assert sds.ProjectionSpec.from_layout(["x", "y", "z", (1, 0, 0)]).ignores_coords is False
+
     def test_free_to_full_embedding(self):
         spec = sds.ProjectionSpec.from_layout(["x", "y", "z", (1, -1, 0)])
         xyz = np.array([[0.3, 0.4, 0.5]])
         full = spec.free_to_full(xyz)
         assert full.shape == (1, 4)
         np.testing.assert_allclose(full[0], [0.3, 0.4, 0.5, 0.3 - 0.4])
+
+    def test_from_constraints_folds_dependents(self):
+        syms = ["x0", "x1", "x2", "y0", "y1"]
+        spec = sds.ProjectionSpec.from_constraints(5, syms, {"x0": 12, "x1": 14, "y1": 28})
+        # anchor x0 kept as an axis with the two free coords; x1, y1 dependent on it.
+        assert spec.axes == (0, 2, 3) and spec.dim == 5
+        assert spec.dependent[1] == pytest.approx((14 / 12, 0.0, 0.0))
+        assert spec.dependent[4] == pytest.approx((28 / 12, 0.0, 0.0))
+        assert spec.ignores_coords is False  # 3 axes + 2 dependent = 5 = dim
+
+    def test_from_constraints_wrong_count_raises(self):
+        syms = ["x0", "x1", "x2", "y0", "y1"]
+        with pytest.raises(ValueError):  # only 2 fixed → 4 effective axes
+            sds.ProjectionSpec.from_constraints(5, syms, {"x0": 12, "y1": 28})
+
+    def test_from_constraints_effective_normal_embedding(self):
+        # The hyperplane great circles use A @ free_to_full(eye3).T; check the
+        # embedding folds the dependent (ratio) coords onto the anchor axis.
+        syms = ["x0", "x1", "x2", "y0", "y1"]
+        spec = sds.ProjectionSpec.from_constraints(5, syms, {"x0": 12, "x1": 14, "y1": 28})
+        emb = spec.free_to_full(np.eye(3))  # (3, 5)
+        np.testing.assert_allclose(emb[0], [1.0, 14 / 12, 0.0, 0.0, 28 / 12])
+        np.testing.assert_allclose(emb[1], [0.0, 0.0, 1.0, 0.0, 0.0])
+        np.testing.assert_allclose(emb[2], [0.0, 0.0, 0.0, 1.0, 0.0])
 
     def test_project_filters_and_normalises(self):
         spec = sds.ProjectionSpec.from_layout(["x", "y", "z", (1, 0, 0)])

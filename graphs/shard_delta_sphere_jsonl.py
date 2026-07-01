@@ -280,6 +280,64 @@ class ProjectionSpec:
         return cls(axes=(kept[0], kept[1], kept[2]), dependent={}, dim=dim)
 
     @classmethod
+    def from_constraints(cls, dim: int, symbols: Sequence,
+                         constraints: Dict[str, int]) -> "ProjectionSpec":
+        r"""Spec from trajectory **direction constraints** (ratio + sign).
+
+        A constraint ``{x0: 12, x1: 14, y1: 28}`` pins the scale-invariant ratio
+        of those coordinates (see ``dreamer/extraction/samplers/constraints.py``).
+        Geometrically the ratio equalities make the constrained coordinates depend
+        linearly on a single **anchor** coordinate (the first constrained one):
+        ``v_b = (c_b / c_anchor) · v_anchor``.  So the anchor is kept as a sphere
+        axis (it carries the block's overall scale — the degree of freedom plain
+        ignoring would lose), the other constrained coordinates become
+        :attr:`dependent` relations on it, and the unconstrained coordinates are
+        the remaining axes.  This keeps the cone homogeneous, so the projection is
+        one-to-one (smooth δ) and the hyperplanes stay honest great circles.
+
+        Exactly three effective axes (= 1 anchor + the unconstrained coords, or
+        just the unconstrained coords if no non-zero constraint) must result, so
+        for a ``D``-dim CMF one ratio group must fix ``D − 2`` coordinates.
+
+        :param dim: the CMF dimensionality.
+        :param symbols: ordered shard symbols (maps names → indices).
+        :param constraints: ``{name: value}`` direction constraints.
+        :raises ValueError: if the constraints don't leave exactly 3 axes.
+        """
+        from dreamer.extraction.samplers.constraints import resolve_constraint_indices
+
+        resolved = resolve_constraint_indices(symbols, constraints)  # {idx: int}
+        zeros = sorted(i for i, v in resolved.items() if v == 0)
+        nonzero = sorted((i, v) for i, v in resolved.items() if v != 0)
+        constrained = set(resolved)
+        free = [i for i in range(dim) if i not in constrained]
+
+        axes_list = list(free)
+        anchor_i = nonzero[0][0] if nonzero else None
+        if anchor_i is not None:
+            axes_list.append(anchor_i)
+        axes = tuple(sorted(axes_list))
+        if len(axes) != 3:
+            raise ValueError(
+                f"Constraints fix {len(constrained)} of {dim} coords, leaving "
+                f"{len(axes)} effective axis(es) {list(axes)}; exactly 3 are needed. "
+                f"For a {dim}-D CMF, one ratio group must fix {dim - 2} coordinates "
+                f"(so 2 stay free) — adjust your constraints."
+            )
+
+        dependent: Dict[int, Tuple[float, float, float]] = {
+            i: (0.0, 0.0, 0.0) for i in zeros
+        }
+        if anchor_i is not None:
+            anchor_slot = axes.index(anchor_i)
+            anchor_c = nonzero[0][1]
+            for b_i, b_c in nonzero[1:]:
+                coeffs = [0.0, 0.0, 0.0]
+                coeffs[anchor_slot] = b_c / anchor_c
+                dependent[b_i] = (coeffs[0], coeffs[1], coeffs[2])
+        return cls(axes=axes, dependent=dependent, dim=dim)
+
+    @classmethod
     def from_layout(cls, layout: Sequence) -> "ProjectionSpec":
         r"""Build a spec from the ``(x, y, z, f(x,y,z))`` layout notation.
 
@@ -314,6 +372,19 @@ class ProjectionSpec:
             )
         return cls(axes=(free["x"], free["y"], free["z"]), dependent=dependent,
                    dim=len(layout))
+
+    @property
+    def ignores_coords(self) -> bool:
+        """Whether some coordinates are dropped (neither an axis nor dependent).
+
+        When ``True`` the shard cone cannot be projected faithfully (the dropped
+        coordinates carry the data away from the ``ignored = 0`` slice), so the
+        surface renderer skips the ``A·v ≤ 0`` cone trim and bounds the patch by
+        the data hull / angular extent instead.
+        """
+        if self.dim is None:
+            return False
+        return (len(self.axes) + len(self.dependent)) < self.dim
 
     def free_to_full(self, xyz: np.ndarray) -> np.ndarray:
         r"""Embed sphere points ``(x, y, z)`` back into full ``D``-dim space.
@@ -687,6 +758,12 @@ def plot_hyperplanes_on_sphere(ax, shard, spec: ProjectionSpec,
     chosen coordinate axes (``spec.axes``); the camera-facing half of the
     resulting great circle is drawn.
 
+    Nothing is drawn when coordinates are **ignored**: the shard's cone is
+    homogeneous in full D (``A·v ≤ 0``), but dropping coordinates makes it
+    inhomogeneous in the reduced space (the dropped coords add a
+    magnitude-dependent offset), so no fixed great circle represents the boundary
+    — drawing one would misplace it (it could even cut through the shard).
+
     :param ax: a 3-D matplotlib axis.
     :param shard: the shard whose constraint matrix ``A`` supplies the normals.
     :param spec: the active projection spec (selects the 3 axes).
@@ -695,14 +772,22 @@ def plot_hyperplanes_on_sphere(ax, shard, spec: ProjectionSpec,
     :param line_width: stroke width of the great circles.
     :param zorder: draw order for the great circles.
     """
-    if shard.A is None:
+    if shard.A is None or spec.ignores_coords:
         return
     A = np.array(shard.A, dtype=float)
+    # Effective normal in the (x, y, z) axis space.  A point xyz embeds back to
+    # full D via the spec (axes + dependent relations), so the projected normal
+    # is ``A @ M`` where ``M`` is that linear embedding (``emb[k]`` = full vector
+    # for axis k).  This includes the dependent-coordinate contributions — e.g. a
+    # constraint folding ``y1 = (7/3)·x0`` adds ``(7/3)·A[:, y1]`` onto the x0
+    # axis.  For the identity / ignore spec ``M`` is just the axis selection, so
+    # this reduces to the old ``A[:, axes]``.
+    emb = spec.free_to_full(np.eye(3))   # (3, dim): emb[k] = embedding of axis k
+    A_eff = A @ emb.T                    # (rows, 3): effective normals in (x,y,z)
     cam = _camera_vector(cam_elev, cam_azim)
     theta = np.linspace(0, 2 * np.pi, 300)
 
-    for row in A:
-        n = row[list(spec.axes)]
+    for n in A_eff:
         norm_n = np.linalg.norm(n)
         if norm_n < 1e-8:
             continue
@@ -828,7 +913,11 @@ def render_shard_surface(
     grid_pts = np.c_[gx.ravel(), gy.ravel(), gz.ravel()] @ R  # back to global frame
 
     # --- clip to the shard cone (embed sphere pts into full CMF dim first) ---
-    if shard.A is not None:
+    # Skipped when coordinates are ignored: the shard cone lives in full D and
+    # does not project onto the kept-coords subspace (the dropped coords carry the
+    # data off the ``ignored = 0`` slice), so the trim would wrongly erase the
+    # whole patch.  The data hull / angular extent then bounds the patch instead.
+    if shard.A is not None and not spec.ignores_coords:
         A = np.array(shard.A, dtype=float)
         A_norm = A / np.linalg.norm(A, axis=1, keepdims=True)
         full = spec.free_to_full(grid_pts)
@@ -1032,6 +1121,7 @@ def generate_spheres(
     mark_identified: bool = True,
     spec: Optional[ProjectionSpec] = None,
     ignore_coords: Optional[Sequence[int]] = None,
+    constraints: Optional[Dict[str, int]] = None,
     subspace_tol: float = 1e-6,
     value_fn: Optional[ValueFn] = None,
     value_label: Optional[str] = None,
@@ -1079,6 +1169,12 @@ def generate_spheres(
         when *spec* is not given; the remaining coordinates (which must number
         exactly 3) become the sphere axes.  Useful when sampling fixed some
         coordinates and their constant value would otherwise dominate the plot.
+    :param constraints: trajectory direction constraints ``{name: value}`` (ratio
+        + sign, as in ``config.extraction.TRAJECTORY_CONSTRAINTS``); when *spec*
+        is not given they are folded into a projection (anchor kept as an axis,
+        the other constrained coords dependent on it).  Gives a faithful, smooth
+        sphere with correct hyperplanes — requires the constraints to leave
+        exactly 3 effective axes (fix ``D − 2`` coords for a ``D``-dim CMF).
     :param subspace_tol: relative tolerance for the subspace membership test.
     :param value_fn: scalar extractor (see :data:`ValueFn`); ``None`` →
         :func:`delta_value` for *constant*.
@@ -1144,8 +1240,12 @@ def generate_spheres(
     for shard in shards:
         if spec is None:
             dim = len(shard.symbols)
-            spec = (ProjectionSpec.ignoring(dim, ignore_coords)
-                    if ignore_coords else ProjectionSpec.identity(dim))
+            if constraints:
+                spec = ProjectionSpec.from_constraints(dim, shard.symbols, constraints)
+            elif ignore_coords:
+                spec = ProjectionSpec.ignoring(dim, ignore_coords)
+            else:
+                spec = ProjectionSpec.identity(dim)
         if require_identified and not shard_has_identified(shard, constant, results_root):
             skipped_unidentified += 1
             continue
@@ -1514,6 +1614,11 @@ def _build_cli():
                    help="Coordinate indices to ignore when projecting, e.g. '0,4'. "
                         "The remaining coords (must be exactly 3) become the sphere "
                         "axes - handy when sampling fixed some coordinates.")
+    p.add_argument("--constraints", default=None,
+                   help="Trajectory direction constraints, e.g. 'x0=12,x1=14,y1=28' "
+                        "(ratio + sign).  Folds the constrained coords into a faithful "
+                        "projection (anchor kept as an axis) giving a smooth sphere with "
+                        "correct hyperplanes.  Must leave exactly 3 effective axes.")
     p.add_argument("--subspace-tol", type=float, default=1e-6,
                    help="Relative tolerance for the subspace membership test.")
 
@@ -1567,8 +1672,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "every CMF at once is not supported (huge figure / pixmap exhaustion)."
         )
 
-    if args.layout and args.ignore_coords:
-        raise SystemExit("Use either --layout or --ignore-coords, not both.")
+    if sum(bool(x) for x in (args.layout, args.ignore_coords, args.constraints)) > 1:
+        raise SystemExit("Use only one of --layout / --ignore-coords / --constraints.")
     ignore_coords = None
     if args.ignore_coords:
         try:
@@ -1576,6 +1681,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except ValueError:
             raise SystemExit(f"--ignore-coords must be comma-separated integers, "
                              f"got {args.ignore_coords!r}.")
+    constraints = None
+    if args.constraints:
+        constraints = {}
+        for tok in args.constraints.replace(" ", "").split(","):
+            if not tok:
+                continue
+            name, _, val = tok.partition("=")
+            if not name or val == "":
+                raise SystemExit(f"--constraints must be 'name=value' pairs, got {tok!r}.")
+            try:
+                constraints[name] = int(val)
+            except ValueError:
+                raise SystemExit(f"--constraints value must be an integer, got {val!r}.")
 
     shards = load_shards(args.export_cmfs, const, cmf_id=args.cmf)
     value_fn, value_label = _resolve_value_fn(args)
@@ -1600,6 +1718,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         mark_identified=args.mark_identified,
         spec=_parse_layout(args.layout),
         ignore_coords=ignore_coords,
+        constraints=constraints,
         subspace_tol=args.subspace_tol,
         value_fn=value_fn,
         value_label=value_label,
