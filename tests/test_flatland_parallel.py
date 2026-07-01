@@ -19,7 +19,10 @@ from dreamer import e
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
-from dreamer.search.methods.flatland.evaluator import flatland_trajectory_key
+from dreamer.search.methods.flatland.evaluator import (
+    _score_from_record,
+    flatland_trajectory_key,
+)
 from dreamer.search.methods.flatland import parallel_eval as pe
 
 
@@ -77,6 +80,8 @@ def _stub_walk(monkeypatch):
         dto = SimpleNamespace(
             delta_estimate={constant.name: val},
             identified={constant.name: True},
+            objective_name="delta",
+            objective_value={constant.name: val},
         )
         return ("MATRIX", constant.value_sympy, dto)
 
@@ -85,6 +90,46 @@ def _stub_walk(monkeypatch):
 
 def _deltas(results):
     return [d for d, _ in results]
+
+
+class TestScoreFromRecord:
+    """The evaluator's objective-aware cache reader."""
+
+    def test_reads_objective_value_under_matching_objective(self):
+        rec = {
+            "objective_name": "convergence_rate",
+            "objective_value": {"e": 0.4},
+            "identified": {"e": True},
+            "delta_estimate": {"e": 0.9},
+        }
+        assert _score_from_record(rec, "e", "convergence_rate") == (0.4, True)
+
+    def test_delta_fallback_for_legacy_record(self):
+        # No objective fields at all → still scores under the delta objective.
+        rec = {"delta_estimate": {"e": 1.7}, "identified": {"e": True}}
+        assert _score_from_record(rec, "e", "delta") == (1.7, True)
+
+    def test_no_fallback_for_non_delta_objective(self):
+        # A record lacking objective_value cannot be scored for convergence_rate.
+        rec = {"delta_estimate": {"e": 1.7}, "identified": {"e": True}}
+        assert _score_from_record(rec, "e", "convergence_rate") is None
+
+    def test_stale_objective_name_falls_through(self):
+        rec = {
+            "objective_name": "delta",
+            "objective_value": {"e": 1.0},
+            "identified": {"e": True},
+        }
+        # Active objective differs and no delta_estimate to fall back on → None.
+        assert _score_from_record(rec, "e", "convergence_rate") is None
+
+    def test_none_raw_maps_to_worst_score(self):
+        rec = {
+            "objective_name": "convergence_rate",
+            "objective_value": {"e": None},   # unavailable for this trajectory
+            "identified": {"e": False},
+        }
+        assert _score_from_record(rec, "e", "convergence_rate") == (float("-inf"), False)
 
 
 class TestEvaluateBatch:

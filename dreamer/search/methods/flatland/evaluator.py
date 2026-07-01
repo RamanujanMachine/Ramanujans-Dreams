@@ -15,6 +15,7 @@ from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.storage.attribute_registry import attribute_name
+from dreamer.utils.storage.optimization_objectives import score_record
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     _position_to_tuple,
@@ -26,6 +27,19 @@ from dreamer.utils.storage.trajectory_attributes import (
 from dreamer.configs import config
 
 search_config = config.search
+
+
+def active_objective() -> str:
+    """The system-wide optimisation objective the search stage scores against."""
+    return config.system.OPTIMIZATION_OBJECTIVE
+
+
+#: Turn a cached ``seen_trajectories`` record into ``(signed_score, identified)``
+#: under the active objective.  Thin alias over the shared
+#: :func:`dreamer.utils.storage.optimization_objectives.score_record` so the
+#: evaluator, the analysis-stage ranking, and the finalization all score records
+#: identically.  ``None`` ⇒ the record cannot supply the score (recompute).
+_score_from_record = score_record
 
 
 def flatland_trajectory_key(
@@ -78,10 +92,15 @@ def evaluate_in_flatland(
     seen_trajectories: dict,
     handler_cache: Dict[str, "TrajectoryAttributesHandler"],
 ) -> Tuple[float, bool]:
-    """Compute δ/identified for *constant* at flatland direction *z*, emitting a DTO.
+    """Compute the objective score / identified for *constant* at flatland *z*.
 
-    Returns ``(delta, identified)`` for *constant*.  Three cases, each cheaper
-    than the next:
+    Returns ``(score, identified)`` for *constant*, where ``score`` is the
+    **signed** value of the system-wide ``OPTIMIZATION_OBJECTIVE`` oriented so
+    that *larger is always better* (see
+    :func:`dreamer.utils.storage.optimization_objectives.signed_score`).  For the
+    default ``"delta"`` objective ``score`` is exactly δ, so the returned value is
+    identical to the historical behaviour.  Three cases, each cheaper than the
+    next:
 
     **Case A — delta already cached (on-disk or in-memory):**
     ``seen_trajectories`` contains a record whose ``delta_estimate`` already
@@ -116,15 +135,15 @@ def evaluate_in_flatland(
     )
 
     desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
+    objective_name = active_objective()
     seen_record = seen_trajectories.get(trajectory_id)
     cached_handler = handler_cache.get(trajectory_id)
 
-    # --- Case A: delta already known for this constant (same config) ---
+    # --- Case A: objective score already known for this constant (same config) ---
     if seen_record is not None and seen_record.get("config_fingerprint") == current_fp:
-        delta_map = seen_record.get("delta_estimate") or {}
-        if constant.name in delta_map:
-            ided_map = seen_record.get("identified") or {}
-            return float(delta_map[constant.name]), bool(ided_map.get(constant.name, False))
+        cached = _score_from_record(seen_record, constant.name, objective_name)
+        if cached is not None:
+            return cached
 
     # --- Case B: handler cached — reuse walk, only compute new constant ---
     if cached_handler is not None:
@@ -147,12 +166,18 @@ def evaluate_in_flatland(
             existing_ided = dict(fresh.get("identified") or {})
             existing_p = dict(fresh.get("p_vector") or {})
             existing_q = dict(fresh.get("q_vector") or {})
+            # Fold in stored objective values only when they were recorded under
+            # the *same* objective (else they are stale w.r.t. the active one).
+            existing_obj = dict(fresh.get("objective_value") or {}) \
+                if fresh.get("objective_name") == objective_name else {}
             merged_dto = dataclasses.replace(
                 new_dto,
                 delta_estimate={**existing_delta, **new_dto.delta_estimate},
                 identified={**existing_ided, **new_dto.identified},
                 p_vector={**existing_p, **(new_dto.p_vector or {})},
                 q_vector={**existing_q, **(new_dto.q_vector or {})},
+                objective_name=objective_name,
+                objective_value={**existing_obj, **(new_dto.objective_value or {})},
             )
         except Exception as exc:
             Logger(
@@ -167,11 +192,14 @@ def evaluate_in_flatland(
             "extended_metrics": dict.fromkeys(desired),
             "delta_estimate": dict(merged_dto.delta_estimate),
             "identified": dict(merged_dto.identified),
+            "objective_name": objective_name,
+            "objective_value": dict(merged_dto.objective_value or {}),
             "config_fingerprint": current_fp,
         }
-        delta = float(merged_dto.delta_estimate.get(constant.name, float("-inf")))
-        identified = bool(merged_dto.identified.get(constant.name, False))
-        return delta, identified
+        score, identified = _score_from_record(
+            seen_trajectories[trajectory_id], constant.name, objective_name
+        )
+        return score, identified
 
     # --- Case C: new trajectory — full walk ---
     try:
@@ -202,9 +230,12 @@ def evaluate_in_flatland(
         "extended_metrics": dict.fromkeys(desired),
         "delta_estimate": dict(dto.delta_estimate),
         "identified": dict(dto.identified),
+        "objective_name": dto.objective_name,
+        "objective_value": dict(dto.objective_value or {}),
         "config_fingerprint": current_fp,
     }
 
-    delta = float(dto.delta_estimate.get(constant.name, float("-inf")))
-    identified = bool(dto.identified.get(constant.name, False))
-    return delta, identified
+    score, identified = _score_from_record(
+        seen_trajectories[trajectory_id], constant.name, objective_name
+    )
+    return score, identified

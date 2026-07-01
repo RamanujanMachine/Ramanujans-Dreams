@@ -146,6 +146,18 @@ class TrajectoryDTO:
     q_vector: Optional[Dict[str, Optional[Tuple[int | str, ...]]]]
     identified: Dict[str, bool] = field(default_factory=dict)
 
+    # Optimisation-objective provenance + value.  ``objective_name`` records which
+    # numeric attribute this trajectory was scored under (system-wide
+    # ``OPTIMIZATION_OBJECTIVE``); ``objective_value`` is that attribute's raw
+    # (unsigned) value per constant — a **separate** field from ``delta_estimate``,
+    # which always stays the irrationality measure.  When the objective is
+    # ``"delta"`` the value equals δ; for e.g. ``convergence_rate`` it is the
+    # spectral rate.  ``None`` per-constant entry = objective unavailable for that
+    # trajectory (e.g. non-identified).  ``objective_name`` is provenance only
+    # (acquisition method), so it never affects the validity of the stored data.
+    objective_name: Optional[str] = None
+    objective_value: Optional[Dict[str, Optional[float]]] = None
+
     # Walk-style flag: 1 → ``inv().T`` applied after walking the trajectory
     # matrix (the dual recurrence); 2 → walked directly.
     walk_type: int = 1
@@ -207,6 +219,8 @@ class TrajectoryDTO:
             p_vector=_restore_pq(d.get("p_vector")),
             q_vector=_restore_pq(d.get("q_vector")),
             identified=d.get("identified") or {},
+            objective_name=d.get("objective_name"),
+            objective_value=d.get("objective_value"),
             walk_type=int(d.get("walk_type", 1)),
             walk_depth=d.get("walk_depth"),
             config_fingerprint=d.get("config_fingerprint"),

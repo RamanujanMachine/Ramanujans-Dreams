@@ -35,6 +35,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from dreamer.configs import config
 from dreamer.search.methods.flatland.evaluator import (
+    _score_from_record,
+    active_objective,
     evaluate_in_flatland,
     flatland_trajectory_key,
 )
@@ -232,6 +234,7 @@ def evaluate_batch(
     shard_id: str = eval_ctx["shard_id"]
     shard_encoding_str: str = eval_ctx["shard_encoding_str"]
     desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
+    objective_name = active_objective()
 
     results: List[Optional[Tuple[float, bool]]] = [None] * n
     # trajectory_id -> (direction, fingerprint, [batch indices]) for Case C.
@@ -247,11 +250,9 @@ def evaluate_batch(
         )
         rec = seen.get(tid)
         if rec is not None and rec.get("config_fingerprint") == fp:
-            dmap = rec.get("delta_estimate") or {}
-            if constant.name in dmap:  # Case A
-                imap = rec.get("identified") or {}
-                results[i] = (float(dmap[constant.name]),
-                              bool(imap.get(constant.name, False)))
+            cached = _score_from_record(rec, constant.name, objective_name)
+            if cached is not None:  # Case A — objective score already known
+                results[i] = cached
                 continue
         if tid in handler_cache:  # Case B — cheap recompute, no new walk
             results[i] = evaluate_in_flatland(z, **eval_ctx)
@@ -285,11 +286,12 @@ def evaluate_batch(
                 "extended_metrics": dict.fromkeys(desired),
                 "delta_estimate": dict(dto.delta_estimate),
                 "identified": dict(dto.identified),
+                "objective_name": dto.objective_name,
+                "objective_value": dict(dto.objective_value or {}),
                 "config_fingerprint": fp,
             }
-            d = float(dto.delta_estimate.get(constant.name, float("-inf")))
-            ided = bool(dto.identified.get(constant.name, False))
+            scored = _score_from_record(seen[tid], constant.name, objective_name)
             for i in idxs:
-                results[i] = (d, ided)
+                results[i] = scored
 
     return [r if r is not None else (float("-inf"), False) for r in results]

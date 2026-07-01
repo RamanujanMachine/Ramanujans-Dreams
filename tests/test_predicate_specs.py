@@ -1,6 +1,4 @@
 """Tests for the Tier-3 predicate grammar (predicate_specs) and ranking metrics."""
-import math
-
 import pytest
 
 from dreamer.utils.storage.predicate_specs import (
@@ -10,7 +8,6 @@ from dreamer.utils.storage.predicate_specs import (
 )
 from dreamer.utils.storage.record_metrics import (
     METRIC_EXTRACTORS,
-    convergence_rate_metric,
     delta_metric,
 )
 from dreamer.utils.storage.attribute_registry import (
@@ -131,18 +128,19 @@ class TestMetricExtractors:
         rec = {"delta_estimate": {"pi": float("-inf")}}
         assert delta_metric(rec, "pi") is None
 
-    def test_convergence_rate_normalised_gap(self):
-        # |λ1|=e^2, |λ2|=e^1, direction norm = 1  →  (2 - 1)/1 = 1.
-        rec = {
-            "direction": [1, 0],
-            "extended_metrics": {"eigenvalues": [str(math.e ** 2), str(math.e)]},
-        }
-        val = convergence_rate_metric(rec, None)
-        assert val is not None and abs(val - 1.0) < 1e-9
+    def test_convergence_rate_reads_stored_value(self):
+        # Single definition: the extractor reads the handler-computed
+        # convergence_rate straight out of extended_metrics (no recomputation).
+        extractor = METRIC_EXTRACTORS["convergence_rate"]
+        rec = {"extended_metrics": {"convergence_rate": 1.25}}
+        assert extractor(rec, None) == 1.25
 
     def test_convergence_rate_missing_returns_none(self):
-        assert convergence_rate_metric({"direction": [1, 0]}, None) is None
-        assert convergence_rate_metric({"extended_metrics": {"eigenvalues": ["1", "2"]}}, None) is None
+        extractor = METRIC_EXTRACTORS["convergence_rate"]
+        assert extractor({"direction": [1, 0]}, None) is None
+        assert extractor({"extended_metrics": {}}, None) is None
+        # Non-finite stored value is dropped like every other _extended_float.
+        assert extractor({"extended_metrics": {"convergence_rate": float("inf")}}, None) is None
 
     def test_registry_complete(self):
         for name in ("delta", "convergence_rate", "approximated_digits_per_step",

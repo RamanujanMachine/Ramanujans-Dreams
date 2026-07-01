@@ -252,6 +252,7 @@ def build_trajectory_dto(
     direction,
     constants=None,
     compute_recurrence: bool = False,
+    objective: Optional[str] = None,
 ) -> "TrajectoryDTO":
     """Build a ``TrajectoryDTO`` carrying Tier-1 attributes from a handler.
 
@@ -284,8 +285,16 @@ def build_trajectory_dto(
         (~80% in profiling) and is rarely needed on the hot search/analysis
         path.  Request it through the Tier-2 ``"formula"`` / ``"order"``
         attributes instead when only some trajectories need it.
+    objective:
+        Name of the optimisation objective whose raw value is computed and
+        stored per constant (``objective_value`` on the DTO).  ``None`` resolves
+        to the system-wide ``system.OPTIMIZATION_OBJECTIVE``.  ``"delta"``
+        (the default objective) stores δ itself — a *separate* field from
+        ``delta_estimate``, which always remains the irrationality measure.
     """
     from dreamer.utils.storage.dtos import TrajectoryDTO  # lazy import avoids circular dep
+
+    objective_name = objective if objective is not None else config.system.OPTIMIZATION_OBJECTIVE
 
     start_t = _position_to_tuple(start)
     dir_t = _position_to_tuple(direction)
@@ -311,6 +320,7 @@ def build_trajectory_dto(
     p_dict: dict = {}
     q_dict: dict = {}
     identified_dict: dict = {}
+    objective_dict: dict = {}
 
     for c in constants_list:
         if isinstance(c, _Constant):
@@ -321,7 +331,9 @@ def build_trajectory_dto(
             c_name = str(c)
             c_sympy = c
 
-        delta, p, q, ided = handler.compute_for_constant(c_sympy)
+        delta, p, q, ided, obj_value = handler.compute_for_constant(
+            c_sympy, objective_name=objective_name,
+        )
 
         # When USE_DELTA_PREDICTION is enabled, delta_estimate stores the eigenvalue-
         # based prediction rather than the walk-based delta.  The regular delta is
@@ -338,6 +350,11 @@ def build_trajectory_dto(
         p_dict[c_name] = tuple(_pq_to_jsonsafe(x) for x in p) if p else None
         q_dict[c_name] = tuple(_pq_to_jsonsafe(x) for x in q) if q else None
         identified_dict[c_name] = bool(ided)
+        # Raw (unsigned) objective value per constant — the acquisition-time value
+        # of the active objective, stored independently of delta_estimate.  None
+        # (unavailable, e.g. a non-identified eigenvalue-based objective) is kept
+        # as None rather than a sentinel so downstream ranking can skip it.
+        objective_dict[c_name] = None if obj_value is None else float(obj_value)
 
     # Recurrence (formula + order) builds the symbolic LinearRecurrence — the
     # dominant per-trajectory cost — so compute it only when explicitly asked.
@@ -356,11 +373,29 @@ def build_trajectory_dto(
         p_vector=p_dict if p_dict else None,
         q_vector=q_dict if q_dict else None,
         identified=identified_dict,
+        objective_name=objective_name,
+        objective_value=objective_dict if objective_dict else None,
         walk_type=int(handler.walk_type()),
         walk_depth=int(handler.walk_depth()),
         config_fingerprint=tier1_config_fingerprint(handler.walk_depth()),
         projection_column=handler.projection_column(),
     )
+
+
+#: Cache-key prefixes whose values depend **only** on the trajectory matrix
+#: (constant-independent) and may therefore be preserved across the constant
+#: swaps inside :meth:`TrajectoryAttributesHandler.compute_for_constant`.
+#: Every other cached attribute is treated as constant-dependent and cleared on
+#: a constant swap.  Being conservative here is a correctness requirement: an
+#: attribute wrongly listed as independent would leak one constant's value into
+#: the next.  The listed spectral / structural attributes derive purely from
+#: ``trajectory_matrix_typed`` (no p/q, no target constant), so they are safe to
+#: keep — which spares the (expensive) eigenvalue recompute per constant.
+_CONST_INDEPENDENT_CACHE_KEYS: tuple = (
+    "sorted_eigenvalues", "eigenvalue_errors", "spectral_gap", "coboundary_rank",
+    "linear_recurrence", "companion", "order", "relation", "coeff_degrees",
+    "recurrence_coeffs", "formula_str", "asymptotics",
+)
 
 
 class TrajectoryAttributesHandler:
@@ -1405,6 +1440,44 @@ class TrajectoryAttributesHandler:
             return self._log10(n1 / n2)   # = -log10(n2/n1)
         return self.__get(f"approx_dps_{prediction_depth}", compute)
 
+    def convergence_rate(self, prediction_depth: int = 20) -> Optional[float]:
+        r"""Length-normalised spectral convergence rate.
+
+        Formula:  ``approximated_digits_per_step / ||trajectory||_2``
+                  ``= log10(|λ1| / |λ2|) / ||v||_2``
+
+        The eigenvalue-based digits-per-step gain (see
+        :meth:`approximated_digits_per_step`) divided by the Euclidean norm of the
+        trajectory direction ``v`` — i.e. correct digits gained per step **per unit
+        trajectory length**.  Normalising by ``||v||`` makes the rate comparable
+        across trajectories whose direction vectors have different magnitudes (a
+        longer direction advances further per recurrence step, so the raw per-step
+        gain is not directly comparable).
+
+        Because ``approximated_digits_per_step`` selects its eigenvalue pair via the
+        δ-matched :meth:`delta_prediction`, this quantity is identification- and
+        constant-dependent (larger ⇒ faster convergence).
+
+        Returns ``None`` when ``approximated_digits_per_step`` is unavailable
+        (non-identified, no valid eigenvalue pair, or zero gcd_slope) or when the
+        trajectory direction is missing / has zero norm (e.g. a matrix-only
+        handler).
+
+        :param prediction_depth: Depth forwarded to
+            :meth:`approximated_digits_per_step` (``delta_prediction``'s ``gcd_slope``).
+        """
+        def compute() -> Optional[float]:
+            per_step = self.approximated_digits_per_step(prediction_depth)
+            if per_step is None:
+                return None
+            if self._trajectory is None:
+                return None
+            norm = _trajectory_norm(self._trajectory)
+            if norm == 0:
+                return None
+            return per_step / norm
+        return self.__get(f"convergence_rate_{prediction_depth}", compute)
+
     def digits_approximation(self, depth: Optional[int] = None, prediction_depth: int = 20) -> Optional[float]:
         """Approximated number of correct digits **at** *depth* (eigenvalue-based).
 
@@ -1644,17 +1717,62 @@ class TrajectoryAttributesHandler:
             return False
         return math.isfinite(self.delta())
 
-    def compute_for_constant(self, constant) -> tuple:
-        """Evaluate delta / p_vector / q_vector / identified for *constant*.
+    def _clear_constant_dependent_cache(self) -> None:
+        """Drop every cached value that depends on the target constant.
+
+        Called around a constant swap in :meth:`compute_for_constant`.  Keeps the
+        constant-independent spectral / structural attributes (see
+        :data:`_CONST_INDEPENDENT_CACHE_KEYS`) so the eigenvalue work is not
+        repeated per constant, and always drops the constant-dependent p/q vector.
+
+        This is deliberately broader than clearing only ``"delta"``-keyed entries:
+        ``delta_prediction`` / ``gcd_slope`` / ``approximated_digits_per_step`` /
+        ``convergence_rate`` / ``limit`` are all constant-dependent (they read the
+        identified p/q or match the actual δ) but their cache keys do **not**
+        contain ``"delta"``, so a substring clear would leak one constant's value
+        into the next.
+        """
+        self._utility_cache.pop("pq_vector", None)
+        for key in list(self._cache.keys()):
+            if not key.startswith(_CONST_INDEPENDENT_CACHE_KEYS):
+                del self._cache[key]
+
+    def _objective_raw_value(
+        self, objective_name: Optional[str], delta_value: float,
+    ) -> Optional[float]:
+        """Raw (unsigned) value of optimisation objective *objective_name*.
+
+        Must be called while the target constant is set (the objective may depend
+        on δ / the δ-matched eigenvalue pair).  ``None`` ⇒ no objective requested.
+        ``"delta"`` reuses the already-computed *delta_value* (avoids a second
+        ``delta()`` call and keeps the ``-inf`` non-convergence sentinel intact).
+        """
+        if objective_name is None:
+            return None
+        if objective_name == "delta":
+            return delta_value
+        # Lazy import: optimization_objectives references handler methods only via
+        # duck-typing, so importing it here avoids a module-load cycle.
+        from dreamer.utils.storage.optimization_objectives import objective_raw_value
+        return objective_raw_value(objective_name, self)
+
+    def compute_for_constant(self, constant, objective_name: Optional[str] = None) -> tuple:
+        """Evaluate delta / p / q / identified (+ optional objective) for *constant*.
 
         Reuses the cached walk matrices from this handler (the walk is
-        constant-independent).  Only the LIReC identification and derived
-        values are recomputed.
+        constant-independent).  Only the LIReC identification and constant-dependent
+        derived values are recomputed.
 
-        Returns ``(delta, p_vector, q_vector, identified)`` where
-        ``delta`` is a ``float`` and the others match the normal return
-        types of :meth:`delta`, :meth:`p_vector`, :meth:`q_vector`,
-        :meth:`identified`.
+        When *objective_name* is given, the raw (unsigned) value of that
+        optimisation objective is computed **within the same constant-set scope**
+        (so an eigenvalue-based objective shares δ's walk + spectral work in a
+        single pass) and returned as the fifth tuple element.
+
+        Returns ``(delta, p_vector, q_vector, identified, objective_value)`` where
+        ``delta`` is a ``float``, ``objective_value`` is a ``float`` (or ``None``
+        when *objective_name* is ``None`` or the objective is unavailable for this
+        trajectory), and the rest match :meth:`delta` / :meth:`p_vector` /
+        :meth:`q_vector` / :meth:`identified`.
         """
         # Ensure the walk is cached before swapping the constant (walk is
         # constant-independent, so we prime it here if not already done).
@@ -1662,27 +1780,20 @@ class TrajectoryAttributesHandler:
 
         old_constant = self._constant
         self._constant = constant
-
-        # Clear only the constant-dependent entries from both caches.
-        self._utility_cache.pop("pq_vector", None)
-        for key in list(self._cache.keys()):
-            if "delta" in key:
-                del self._cache[key]
+        self._clear_constant_dependent_cache()
 
         try:
             delta = self.delta()
             p = self.p_vector()
             q = self.q_vector()
             ided = self.identified()
+            objective_value = self._objective_raw_value(objective_name, float(delta))
         finally:
-            # Restore the previous constant regardless of exceptions.
+            # Restore the previous constant regardless of exceptions, and clear
+            # again so subsequent calls see the right constant.
             self._constant = old_constant
-            # Clear again so subsequent calls see the right constant.
-            self._utility_cache.pop("pq_vector", None)
-            for key in list(self._cache.keys()):
-                if "delta" in key:
-                    del self._cache[key]
-        return delta, p, q, ided
+            self._clear_constant_dependent_cache()
+        return delta, p, q, ided, objective_value
 
     def companion_coboundary_rank(self) -> int:
         """

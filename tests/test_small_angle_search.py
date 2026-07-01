@@ -269,7 +269,9 @@ class TestWalkReuse:
         )
         fp = tier1_config_fingerprint(walk_depth_for(whole_space_shard.cmf, geom.to_real_primitive(z)))
         seen = {tid: {"extended_metrics": {}, "delta_estimate": {e.name: 2.5},
-                      "identified": {e.name: True}, "config_fingerprint": fp}}
+                      "identified": {e.name: True},
+                      "objective_name": "delta", "objective_value": {e.name: 2.5},
+                      "config_fingerprint": fp}}
         built = []
 
         from dreamer.search.methods.small_angle import small_angle_scan as sas
@@ -309,7 +311,9 @@ class TestWalkReuse:
         from unittest.mock import MagicMock
         cached_handler = MagicMock()
         cached_handler.trajectory_matrix.return_value = MagicMock()
-        cached_handler.compute_for_constant.return_value = (1.5, None, None, True)
+        # (delta, p, q, identified, objective_value) — objective_value == delta
+        # for the default "delta" objective.
+        cached_handler.compute_for_constant.return_value = (1.5, None, None, True, 1.5)
 
         from dreamer.utils.storage.trajectory_attributes import (
             tier1_config_fingerprint, walk_depth_for,
@@ -477,7 +481,9 @@ class TestParallelPerturbation:
             direction, constant, *_ = args
             val = float(sum(int(v) for v in direction.values()))
             dto = SimpleNamespace(delta_estimate={constant.name: val},
-                                  identified={constant.name: True})
+                                  identified={constant.name: True},
+                                  objective_name="delta",
+                                  objective_value={constant.name: val})
             return ("M", constant.value_sympy, dto)
 
         monkeypatch.setattr(pe, "_pool_walk", fake_pool_walk)

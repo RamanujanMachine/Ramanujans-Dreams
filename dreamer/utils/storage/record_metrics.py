@@ -21,7 +21,6 @@ extractors simply ignore ``constant_name``.
 """
 from __future__ import annotations
 
-import math
 from typing import Any, Callable, Dict, Optional
 
 import numpy as np
@@ -32,42 +31,6 @@ MetricExtractor = Callable[[Dict[str, Any], Optional[str]], Optional[float]]
 
 def _extended(record: Dict[str, Any]) -> Dict[str, Any]:
     return record.get("extended_metrics") or {}
-
-
-def _direction_norm(record: Dict[str, Any]) -> Optional[float]:
-    """L2 norm of the trajectory ``direction`` vector, or ``None`` when absent/zero."""
-    direction = record.get("direction")
-    if not direction:
-        return None
-    try:
-        norm = float(np.linalg.norm([float(x) for x in direction]))
-    except (TypeError, ValueError):
-        return None
-    return norm if norm > 0 else None
-
-
-def _eig_lognorm(record: Dict[str, Any], index: int) -> Optional[float]:
-    """``log|λ_index| / ||direction||`` from ``extended_metrics["eigenvalues"]``.
-
-    Mirrors ``graphs.shard_delta_sphere_jsonl.eigenvalue_lognorm_value`` — the
-    eigenvalues are stored sorted by magnitude as serialised sympy strings, so
-    ``index=0`` is λ₁ and ``index=1`` is λ₂.
-    """
-    eigs = _extended(record).get("eigenvalues")
-    if not isinstance(eigs, (list, tuple)) or index >= len(eigs):
-        return None
-    norm = _direction_norm(record)
-    if norm is None:
-        return None
-    import sympy as sp
-    try:
-        lam = complex(sp.sympify(str(eigs[index])).evalf())
-    except (sp.SympifyError, TypeError, ValueError):
-        return None
-    mag = abs(lam)
-    if mag == 0 or not np.isfinite(mag):
-        return None
-    return math.log(mag) / norm
 
 
 # ---------------------------------------------------------------------------
@@ -103,33 +66,17 @@ def _extended_float(key: str) -> MetricExtractor:
     return _fn
 
 
-def convergence_rate_metric(
-    record: Dict[str, Any], _constant_name: Optional[str]
-) -> Optional[float]:
-    r"""Normalised spectral convergence rate ``(log|λ₁| − log|λ₂|) / ||direction||``.
-
-    This is the *normalised eigenvalue error* gap: ``log|λ₁/λ₂|`` per unit
-    trajectory length.  **Larger = faster convergence** (a bigger dominant /
-    sub-dominant eigenvalue gap).  It is the sign-flipped twin of
-    ``graphs.shard_delta_sphere_jsonl.convergence_rate`` (which returns
-    ``lognorm(λ₂) − lognorm(λ₁) ≤ 0``); we return the positive gap so that
-    "top N highest convergence_rate" selects the fastest-converging trajectories.
-
-    Requires ``eigenvalues`` in ``extended_metrics`` (i.e. ``eigenvalues`` must be
-    in the Tier-2 attribute list).
-    """
-    l1 = _eig_lognorm(record, 0)
-    l2 = _eig_lognorm(record, 1)
-    if l1 is None or l2 is None:
-        return None
-    return l1 - l2
-
-
 #: Public registry of stored-record metric extractors keyed by the name used in
 #: the top-N selector grammar (``"top N highest <metric> in <scope>"``).
 METRIC_EXTRACTORS: Dict[str, MetricExtractor] = {
     "delta": delta_metric,
-    "convergence_rate": convergence_rate_metric,
+    # Length-normalised spectral convergence rate — the single system-wide
+    # definition, computed by ``TrajectoryAttributesHandler.convergence_rate``
+    # (``approximated_digits_per_step / ||direction||₂``) and stored in
+    # ``extended_metrics`` when ``convergence_rate`` is in the Tier-2 list.
+    # **Larger = faster convergence.**  Read here rather than recomputed so the
+    # ranking metric never diverges from the handler's definition.
+    "convergence_rate": _extended_float("convergence_rate"),
     "approximated_digits_per_step": _extended_float("approximated_digits_per_step"),
     "digits_approximation": _extended_float("digits_approximation"),
     "digits_computed": _extended_float("digits_computed"),

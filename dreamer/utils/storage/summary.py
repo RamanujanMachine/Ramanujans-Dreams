@@ -39,6 +39,11 @@ from datetime import datetime
 from typing import Dict, List, Mapping, Optional, Set, Tuple
 
 from dreamer.utils.multi_processing import load_seen_trajectories
+from dreamer.utils.storage.optimization_objectives import (
+    objective_display_label,
+    record_raw_value,
+    score_record,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -46,22 +51,30 @@ from dreamer.utils.multi_processing import load_seen_trajectories
 # ---------------------------------------------------------------------------
 
 class _ShardStats:
-    """Aggregate trajectory-level statistics for one shard."""
+    """Aggregate trajectory-level statistics for one shard.
+
+    The "best" trajectory is selected by the active optimisation objective
+    (``best_score``, the signed higher-is-better value), while ``best_value`` is
+    that objective's raw value for display.  ``positive_delta`` stays a
+    δ-specific count (δ is always meaningful — the irrationality measure).
+    """
 
     __slots__ = (
-        "shard_id", "cmf_id", "constant", "trajectories",
-        "identified", "positive_delta", "best_delta", "best_trajectory_id",
-        "best_start", "best_direction", "interior_point",
+        "shard_id", "cmf_id", "constant", "objective_name", "trajectories",
+        "identified", "positive_delta", "best_score", "best_value",
+        "best_trajectory_id", "best_start", "best_direction", "interior_point",
     )
 
-    def __init__(self, shard_id: str, cmf_id: str, constant: str):
+    def __init__(self, shard_id: str, cmf_id: str, constant: str, objective_name: str):
         self.shard_id = shard_id
         self.cmf_id = cmf_id
         self.constant = constant
+        self.objective_name = objective_name
         self.trajectories = 0
         self.identified = 0
         self.positive_delta = 0
-        self.best_delta: Optional[float] = None
+        self.best_score: Optional[float] = None   # signed objective, for selection
+        self.best_value: Optional[float] = None   # raw objective, for display
         self.best_trajectory_id: Optional[str] = None
         self.best_start: Optional[list] = None
         self.best_direction: Optional[list] = None
@@ -74,9 +87,9 @@ class _ShardStats:
     def add(self, record: dict, constant_name: Optional[str] = None) -> None:
         """Accumulate one trajectory record.
 
-        *constant_name* is used to index into per-constant dict fields
-        (``delta_estimate``, ``identified``).  When ``None``, falls back to
-        reading those fields as plain scalars (legacy single-constant format).
+        *constant_name* indexes the per-constant dict fields (``delta_estimate``,
+        ``identified``, ``objective_value``).  The best trajectory is chosen by the
+        active objective's signed score; the δ-positive count is tracked separately.
         """
         self.trajectories += 1
         identified_raw = record.get("identified")
@@ -87,18 +100,29 @@ class _ShardStats:
         if bool(identified_val):
             self.identified += 1
 
+        # δ-specific positive count (δ is always present and meaningful).
         delta_raw = record.get("delta_estimate")
         if isinstance(delta_raw, dict) and constant_name:
             delta_raw = delta_raw.get(constant_name)
         delta = _finite_float(delta_raw)
-        if delta is not None:
-            if delta > 0:
-                self.positive_delta += 1
-            if self.best_delta is None or delta > self.best_delta:
-                self.best_delta = delta
-                self.best_trajectory_id = record.get("trajectory_id")
-                self.best_start = record.get("start_point")
-                self.best_direction = record.get("direction")
+        if delta is not None and delta > 0:
+            self.positive_delta += 1
+
+        # Best trajectory by the active objective's signed score.
+        scored = score_record(record, constant_name, self.objective_name)
+        if scored is None:
+            return
+        score, _identified = scored
+        if not math.isfinite(score):
+            return
+        if self.best_score is None or score > self.best_score:
+            self.best_score = score
+            self.best_value = _finite_float(
+                record_raw_value(record, constant_name, self.objective_name)
+            )
+            self.best_trajectory_id = record.get("trajectory_id")
+            self.best_start = record.get("start_point")
+            self.best_direction = record.get("direction")
 
 
 def _finite_float(v) -> Optional[float]:
@@ -207,6 +231,7 @@ def _load_shard_metadata(
 
 def _collect_shard_stats(
     search_results_root: str,
+    objective_name: str,
     this_run_shards: Optional[Mapping[str, Set[str]]] = None,
 ) -> Dict[str, Dict[str, List[_ShardStats]]]:
     """Walk the flat search-results directory and aggregate per-shard stats.
@@ -265,7 +290,7 @@ def _collect_shard_stats(
         for const_name in sorted(const_names_in_file):
             if this_run_shards is not None and shard_id not in this_run_shards.get(const_name, set()):
                 continue
-            stats = _ShardStats(shard_id, cmf_id, const_name)
+            stats = _ShardStats(shard_id, cmf_id, const_name, objective_name)
             for record in merged.values():
                 stats.add(record, constant_name=const_name)
             out[const_name][cmf_id].append(stats)
@@ -282,7 +307,7 @@ def _collect_shard_stats(
                 if shard_id not in seen_ids:
                     cmf_id = shard_id.rsplit("__", 1)[0] if "__" in shard_id else shard_id
                     out[const_name][cmf_id].append(
-                        _ShardStats(shard_id, cmf_id, const_name)
+                        _ShardStats(shard_id, cmf_id, const_name, objective_name)
                     )
 
     return out
@@ -292,8 +317,8 @@ def _collect_shard_stats(
 # Markdown rendering
 # ---------------------------------------------------------------------------
 
-def _fmt_delta(value: Optional[float], *, precision: int = 4) -> str:
-    """Render a δ value or ``"—"`` for missing data."""
+def _fmt_metric(value: Optional[float], *, precision: int = 4) -> str:
+    """Render a metric value or ``"—"`` for missing data."""
     if value is None:
         return "—"
     return f"{value:.{precision}f}"
@@ -322,17 +347,19 @@ def _fmt_traj_cell(s: _ShardStats) -> str:
 
 def _render_overview(
     data: Dict[str, Dict[str, List[_ShardStats]]],
+    label: str,
 ) -> Tuple[str, Optional[Tuple[str, _ShardStats]]]:
     """Render the top-level per-constant overview table.
 
     Returns ``(markdown, overall_best)`` where ``overall_best`` is
-    ``(constant, shard_stats)`` for the best δ across the whole run, or
-    ``None`` when no finite δ was recorded.
+    ``(constant, shard_stats)`` for the best objective score across the whole run,
+    or ``None`` when no finite score was recorded.  *label* is the objective's
+    display name (``"δ"`` for the default objective).
     """
     lines = [
         "## Run overview",
         "",
-        "| Constant | CMFs | Shards | Trajectories | Identified | Positive δ | Best δ |",
+        f"| Constant | CMFs | Shards | Trajectories | Identified | Positive δ | Best {label} |",
         "|---|---:|---:|---:|---:|---:|---:|",
     ]
     overall_best: Optional[Tuple[str, _ShardStats]] = None
@@ -345,18 +372,18 @@ def _render_overview(
         n_ident = sum(s.identified for s in all_shards)
         n_pos = sum(s.positive_delta for s in all_shards)
         best_for_const = max(
-            (s for s in all_shards if s.best_delta is not None),
-            key=lambda s: s.best_delta,
+            (s for s in all_shards if s.best_score is not None),
+            key=lambda s: s.best_score,
             default=None,
         )
-        best_str = _fmt_delta(best_for_const.best_delta) if best_for_const else "—"
+        best_str = _fmt_metric(best_for_const.best_value) if best_for_const else "—"
         lines.append(
             f"| `{const_name}` | {n_cmfs} | {n_shards} | {n_traj} | "
             f"{n_ident} | {n_pos} | **{best_str}** |"
         )
         if best_for_const is not None and (
             overall_best is None
-            or best_for_const.best_delta > overall_best[1].best_delta
+            or best_for_const.best_score > overall_best[1].best_score
         ):
             overall_best = (const_name, best_for_const)
 
@@ -368,7 +395,7 @@ def _render_overview(
         direction = list(s.best_direction) if s.best_direction is not None else "?"
         lines += [
             "",
-            f"**Overall best δ**: {_fmt_delta(s.best_delta)}  ",
+            f"**Overall best {label}**: {_fmt_metric(s.best_value)}  ",
             f"- constant: `{const}`  ",
             f"- start point: `{start}`  ",
             f"- direction: `{direction}`  ",
@@ -390,12 +417,13 @@ def _render_per_constant_section(
     const_name: str,
     cmf_shards: Dict[str, List[_ShardStats]],
     cmf_metadata: Dict[str, dict],
+    label: str,
 ) -> str:
     lines = [f"## {const_name}", ""]
     for cmf_id in sorted(cmf_shards.keys()):
         shards = sorted(
             cmf_shards[cmf_id],
-            key=lambda s: (s.best_delta is None, -(s.best_delta or 0.0)),
+            key=lambda s: (s.best_score is None, -(s.best_score or 0.0)),
         )
         meta = cmf_metadata.get(cmf_id, {})
         family = meta.get("family_id")
@@ -404,11 +432,11 @@ def _render_per_constant_section(
         n_ident = sum(s.identified for s in shards)
         n_pos = sum(s.positive_delta for s in shards)
         best_for_cmf = max(
-            (s for s in shards if s.best_delta is not None),
-            key=lambda s: s.best_delta,
+            (s for s in shards if s.best_score is not None),
+            key=lambda s: s.best_score,
             default=None,
         )
-        best_str = _fmt_delta(best_for_cmf.best_delta) if best_for_cmf else "—"
+        best_str = _fmt_metric(best_for_cmf.best_value) if best_for_cmf else "—"
 
         lines.append(f"### CMF `{cmf_id}`")
         bullets: List[str] = []
@@ -421,11 +449,11 @@ def _render_per_constant_section(
             f"- Trajectories: **{n_traj}**  "
             f"(identified: **{n_ident}**, positive δ: **{n_pos}**)"
         )
-        bullets.append(f"- Best δ within CMF: **{best_str}**")
+        bullets.append(f"- Best {label} within CMF: **{best_str}**")
         lines += bullets + [""]
 
         lines += [
-            "| Shard | Start point | Trajectories | Identified | Positive δ | Best δ | Best trajectory (start → direction) |",
+            f"| Shard | Start point | Trajectories | Identified | Positive δ | Best {label} | Best trajectory (start → direction) |",
             "|---|---|---:|---:|---:|---:|---|",
         ]
         for s in shards:
@@ -433,7 +461,7 @@ def _render_per_constant_section(
                 f"| {_fmt_shard_label(s.shard_id)} | "
                 f"{_fmt_interior_point(s.interior_point)} | "
                 f"{s.trajectories} | {s.identified} | {s.positive_delta} | "
-                f"{_fmt_delta(s.best_delta)} | {_fmt_traj_cell(s)} |"
+                f"{_fmt_metric(s.best_value)} | {_fmt_traj_cell(s)} |"
             )
         lines.append("")
     return "\n".join(lines)
@@ -467,7 +495,11 @@ def build_summary_markdown(
         as a stale leftover from a past run and dropped.  ``None``
         (default) summarises every file on disk.
     """
-    data = _collect_shard_stats(search_results_root, this_run_shards)
+    from dreamer.configs import config
+    objective_name = config.system.OPTIMIZATION_OBJECTIVE
+    label = objective_display_label(objective_name)
+
+    data = _collect_shard_stats(search_results_root, objective_name, this_run_shards)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     header = [
@@ -476,6 +508,7 @@ def build_summary_markdown(
         f"_Generated: {timestamp}_",
         "",
         f"Search-results root: `{search_results_root}`",
+        f"Optimisation objective: `{objective_name}`",
     ]
     if export_cmfs_root:
         header.append(f"CMF-metadata root: `{export_cmfs_root}`")
@@ -517,13 +550,15 @@ def build_summary_markdown(
                     except (TypeError, ValueError):
                         s.interior_point = tuple(pt)
 
-    overview_md, _overall_best = _render_overview(data)
+    overview_md, _overall_best = _render_overview(data, label)
 
     sections: List[str] = []
     for const_name in sorted(data.keys()):
         cmf_metadata = _load_cmf_metadata(export_cmfs_root, const_name)
         sections.append(
-            _render_per_constant_section(const_name, data[const_name], cmf_metadata)
+            _render_per_constant_section(
+                const_name, data[const_name], cmf_metadata, label
+            )
         )
 
     return "\n".join(header + [overview_md, "", "---", ""] + sections)

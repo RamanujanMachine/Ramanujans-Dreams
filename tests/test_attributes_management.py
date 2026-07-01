@@ -547,6 +547,48 @@ class TestBuildTrajectoryDto:
             assert abs(delta_val) < 1e9 or delta_val == float("-inf")
         assert dto.extended_metrics == {}   # workers haven't run yet
 
+    def test_objective_defaults_to_delta_and_mirrors_delta_estimate(
+        self, minimal_handler, symbols
+    ):
+        """With the default ``delta`` objective, ``objective_value`` equals the
+        (raw) δ per constant and is a *separate* field from ``delta_estimate``."""
+        start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        dto = build_trajectory_dto(
+            minimal_handler,
+            cmf_id="c", shard_id="s", cmf_name="c",
+            shard_encoding_str="enc", start=start, direction=direction,
+        )
+        assert dto.objective_name == "delta"
+        assert isinstance(dto.objective_value, dict)
+        assert set(dto.objective_value) == set(dto.delta_estimate)
+        # δ objective's raw value is δ itself (delta_estimate == raw δ when
+        # USE_DELTA_PREDICTION is off, which is the default).
+        for name, val in dto.objective_value.items():
+            assert val == dto.delta_estimate[name]
+
+    def test_objective_override_stores_that_attribute(
+        self, minimal_handler, symbols, monkeypatch
+    ):
+        """A non-δ objective is computed within the constant-set scope and stored
+        under ``objective_value`` / ``objective_name`` (δ still in delta_estimate)."""
+        from dreamer.configs import config
+        monkeypatch.setattr(config.system, "OPTIMIZATION_OBJECTIVE", "convergence_rate")
+        # Avoid depending on LIReC: pin the spectral rate to a known value.
+        monkeypatch.setattr(minimal_handler, "convergence_rate", lambda *a, **k: 0.375)
+        start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
+        dto = build_trajectory_dto(
+            minimal_handler,
+            cmf_id="c", shard_id="s", cmf_name="c",
+            shard_encoding_str="enc", start=start, direction=direction,
+        )
+        assert dto.objective_name == "convergence_rate"
+        assert dto.objective_value is not None
+        assert all(v == 0.375 for v in dto.objective_value.values())
+        # delta_estimate is untouched — still the irrationality measure, not the rate.
+        assert set(dto.delta_estimate) == set(dto.objective_value)
+
     def test_compute_recurrence_opt_in_populates_recurrence(self, minimal_handler, symbols):
         """``compute_recurrence=True`` populates the Tier-2 recurrence fields."""
         start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
@@ -859,6 +901,68 @@ class TestCoboundaryEigenvalues:
         assert h._pfq_coboundary_eigenvalues() is None
 
 
+class TestConvergenceRate:
+    """The single system-wide ``convergence_rate`` definition:
+    ``approximated_digits_per_step / ||trajectory||_2``."""
+
+    def test_equals_per_step_over_direction_norm(self, minimal_handler, monkeypatch):
+        """convergence_rate == approximated_digits_per_step / ||v||_2.
+
+        Formula check, independent of LIReC availability: pin the per-step gain
+        to a known value and confirm the handler divides by the Euclidean norm of
+        the direction.  The minimal handler's direction is (1, 1), so the norm is
+        exactly sqrt(2).
+        """
+        monkeypatch.setattr(
+            minimal_handler, "approximated_digits_per_step", lambda *a, **k: 8.0
+        )
+        minimal_handler.clear_cache()
+        norm = math.sqrt(2.0)  # direction (1, 1)
+        assert minimal_handler.convergence_rate() == pytest.approx(8.0 / norm)
+
+    def test_real_chain_matches_when_identified(self, minimal_handler):
+        """When the full spectral chain is available, the stored relationship
+        ``rate · ||v||_2 == approximated_digits_per_step`` holds end-to-end.
+
+        Skipped in environments without a reachable LIReC database (the handler
+        cannot identify, so ``approximated_digits_per_step`` is ``None``).
+        """
+        per_step = minimal_handler.approximated_digits_per_step()
+        if per_step is None:
+            pytest.skip("no identification available (LIReC DB unreachable)")
+        rate = minimal_handler.convergence_rate()
+        assert rate is not None
+        norm = math.sqrt(2.0)  # direction (1, 1)
+        assert abs(rate - per_step / norm) <= 1e-12 * max(1.0, abs(per_step))
+
+    def test_none_when_per_step_unavailable(self, minimal_handler, monkeypatch):
+        """A ``None`` per-step gain (non-identified / no eigenvalue pair)
+        propagates to ``None`` rather than raising."""
+        monkeypatch.setattr(
+            minimal_handler, "approximated_digits_per_step", lambda *a, **k: None
+        )
+        minimal_handler.clear_cache()
+        assert minimal_handler.convergence_rate() is None
+
+    def test_matrix_only_handler_returns_none(self):
+        """No stored trajectory direction ⇒ cannot normalise ⇒ None
+        (never a division by a missing norm)."""
+        cmf = rt_pFq(2, 1, sp.Integer(1))
+        x = sp.symbols("x:2")
+        y = sp.symbols("y:1")
+        start = Position({x[0]: 1, x[1]: 1, y[0]: 2})
+        traj = Position({x[0]: 1, x[1]: 1, y[0]: 1})
+        tmat = cmf.trajectory_matrix(traj, start)
+        h = TrajectoryAttributesHandler(tmat, constant=e.value_sympy)
+        assert h.convergence_rate() is None
+
+    def test_registry_matches_handler(self, minimal_handler):
+        """The registry entry is a thin float wrapper over the handler method."""
+        from_registry = compute_attribute(minimal_handler, "convergence_rate")
+        direct = minimal_handler.convergence_rate()
+        assert from_registry == pytest.approx(direct)
+
+
 # ---------------------------------------------------------------------------
 # 9. Central attribute registry
 # ---------------------------------------------------------------------------
@@ -876,7 +980,8 @@ class TestAttributeRegistry:
             # Tier-2 — heavier numerical / spectral attributes.
             "eigenvalues", "eigenvalue_errors", "spectral_gap", "gcd_slope",
             "coeff_degrees",
-            "approximated_digits_per_step", "digits_approximation", "precision_at",
+            "approximated_digits_per_step", "digits_approximation", "convergence_rate",
+            "precision_at",
             "companion_coboundary_rank",
             "delta_prediction", "error_formula_ratio",
             # Tier-3 — symbolic / expensive attributes.
@@ -1215,7 +1320,7 @@ class TestBestTrajectoryRecord:
         class _Const:
             name = "e"
         record, delta_val = System._System__best_trajectory_record(
-            _Const(), {"cmfA__sh1", "cmfB__sh2"},
+            _Const(), {"cmfA__sh1", "cmfB__sh2"}, "delta",
         )
         assert record is not None
         assert record["trajectory_id"] == "b1"
@@ -1246,7 +1351,7 @@ class TestBestTrajectoryRecord:
             name = "e"
         # Scope to run 2's shard only.
         record, delta_val = System._System__best_trajectory_record(
-            _Const(), {"cmfB__sh2"},
+            _Const(), {"cmfB__sh2"}, "delta",
         )
         assert record is not None
         assert record["trajectory_id"] == "b1", "must not pick CMF-A's leftover record"
@@ -1261,7 +1366,7 @@ class TestBestTrajectoryRecord:
 
         class _Const:
             name = "missing_const"
-        record, delta_val = System._System__best_trajectory_record(_Const(), {"any__sh"})
+        record, delta_val = System._System__best_trajectory_record(_Const(), {"any__sh"}, "delta")
         assert record is None
         assert delta_val is None
 
@@ -1274,7 +1379,7 @@ class TestBestTrajectoryRecord:
 
         class _Const:
             name = "e"
-        record, delta_val = System._System__best_trajectory_record(_Const(), {"stray"})
+        record, delta_val = System._System__best_trajectory_record(_Const(), {"stray"}, "delta")
         assert record is None
         assert delta_val is None
 
@@ -1291,9 +1396,35 @@ class TestBestTrajectoryRecord:
 
         class _Const:
             name = "e"
-        record, delta_val = System._System__best_trajectory_record(_Const(), {"f"})
+        record, delta_val = System._System__best_trajectory_record(_Const(), {"f"}, "delta")
         assert record["trajectory_id"] == "has_delta"
         assert delta_val == pytest.approx(1.0)
+
+    def test_ranks_by_active_objective(self, tmp_path, monkeypatch):
+        """Under a non-δ objective, the best record is the one maximising that
+        objective — even if another record has a higher δ."""
+        from dreamer.configs.system import sys_config
+        from dreamer.system.system import System
+
+        monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
+        (tmp_path / "cmfA__sh.jsonl").write_text(
+            json.dumps({"trajectory_id": "hi_delta", "delta_estimate": {"e": 5.0},
+                        "identified": {"e": True}, "objective_name": "convergence_rate",
+                        "objective_value": {"e": 0.10},
+                        "start_point": [0, 0], "direction": [1, 0]}) + "\n"
+            + json.dumps({"trajectory_id": "hi_rate", "delta_estimate": {"e": 0.3},
+                          "identified": {"e": True}, "objective_name": "convergence_rate",
+                          "objective_value": {"e": 0.80},
+                          "start_point": [0, 1], "direction": [0, 1]}) + "\n"
+        )
+
+        class _Const:
+            name = "e"
+        record, value = System._System__best_trajectory_record(
+            _Const(), {"cmfA__sh"}, "convergence_rate",
+        )
+        assert record["trajectory_id"] == "hi_rate"   # picked by convergence_rate, not δ
+        assert value == pytest.approx(0.80)
 
 
 # ---------------------------------------------------------------------------

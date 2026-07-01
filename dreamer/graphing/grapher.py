@@ -36,6 +36,11 @@ from dreamer.utils.storage.handler_reconstruction import (
     reconstruct_positions,
 )
 from dreamer.utils.storage.record_metrics import delta_metric
+from dreamer.utils.storage.optimization_objectives import (
+    objective_display_label,
+    record_raw_value,
+    score_record,
+)
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     derive_cmf_and_shard_ids,
@@ -160,11 +165,12 @@ class Grapher:
         from dreamer.graphing.plots import plot_delta_sequence
 
         depth = graph_config.DELTA_SEQUENCE_DEPTH
+        label = objective_display_label(config.system.OPTIMIZATION_OBJECTIVE)
         for (const_name, cmf_id), grp in groups.items():
             best = self._best_record(grp["shards"], const_name)
             if best is None:
                 continue
-            best_delta, record = best
+            best_value, record = best
             cmf = self._cmf_lookup.get(cmf_id)
             if cmf is None:
                 Logger(
@@ -193,8 +199,8 @@ class Grapher:
             plot_delta_sequence(
                 deltas, out,
                 title=(
-                    f"Best-δ trajectory δ-sequence — {cmf_id} [{const_name}] "
-                    f"(δ≈{best_delta:.4f}, first {len(deltas)} steps)"
+                    f"Best-{label} trajectory δ-sequence — {cmf_id} [{const_name}] "
+                    f"({label}≈{best_value:.4f}, first {len(deltas)} steps)"
                 ),
             )
 
@@ -297,13 +303,26 @@ class Grapher:
     def _best_record(
         self, shards, const_name: Optional[str]
     ) -> Optional[Tuple[float, dict]]:
-        """Return ``(best_delta, record)`` over all shards of one (constant, CMF)."""
+        """Return ``(best_objective_value, record)`` over all shards of one
+        ``(constant, CMF)``.
+
+        "Best" is chosen by the active optimisation objective's signed score (so it
+        is correct for both larger- and smaller-is-better objectives); the returned
+        value is that objective's raw value for display.
+        """
+        objective_name = config.system.OPTIMIZATION_OBJECTIVE
+        best_score = -float("inf")
         best: Optional[Tuple[float, dict]] = None
         for _enc, path in shards:
             for rec in load_seen_trajectories(path).values():
-                d = delta_metric(rec, const_name)
-                if d is None:
+                scored = score_record(rec, const_name, objective_name)
+                if scored is None:
                     continue
-                if best is None or d > best[0]:
-                    best = (d, rec)
+                score, _identified = scored
+                if score != score or score == -float("inf"):  # NaN / worst sentinel
+                    continue
+                if best is None or score > best_score:
+                    best_score = score
+                    raw = record_raw_value(rec, const_name, objective_name)
+                    best = (raw if raw is not None else score, rec)
         return best

@@ -31,6 +31,21 @@ class SystemConfig(Configurable):
         metadata={"description": "Enable LIReC-backed identification when available."},
     )
 
+    # ============================== optimization objective ==============================
+    OPTIMIZATION_OBJECTIVE: str = field(
+        default="delta",
+        metadata={"description": (
+            "The trajectory attribute the WHOLE pipeline optimises for — steers "
+            "both the analysis-stage shard ranking and the search-stage optimisers "
+            "(identically, hence a system-level setting, not a per-stage one). Must "
+            "be a numeric attribute registered in "
+            "dreamer.utils.storage.optimization_objectives.OBJECTIVES, which also "
+            "records whether its optimum is the highest or lowest value. 'delta' "
+            "(default) reproduces the historical behaviour exactly. Identification "
+            "(LIReC) is always required regardless of the objective."
+        )},
+    )
+
     def __post_init__(self):
         self.TQDM_CONFIG = {
             'bar_format': '{desc:<40}' + ' ' * 5 + '{bar} | {elapsed} {rate_fmt} ({percentage:.2f}%)',
