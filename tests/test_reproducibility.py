@@ -148,6 +148,83 @@ class TestConstantSeedStability:
 
 
 # ---------------------------------------------------------------------------
+# 1c. The trajectory reservoir order must be process-stable
+# ---------------------------------------------------------------------------
+
+#: Subprocess program: sample a shard's trajectory reservoir under a fixed
+#: GLOBAL_SEED and print the ordered result.  Run in a child with
+#: ``PYTHONHASHSEED=random`` so any reliance on ``Position``'s (per-process-salted)
+#: hash order surfaces as a different order.
+_RESERVOIR_PROG = r'''
+from dreamer.configs.search import search_config
+search_config.GLOBAL_SEED = 42
+search_config.SAMPLING_METHOD = "{method}"
+import sympy as sp
+from ramanujantools import Position
+from ramanujantools.cmf import pFq as rt_pFq
+from dreamer import e
+from dreamer.extraction.hyperplanes import Hyperplane
+from dreamer.extraction.shard import Shard
+from dreamer.extraction.sampling_orchestrators.shard_sampler_orchestrator import (
+    ShardSamplingOrchestrator,
+)
+
+cmf = rt_pFq(1, 1, sp.Integer(1))
+symbols = list(cmf.matrices.keys())
+zero_shift = Position({{s: sp.Integer(0) for s in symbols}})
+hps = [Hyperplane(symbols[0], symbols), Hyperplane(symbols[1], symbols)]
+interior = Position({{symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)}})
+shard = Shard(cmf, e, hps, [1, 1], zero_shift, interior)
+
+samples = ShardSamplingOrchestrator(shard).sample_trajectories(40)
+order = [tuple(int(p[s]) for s in symbols) for p in samples]
+print("RESERVOIR_ISLIST::" + str(isinstance(samples, list)))
+print("RESERVOIR_ORDER::" + repr(order))
+'''
+
+
+def _reservoir_output(method: str) -> tuple[str, str]:
+    """Run ``_RESERVOIR_PROG`` in a fresh ``PYTHONHASHSEED=random`` subprocess.
+
+    :return: ``(is_list, order_repr)`` extracted from the child's stdout (robust
+        to any interleaved log lines).
+    """
+    prog = _RESERVOIR_PROG.format(method=method)
+    out = subprocess.check_output(
+        [sys.executable, "-c", prog],
+        env={"PYTHONHASHSEED": "random", **_clean_env()},
+    ).decode()
+    is_list = order = None
+    for line in out.splitlines():
+        if line.startswith("RESERVOIR_ISLIST::"):
+            is_list = line.split("::", 1)[1]
+        elif line.startswith("RESERVOIR_ORDER::"):
+            order = line.split("::", 1)[1]
+    assert is_list is not None and order is not None, f"child produced no reservoir:\n{out}"
+    return is_list, order
+
+
+@pytest.mark.parametrize("method", ["pt", "discrete"])
+def test_reservoir_order_is_process_stable(method):
+    """``sample_trajectories`` must return the same *ordered* reservoir every run.
+
+    Regression guard: it used to return a ``Set[Position]``, whose iteration order
+    depends on ``Position``'s per-process-salted hash (PYTHONHASHSEED).  Downstream
+    seed-vector selection (the search reservoirs) sorts these and picks the first
+    match, so a different order silently seeds the search differently — the root
+    cause of two identical runs diverging.  We run two independent
+    ``PYTHONHASHSEED=random`` subprocesses and require byte-identical order.
+    """
+    is_list_a, order_a = _reservoir_output(method)
+    is_list_b, order_b = _reservoir_output(method)
+    assert is_list_a == "True", "sample_trajectories must return a list, not a set"
+    assert order_a == order_b, (
+        f"reservoir order differs across processes for method={method} — "
+        f"sampling is not process-stable:\n{order_a}\n{order_b}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 2. Sampler reproducibility
 # ---------------------------------------------------------------------------
 

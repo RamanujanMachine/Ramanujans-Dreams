@@ -159,8 +159,9 @@ def test_orchestrator_post_filters_sign_violations(monkeypatch, cmf_2d):
     orch = ShardSamplingOrchestrator(shard, sampling_method="raycast")
     sampled = orch.sample_trajectories(lambda d: d)
 
-    # Only the strictly-positive same-sign directions survive.
-    assert sampled == {
+    # Only the strictly-positive same-sign directions survive.  sample_trajectories
+    # returns a deterministically-ordered list; compare as sets (content, not order).
+    assert set(sampled) == {
         Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)}),
         Position({symbols[0]: sp.Integer(2), symbols[1]: sp.Integer(2)}),
     }
