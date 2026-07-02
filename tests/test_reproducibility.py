@@ -97,6 +97,57 @@ def _clean_env():
 
 
 # ---------------------------------------------------------------------------
+# 1b. Constant-derived seeds must be content-stable, not identity-stable
+# ---------------------------------------------------------------------------
+
+class TestConstantSeedStability:
+    """A ``Constant`` fed into the RNG context must seed by *name*, not identity.
+
+    Regression guard for the bug where the search methods seeded from
+    ``str(constant)``: ``Constant`` had no ``__str__``/``__repr__``, so the default
+    ``<...Constant object at 0x...>`` (memory address) made every process derive a
+    *different* seed — silently breaking reproducibility of Simulated Annealing,
+    Genetic, Gradient-Ascent and Hybrid-SPSA searches across runs.
+
+    Two independent guards: (a) ``str``/``repr`` are the content (name), address-
+    free, so even the old ``str(constant)`` pattern is now stable; (b) two distinct
+    ``Constant`` instances with the same name derive the identical RNG stream —
+    which is what "same seed ⇒ same run" relies on.
+    """
+
+    def _fresh_constant(self):
+        import sympy as sp
+        from dreamer.utils.constants.constant import Constant
+        # A new object each call (same name) — distinct identities, same content.
+        return Constant("repro_probe", sp.pi)
+
+    def test_str_and_repr_are_address_free_name(self):
+        c = self._fresh_constant()
+        assert str(c) == c.name
+        assert repr(c) == c.name
+        assert "0x" not in str(c) and "object at" not in str(c)
+
+    def test_two_instances_have_equal_string_form(self):
+        c1 = self._fresh_constant()
+        c2 = self._fresh_constant()
+        assert c1 is not c2
+        assert str(c1) == str(c2)
+
+    @pytest.mark.parametrize("method", ["annealing", "genetic", "gradient", "spsa_adam"])
+    def test_seed_stream_stable_across_constant_instances(self, method):
+        # Mirror exactly what the search methods derive: (shard_id, method, name).
+        c1 = self._fresh_constant()
+        c2 = self._fresh_constant()
+        rng_a = derive_rng("shardX", method, c1.name)
+        rng_b = derive_rng("shardX", method, c2.name)
+        assert np.array_equal(rng_a.random(10), rng_b.random(10))
+        # And the (previously broken) str-based context is now stable too.
+        pa = derive_py_random("shardX", method, str(c1))
+        pb = derive_py_random("shardX", method, str(c2))
+        assert [pa.random() for _ in range(10)] == [pb.random() for _ in range(10)]
+
+
+# ---------------------------------------------------------------------------
 # 2. Sampler reproducibility
 # ---------------------------------------------------------------------------
 

@@ -17,8 +17,16 @@ The pass operates on the *recorded* best trajectories (read back from the flushe
 JSONL, which stores each trajectory's ``direction``), maps each back to its
 flatland integer vector via :meth:`FlatlandGeometry.to_flatland`, and writes any
 refined trajectory it discovers to the same JSONL through its own ``worker_pool``.
-A single ``visited`` set of primitive-ray identities is shared across all tied
-trajectories (and all constants) so no trajectory is walked or re-checked twice.
+
+Each tied best trajectory is refined by an **independent** micro-climb (its own
+Phase-B exploration set) so the finalized result is *complete* — every tied
+trajectory's basin is explored regardless of the order the ties are visited — and
+*reproducible*: since each climb is deterministic and the climbs are order-
+independent, the union of refined trajectories does not depend on the
+(nondeterministic, parallel) JSONL append order.  A per-constant set of already-
+climbed start rays merely avoids re-running an *identical* climb; the shared walk
+cache (``seen_trajectories`` + ``handler_cache``) keeps this cheap by never
+re-walking a ray, only re-considering it.
 
 Off by default ⇒ this module is never entered and the search is byte-identical
 to its pre-finalization behaviour.
@@ -95,6 +103,10 @@ def _best_records_for_constant(
     max_score = max(s for s, _ in candidates)
     threshold = round(max_score, _TIE_DECIMALS)
     best = [rec for s, rec in candidates if round(s, _TIE_DECIMALS) == threshold]
+    # Return in a deterministic order: the JSONL append order is nondeterministic
+    # (parallel Tier-2 workers write on completion), so sorting by the stable
+    # trajectory_id makes the finalization's per-tie climb sequence reproducible.
+    best.sort(key=lambda r: r.get("trajectory_id", ""))
     return max_score, best
 
 
@@ -141,9 +153,10 @@ def finalize_best_trajectories(
     max_norm = cfg.SEARCH_MAX_TRAJ_LEN
     traj_norm = cfg.SEARCH_TRAJ_NORM
 
-    # Shared across every constant + every tied trajectory: primitive-ray identities
-    # already explored, so the endgame never walks or re-checks the same trajectory.
-    visited: Set[Tuple[int, ...]] = set()
+    # Shared *walk* cache (built once, reused by every climb): a ray walked by one
+    # climb is a cache hit for the next, so nothing is re-walked — but each climb
+    # still explores independently (see below), so the result stays complete and
+    # order-independent.
     handler_cache: dict = {}
     objective_name = active_objective()
 
@@ -177,6 +190,12 @@ def finalize_best_trajectories(
 
             improved_to = max_delta
             climbed = 0
+            # Per-constant dedup of climb *start* rays only: two tied records that
+            # reduce to the same primitive ray would run an identical (deterministic)
+            # climb, so the second is redundant.  This is scoped per constant because
+            # the same ray identifies different constants differently — a ray climbed
+            # for one constant must still be climbed for another.
+            climbed_centers: Set[Tuple[int, ...]] = set()
             for rec in best_recs:
                 try:
                     _, direction = reconstruct_positions(shard.cmf, rec)
@@ -193,21 +212,25 @@ def finalize_best_trajectories(
                     continue  # outside the cone after the round-trip — skip.
 
                 key = primitive_ray_key(z, geom)
-                if key in visited:
-                    continue  # this best ray was already covered by an earlier climb.
+                if key in climbed_centers:
+                    continue  # identical start ray already climbed for this constant.
+                climbed_centers.add(key)
 
                 # Re-evaluate the start under the current config (cache hit when the
                 # stored fingerprint matches — no extra walk) to anchor the climb.
                 cur_delta, identified = evaluate_in_flatland(z, **eval_ctx)
-                visited.add(key)
                 if not identified or not math.isfinite(cur_delta):
                     continue
 
+                # Independent Phase-B exploration per tied trajectory (``visited=None``
+                # ⇒ discrete_micro_climb allocates its own fresh set): each tied
+                # trajectory's basin is explored fully, so completeness and the final
+                # result are independent of the order the ties are climbed.
                 _, refined_delta = discrete_micro_climb(
                     z, cur_delta,
                     geom=geom, eval_ctx=eval_ctx, max_norm=max_norm,
                     traj_norm=traj_norm, improve_threshold=_IMPROVE_EPS,
-                    pool=eval_pool, visited=visited,
+                    pool=eval_pool, visited=None,
                 )
                 improved_to = max(improved_to, refined_delta)
                 climbed += 1

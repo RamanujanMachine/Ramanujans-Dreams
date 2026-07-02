@@ -5,9 +5,9 @@ For each shard, samples trajectories and records Tier-1 attributes
 (``delta``, ``identified``, plus the rest of the ``TrajectoryDTO`` core
 fields) as one JSONL line per trajectory.  The trajectory walk is computed
 *once* per (trajectory, shard) and evaluated against **all** constants
-bound to the shard; per-constant attributes (``delta_estimate``,
-``p_vector``, ``q_vector``, ``identified``) are stored as dicts keyed by
-constant name.
+bound to the shard; the per-constant attributes (``delta``, ``p_vector``,
+``q_vector``, ``identified``) are then written as one **flat row per
+``(trajectory, constant)`` pair** (one JSONL line each).
 
 **JSONL layout** — one file per shard (no constant subdirectory):
     ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` by default, shared with the

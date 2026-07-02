@@ -12,7 +12,7 @@ Three graph kinds (see :class:`GraphConfig`):
      over the first ``DELTA_SEQUENCE_DEPTH`` walk steps of the best-δ trajectory.
      The only kind that walks a trajectory (just the single best one per group).
   2. **δ histograms** — one per ``(constant, shard)`` and one aggregated per
-     ``(constant, CMF)``, from stored ``delta_estimate`` (cheap).
+     ``(constant, CMF)``, from the stored scalar ``delta`` column (cheap).
   3. **Bumpiness table** — per-shard CSV + markdown with the semivariogram-based
      spatial roughness and the median δ-sequence total variation
      (see :mod:`dreamer.graphing.bumpiness`).

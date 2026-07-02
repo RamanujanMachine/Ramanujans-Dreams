@@ -8,9 +8,10 @@ directory, one file per shard), plus the optional
 single ``summary.md`` describing what the run scanned, what was found,
 and where the best trajectories live.
 
-Each JSONL record stores per-constant attributes as dicts keyed by
-constant name (``delta_estimate``, ``identified``, etc.), so a single
-file covers all constants searched in that shard.
+Each JSONL record is a **flat row for one ``(trajectory, constant)`` pair**
+(``delta``, ``identified``, etc. are scalar columns; ``constant`` names the
+target); a shard's file therefore holds one row per constant per trajectory
+and so still covers all constants searched in that shard.
 
 This-run filtering
 ==================
@@ -227,8 +228,9 @@ def _collect_shard_stats(
     """Walk the flat search-results directory and aggregate per-shard stats.
 
     JSONL files now live directly in *search_results_root* (one file per
-    shard, no constant subdirectory).  Each record has per-constant fields:
-    ``delta_estimate`` and ``identified`` are dicts keyed by constant name.
+    shard, no constant subdirectory).  Each record is a flat row for one
+    ``(trajectory, constant)`` pair, with ``delta`` and ``identified`` as
+    scalar columns and ``constant`` naming the target.
 
     When ``this_run_shards`` is provided it must map constant name to a set
     of shard ids the current run touched.  JSONL files not covered by the

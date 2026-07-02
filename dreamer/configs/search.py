@@ -144,7 +144,7 @@ class SearchConfig(Configurable):
         default=False,
         metadata={"description": (
             "When True, use delta_prediction (eigenvalue-based) as the primary ranking "
-            "metric stored in delta_estimate for analysis and search, instead of the "
+            "metric stored in the `delta` column for analysis and search, instead of the "
             "regular walk-based delta.  The regular delta is always computed first because "
             "it is needed to select the best eigenvalue pair for delta_prediction; both "
             "values are computed, only the ranking metric changes."

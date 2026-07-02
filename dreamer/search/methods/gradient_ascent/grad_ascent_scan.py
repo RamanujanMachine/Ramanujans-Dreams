@@ -186,7 +186,7 @@ class GradientAscentSearch(SearchMethod):
         # Same GLOBAL_SEED + shard + constant => identical run; distinct shards/
         # constants get independent streams (nondeterministic when GLOBAL_SEED is
         # None).  Overrides the unseeded generator created in __init__.
-        self._rng = derive_rng(shard_id, "gradient", str(constant))
+        self._rng = derive_rng(shard_id, "gradient", constant.name)
 
         shard: Shard = self.space
         if geom is None:

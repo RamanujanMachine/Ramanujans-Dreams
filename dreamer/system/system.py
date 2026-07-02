@@ -639,7 +639,9 @@ class System:
             # different objective, report both the objective value and δ.
             extra = ""
             if objective_name != "delta":
-                delta_val = (best_record.get("delta_estimate") or {}).get(const.name)
+                # Records are flat per-(trajectory, constant): δ is the scalar
+                # ``delta`` column on this constant's row (not a nested dict).
+                delta_val = best_record.get("delta")
                 if delta_val is not None:
                     extra = f"\n* δ:             {float(delta_val):.6f}"
             Logger(
