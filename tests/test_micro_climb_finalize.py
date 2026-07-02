@@ -133,7 +133,7 @@ class TestFinalize:
 
         def boom(*a, **k):
             raise AssertionError("disabled finalization must not climb")
-        monkeypatch.setattr(fin, "discrete_micro_climb", boom)
+        monkeypatch.setattr(fin, "parallel_micro_climb", boom)
 
         # Returns immediately without reading the (absent) JSONL or climbing.
         finalize_best_trajectories(
@@ -165,14 +165,18 @@ class TestFinalize:
             for r in records:
                 f.write(json.dumps(r) + "\n")
 
-        # Anchor evaluation: identified, finite (a cache hit in production).
-        monkeypatch.setattr(fin, "evaluate_in_flatland", lambda z, **kw: (0.20, True))
+        # Anchor evaluation (batched cache hits in production): identified, finite.
+        monkeypatch.setattr(
+            fin, "evaluate_neighbours", lambda zs, ctx, pool: [(0.20, True) for _ in zs]
+        )
 
+        # The concurrent climb receives one anchor per distinct tied-best ray.
         climbed_keys = []
-        def fake_climb(z, cur_delta, **kw):
-            climbed_keys.append(primitive_ray_key(z, kw["geom"]))
-            return np.asarray(z), cur_delta
-        monkeypatch.setattr(fin, "discrete_micro_climb", fake_climb)
+        def fake_parallel(anchors, **kw):
+            for z, cur_delta in anchors:
+                climbed_keys.append(primitive_ray_key(z, kw["geom"]))
+            return [(np.asarray(z), cur_delta) for z, cur_delta in anchors]
+        monkeypatch.setattr(fin, "parallel_micro_climb", fake_parallel)
 
         finalize_best_trajectories(
             shard=whole_space_shard, identified_consts=[e], geom=geom,

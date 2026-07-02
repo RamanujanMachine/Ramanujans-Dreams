@@ -54,8 +54,11 @@ def simple_shard(simple_cmf, symbols, zero_shift):
 
 
 class _DummyPool:
-    """Runs pool.map in-process (no real worker processes)."""
+    """Runs the pool API in-process (no real worker processes)."""
     def map(self, fn, args):
+        return [fn(a) for a in args]
+
+    def imap_unordered(self, fn, args, chunksize=1):
         return [fn(a) for a in args]
 
 
@@ -77,14 +80,14 @@ def _stub_walk(monkeypatch):
     from dreamer.utils.storage.dtos import TrajectoryDTO
 
     def fake_pool_walk(args):
-        direction, constant, cmf_id, shard_id, shard_encoding_str = args
+        idx, direction, constant, cmf_id, shard_id, shard_encoding_str = args
         val = float(sum(int(v) for v in direction.values()))
         dto = TrajectoryDTO(
             trajectory_id="t", cmf_id=cmf_id, shard_id=shard_id,
             constant=constant.name, start_point=(), direction=(),
             identified=True, delta=val,
         )
-        return ("MATRIX", constant.value_sympy, dto)
+        return (idx, ("MATRIX", constant.value_sympy, dto))
 
     monkeypatch.setattr(pe, "_pool_walk", fake_pool_walk)
 
@@ -161,7 +164,7 @@ class TestEvaluateBatch:
 
     def test_walk_error_degrades_to_neg_inf(self, whole_space_shard, monkeypatch):
         """A worker WalkError maps to −∞ without aborting the batch / emitting."""
-        monkeypatch.setattr(pe, "_pool_walk", lambda args: pe.WalkError("boom"))
+        monkeypatch.setattr(pe, "_pool_walk", lambda args: (args[0], pe.WalkError("boom")))
         ctx, sink_items = _make_ctx(whole_space_shard, e)
         d = ctx["geom"].d_flat
         batch = [np.array([1, 0], dtype=np.int64)[:d],

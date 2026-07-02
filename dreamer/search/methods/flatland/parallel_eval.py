@@ -83,18 +83,20 @@ def _pool_init(config_overrides: dict, shard, start) -> None:
 def _pool_walk(args):
     """Worker task: perform one Case-C walk and return the sink tuple.
 
-    :param args: ``(direction, constant, cmf_id, shard_id, shard_encoding_str)``.
-    :return: ``(trajectory_matrix, value_sympy, dto)`` on success — identical to
-        what the serial Case-C path passes to the sink — or a :class:`WalkError`
-        if the walk raised (so the main process can map it to δ = −∞ without the
-        exception aborting the whole batch).
+    :param args: ``(idx, direction, constant, cmf_id, shard_id, shard_encoding_str)``
+        where ``idx`` is the caller's group index (echoed back so the parent can
+        reassemble results dispatched out of order under ``imap_unordered``).
+    :return: ``(idx, (trajectory_matrix, value_sympy, dto))`` on success — the inner
+        tuple is identical to what the serial Case-C path passes to the sink — or
+        ``(idx, WalkError)`` if the walk raised (so the main process can map it to
+        δ = −∞ without the exception aborting the whole batch).
     """
     from dreamer.utils.storage.trajectory_attributes import (
         TrajectoryAttributesHandler,
         build_trajectory_dtos,
     )
 
-    direction, constant, cmf_id, shard_id, shard_encoding_str = args
+    idx, direction, constant, cmf_id, shard_id, shard_encoding_str = args
     shard = _POOL_STATE["shard"]
     start = _POOL_STATE["start"]
     try:
@@ -112,10 +114,10 @@ def _pool_walk(args):
             constants=[constant],
         )
         if not dtos:
-            return WalkError("no DTO produced")
-        return (handler.trajectory_matrix, constant.value_sympy, dtos[0])
+            return idx, WalkError("no DTO produced")
+        return idx, (handler.trajectory_matrix, constant.value_sympy, dtos[0])
     except Exception as exc:  # noqa: BLE001 — mirror serial evaluator resilience
-        return WalkError(str(exc))
+        return idx, WalkError(str(exc))
 
 
 def resolve_eval_workers(cap: Optional[int]) -> int:
@@ -266,12 +268,21 @@ def evaluate_batch(
             grp[2].append(i)
 
     if groups:
+        group_items = list(groups.items())          # deterministic (insertion) order
         args = [
-            (direction, constant, cmf_id, shard_id, shard_encoding_str)
-            for (direction, fp, idxs) in groups.values()
+            (gi, direction, constant, cmf_id, shard_id, shard_encoding_str)
+            for gi, (tid, (direction, fp, idxs)) in enumerate(group_items)
         ]
-        walked = pool.map(_pool_walk, args)
-        for (tid, (direction, fp, idxs)), res in zip(groups.items(), walked):
+        # Dynamic load balancing: ``imap_unordered`` with ``chunksize=1`` lets a
+        # worker pull the next trajectory the instant it is free, so a few long
+        # (deep-walk) trajectories can't stall a statically-assigned ``map`` chunk
+        # while other cores idle.  Results are reassembled by group index and then
+        # processed in deterministic group order, so the sink / ``seen`` updates and
+        # the returned batch values are identical to the old ``pool.map`` path.
+        walked: List = [None] * len(group_items)
+        for gi, res in pool.imap_unordered(_pool_walk, args, chunksize=1):
+            walked[gi] = res
+        for (tid, (direction, fp, idxs)), res in zip(group_items, walked):
             if isinstance(res, WalkError):
                 Logger(
                     f"Parallel walk failed — shard {shard_id}, "

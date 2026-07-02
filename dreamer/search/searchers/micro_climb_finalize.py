@@ -7,11 +7,10 @@ Small Angle) writes its evaluated trajectories to a per-shard JSONL.  When
 calls :func:`finalize_best_trajectories` once the search has finished and the
 JSONL is flushed.  This is a *method-agnostic assurance pass*: it picks the
 best-δ trajectory of the shard for each identified constant — and any trajectory
-tied with it up to two decimal places — and runs the
-:func:`~dreamer.search.methods.flatland.discrete_local_max.discrete_micro_climb`
-endgame (orthogonal ±1 certificate + angular-resolution-doubling) around each, so
-the reported maximum is a genuine refined lattice local maximum rather than
-wherever the macro search happened to stop.
+tied with it up to two decimal places — and runs the orthogonal ±1 certificate +
+angular-resolution-doubling endgame around each, so the reported maximum is a
+genuine refined lattice local maximum rather than wherever the macro search
+happened to stop.
 
 The pass operates on the *recorded* best trajectories (read back from the flushed
 JSONL, which stores each trajectory's ``direction``), maps each back to its
@@ -24,9 +23,16 @@ trajectory's basin is explored regardless of the order the ties are visited — 
 *reproducible*: since each climb is deterministic and the climbs are order-
 independent, the union of refined trajectories does not depend on the
 (nondeterministic, parallel) JSONL append order.  A per-constant set of already-
-climbed start rays merely avoids re-running an *identical* climb; the shared walk
-cache (``seen_trajectories`` + ``handler_cache``) keeps this cheap by never
-re-walking a ray, only re-considering it.
+climbed start rays merely avoids re-running an *identical* climb.
+
+The ties are climbed **concurrently** via
+:func:`~dreamer.search.methods.flatland.discrete_local_max.parallel_micro_climb`:
+each round unions the candidate rays of *all* active climbs into one wide batch, so
+the process pool stays saturated across ties (a shard with ``N`` tied bests would
+otherwise dispatch ``N`` thin ``2·d_flat``-wide batches, idling most cores).  This
+is a pure scheduling change — the per-climb result is identical to a sequential
+``discrete_micro_climb`` per anchor — and the shared walk cache
+(``seen_trajectories`` + ``handler_cache``) still walks each ray once.
 
 Off by default ⇒ this module is never entered and the search is byte-identical
 to its pre-finalization behaviour.
@@ -39,10 +45,11 @@ from typing import List, Set, Tuple
 
 from dreamer.configs import config
 from dreamer.search.methods.flatland.discrete_local_max import (
-    discrete_micro_climb,
+    evaluate_neighbours,
+    parallel_micro_climb,
     primitive_ray_key,
 )
-from dreamer.search.methods.flatland.evaluator import active_objective, evaluate_in_flatland
+from dreamer.search.methods.flatland.evaluator import active_objective
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.utils.storage.optimization_objectives import score_record
 from dreamer.utils.constants.constant import Constant
@@ -175,6 +182,17 @@ def finalize_best_trajectories(
             if not best_recs:
                 continue
 
+            # Log the tie multiplicity: the finalization cost scales with the number
+            # of trajectories tied (to _TIE_DECIMALS) with the best score, since each
+            # is refined by its own micro-climb.  Recorded so a run can be sized /
+            # optimised against the real tie count on production shards.
+            Logger(
+                f"Micro-climb finalization: '{const.name}' on shard {shard_id} — "
+                f"{len(best_recs)} trajectory(ies) tied within {_TIE_DECIMALS} dp of "
+                f"best {objective_name}={max_delta:.6g}; refining each.",
+                Logger.Levels.info,
+            ).log()
+
             eval_ctx = dict(
                 geom=geom,
                 shard=shard,
@@ -188,14 +206,16 @@ def finalize_best_trajectories(
                 handler_cache=handler_cache,
             )
 
-            improved_to = max_delta
-            climbed = 0
-            # Per-constant dedup of climb *start* rays only: two tied records that
-            # reduce to the same primitive ray would run an identical (deterministic)
-            # climb, so the second is redundant.  This is scoped per constant because
-            # the same ray identifies different constants differently — a ray climbed
-            # for one constant must still be climbed for another.
+            # Baseline walk-cache size for this constant, so the log below can report
+            # how many *new* trajectories the finalization actually walks (the real
+            # compute cost, distinct from the tie count and from cache-hit re-checks).
+            walked_before = sum(1 for by_const in seen.values() if const.name in by_const)
+
+            # Collect the distinct start rays of the tied best trajectories.  Dedup is
+            # per-constant (the same ray identifies different constants differently, so
+            # a ray climbed for one must still be climbed for another).
             climbed_centers: Set[Tuple[int, ...]] = set()
+            anchor_zs: list = []
             for rec in best_recs:
                 try:
                     _, direction = reconstruct_positions(shard.cmf, rec)
@@ -213,42 +233,47 @@ def finalize_best_trajectories(
 
                 key = primitive_ray_key(z, geom)
                 if key in climbed_centers:
-                    continue  # identical start ray already climbed for this constant.
+                    continue  # identical start ray already collected for this constant.
                 climbed_centers.add(key)
+                anchor_zs.append(z)
 
-                # Re-evaluate the start under the current config (cache hit when the
-                # stored fingerprint matches — no extra walk) to anchor the climb.
-                cur_delta, identified = evaluate_in_flatland(z, **eval_ctx)
-                if not identified or not math.isfinite(cur_delta):
-                    continue
-
-                # Independent Phase-B exploration per tied trajectory (``visited=None``
-                # ⇒ discrete_micro_climb allocates its own fresh set): each tied
-                # trajectory's basin is explored fully, so completeness and the final
-                # result are independent of the order the ties are climbed.
-                _, refined_delta = discrete_micro_climb(
-                    z, cur_delta,
-                    geom=geom, eval_ctx=eval_ctx, max_norm=max_norm,
-                    traj_norm=traj_norm, improve_threshold=_IMPROVE_EPS,
-                    pool=eval_pool, visited=None,
-                )
-                improved_to = max(improved_to, refined_delta)
-                climbed += 1
-
+            # Anchor every start under the current config (batched cache hits), then
+            # micro-climb all identified anchors *concurrently*: each tied trajectory's
+            # basin is still explored fully (completeness) — the result is identical to
+            # climbing them one by one — but every round unions all active climbs'
+            # candidate rays into one wide batch so the process pool stays saturated
+            # across ties instead of dispatching 2·d_flat neighbours at a time.
+            anchor_scores = (
+                evaluate_neighbours(anchor_zs, eval_ctx, eval_pool) if anchor_zs else []
+            )
+            anchors = [
+                (z, score)
+                for z, (score, identified) in zip(anchor_zs, anchor_scores)
+                if identified and math.isfinite(score)
+            ]
+            climbed = len(anchors)
             if climbed == 0:
                 continue
+
+            refined = parallel_micro_climb(
+                anchors,
+                geom=geom, eval_ctx=eval_ctx, max_norm=max_norm,
+                traj_norm=traj_norm, improve_threshold=_IMPROVE_EPS, pool=eval_pool,
+            )
+            improved_to = max([max_delta] + [d for _, d in refined])
+            new_walks = sum(1 for by_const in seen.values() if const.name in by_const) - walked_before
             if improved_to > max_delta + _IMPROVE_EPS:
                 Logger(
                     f"Micro-hill-climb finalization improved best {objective_name} for "
                     f"'{const.name}' on shard {shard_id}: "
                     f"{max_delta:.6g} -> {improved_to:.6g} "
-                    f"({climbed} best trajectory(ies) refined).",
+                    f"({climbed} best trajectory(ies) refined, {new_walks} new trajectories walked).",
                     Logger.Levels.info,
                 ).log()
             else:
                 Logger(
                     f"Micro-hill-climb finalization confirmed best {objective_name} for "
                     f"'{const.name}' on shard {shard_id}: {objective_name}={max_delta:.6g} "
-                    f"({climbed} tied trajectory(ies) certified).",
+                    f"({climbed} tied trajectory(ies) certified, {new_walks} new trajectories walked).",
                     Logger.Levels.debug,
                 ).log()

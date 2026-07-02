@@ -461,6 +461,9 @@ class TestParallelPerturbation:
         def map(self, fn, args):
             return [fn(a) for a in args]
 
+        def imap_unordered(self, fn, args, chunksize=1):
+            return [fn(a) for a in args]
+
     def _ctx(self, shard):
         geom = FlatlandGeometry(shard)
         return dict(
@@ -474,14 +477,14 @@ class TestParallelPerturbation:
         from dreamer.utils.storage.dtos import TrajectoryDTO
 
         def fake_pool_walk(args):
-            direction, constant, cmf_id, shard_id, shard_encoding_str = args
+            idx, direction, constant, cmf_id, shard_id, shard_encoding_str = args
             val = float(sum(int(v) for v in direction.values()))
             dto = TrajectoryDTO(
                 trajectory_id="t", cmf_id=cmf_id, shard_id=shard_id,
                 constant=constant.name, start_point=(), direction=(),
                 identified=True, delta=val,
             )
-            return ("M", constant.value_sympy, dto)
+            return (idx, ("M", constant.value_sympy, dto))
 
         monkeypatch.setattr(pe, "_pool_walk", fake_pool_walk)
         method = SmallAngleSearch(whole_space_shard, e, use_LIReC=False)
@@ -499,7 +502,7 @@ class TestParallelPerturbation:
 
     def test_parallel_all_failed_returns_none(self, whole_space_shard, monkeypatch):
         from dreamer.search.methods.flatland import parallel_eval as pe
-        monkeypatch.setattr(pe, "_pool_walk", lambda args: pe.WalkError("boom"))
+        monkeypatch.setattr(pe, "_pool_walk", lambda args: (args[0], pe.WalkError("boom")))
         method = SmallAngleSearch(whole_space_shard, e, use_LIReC=False)
         ctx = self._ctx(whole_space_shard)
         d = ctx["geom"].d_flat
