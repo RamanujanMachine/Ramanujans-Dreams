@@ -29,11 +29,34 @@ e.g. ``--const "zeta(2)"``.  The start point and trajectories are given as:
 ``--use_inv_t`` selects the inverse-transpose walk (walk type 1) instead of the
 direct matrix walk (walk type 2, the default).
 
+Final-value error bounds
+------------------------
+Both the δ curve and the kamidelta prediction converge but keep jittering even
+after convergence (arithmetic / gcd fluctuations in the denominator), so each
+final value is reported as ``mean ± σ`` over the last ``--error-window``
+(default 100) **consecutive integer depths**: the tail mean, its sample standard
+deviation σ (the drawn band on each curve), with the standard error of the mean
+``SEM = σ/√n`` as the tighter (i.i.d.-assuming) bound.  A tail *trend* check
+flags the case where a sequence is still drifting rather than merely scattering
+(``drift > σ``) — a signal that the walk is too shallow for the bound to be
+meaningful.  The curve legend and these descriptions are drawn in a footer strip
+at the bottom of the figure so they never overlap the plot.
+
+Constant resolution
+-------------------
+δ is computed at the production constant precision — the target constant is
+``evalf``'d at ``CONSTANT_NO_DIGITS_HIGH_RES`` (10_000 digits), auto-doubling up
+to ``MAX_CONSTANT_RESOLUTION`` (pinned here to 200_000) whenever a deep
+approximation is good enough to underflow the current precision.  So higher
+depths automatically get more digits; this script sets no per-call ``evalf`` of
+its own (the ``.evalf(10)`` in the δ path is only output rounding for the plot).
+
 Example
 -------
     python graphs/delta_vs_depth.py --const "zeta(2)" --cmf "pFq(4, 3, 1)" \
         --start "(1, 1, 1, 1, 1, 1, 1)" --trajectories "(1, 1, 1, 1, 1, 1, 1)" \
-        --max-depth 400 --num-points 20 --use_inv_t --save delta_vs_depth.png
+        --max-depth 400 --num-points 20 --error-window 100 --use_inv_t \
+        --save delta_vs_depth.png
 
 Run with the WSL conda env ``rama``.
 """
@@ -51,6 +74,7 @@ from matplotlib.lines import Line2D
 
 from ramanujantools import Position
 
+from dreamer.configs import config
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
 from dreamer.utils.types import CMFData
@@ -261,7 +285,8 @@ def compute_curves(
     trajectory: Tuple[int, ...],
     depths: List[int],
     walk_type: Optional[int] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+    error_window: int = 100,
+) -> Tuple[np.ndarray, np.ndarray, Optional[dict], Optional[dict]]:
     """Compute the δ and kamidelta curves for one trajectory over *depths*.
 
     p/q are identified once (at the deepest depth); δ is then evaluated at every
@@ -276,8 +301,13 @@ def compute_curves(
     :param depths: depths to evaluate at (increasing).
     :param walk_type: ``1`` (inv-transpose) / ``2`` (direct); ``None`` → derive
         from the CMF's ``use_inv_t``.
-    :return: ``(delta, kami)`` float arrays aligned with *depths* (``NaN`` where
-        the value is unavailable / non-finite).
+    :param error_window: how many consecutive integer depths at the deep end to
+        use for the tail error bounds (see :func:`_tail_stats`); ``0`` / ``1``
+        disables them.
+    :return: ``(delta, kami, delta_error_bound, kami_error_bound)`` — the
+        ``delta``/``kami`` float arrays aligned with *depths* (``NaN`` where the
+        value is unavailable / non-finite), and the tail error-bound dicts for
+        each curve (``None`` if disabled / unavailable).
     """
     import sympy as sp
 
@@ -300,23 +330,112 @@ def compute_curves(
         walk_depth=max(depths), walk_type=walk_type,
     )
 
-    # δ at each depth — fast path reuses one p/q identification; fall back to the
-    # per-depth path if delta_sequence drops a depth (rare walk failure).
-    seq = handler.delta_sequence(depths)
-    raw = seq if len(seq) == len(depths) else [handler.delta(d) for d in depths]
-    delta = np.array([_finite_or_nan(_as_float(d)) for d in raw])
+    # Tail block of consecutive integer depths for the error bounds, merged with
+    # the (sparse) display depths so δ and kamidelta are each walked only once;
+    # the tail values are sliced back out for the statistics afterwards.
+    tail_depths = _tail_depths(max(depths), error_window)
+    all_depths = sorted(set(depths) | set(tail_depths or ()))
 
-    # Kamidelta (eigenvalue prediction) at each depth.  Fast path: one walk for
-    # all depths; fall back to the per-depth handler call if it is unavailable.
+    # δ over the merged depths — fast path reuses one p/q identification; fall
+    # back to the per-depth path if delta_sequence drops a depth (rare walk
+    # failure).  Then split into the display array and the tail statistics.
+    seq = handler.delta_sequence(all_depths)
+    raw = seq if len(seq) == len(all_depths) else [handler.delta(d) for d in all_depths]
+    delta_map = {d: _finite_or_nan(_as_float(v)) for d, v in zip(all_depths, raw)}
+    delta = np.array([delta_map[d] for d in depths])
+
+    # Kamidelta (eigenvalue prediction) over the merged depths.  Fast path: one
+    # walk for all depths; fall back to the per-depth handler call otherwise.
     finite_delta = delta[np.isfinite(delta)]
     actual_delta = float(finite_delta[-1]) if finite_delta.size else float("nan")
-    kami = _fast_kamidelta(handler, depths, actual_delta)
-    if kami is None:
-        kami = np.array([
+    kami_all = _fast_kamidelta(handler, all_depths, actual_delta)
+    if kami_all is None:
+        kami_all = np.array([
             (float(p["predicted_delta"]) if (p := handler.delta_prediction(d)) else np.nan)
-            for d in depths
+            for d in all_depths
         ])
-    return delta, kami
+    kami_map = {d: v for d, v in zip(all_depths, kami_all)}
+    kami = np.array([kami_map[d] for d in depths])
+
+    # Tail error bounds — the *same* statistic applied to both curves, each over
+    # the last error_window integer depths (reuses the merged walk above).
+    delta_eb = kami_eb = None
+    if tail_depths:
+        delta_eb = _tail_stats(tail_depths, [delta_map[d] for d in tail_depths])
+        kami_eb = _tail_stats(tail_depths, [kami_map[d] for d in tail_depths])
+    return delta, kami, delta_eb, kami_eb
+
+
+def _tail_depths(max_depth: int, window: Optional[int]) -> Optional[List[int]]:
+    """The consecutive integer depths ``[max_depth-window+1 … max_depth]`` used
+    for a tail error bound, or ``None`` when disabled (``window < 2``) or too
+    short.  The low end is clamped to 2 (δ is not meaningful below that)."""
+    if window is None or window < 2:
+        return None
+    lo = max(2, max_depth - window + 1)
+    tail = list(range(lo, max_depth + 1))
+    return tail if len(tail) >= 2 else None
+
+
+def _tail_stats(tail_depths: List[int], vals) -> Optional[dict]:
+    """Error-bound statistics over a tail block of δ (or kamidelta) values.
+
+    A converging-but-noisy curve is summarised by its tail: the value is the mean
+    of the last stretch, and the honest uncertainty is the spread there — not a
+    single depth's value.  Over the *finite* entries of *vals* (aligned with
+    *tail_depths*; non-finite entries are dropped):
+
+    * ``mean`` — the tail mean (the reported final value);
+    * ``std`` — sample standard deviation (``ddof=1``): the tail **scatter**, the
+      headline ± bound;
+    * ``sem`` — ``std / √n``, the standard error of the **mean** (tighter, but
+      i.i.d.-assuming, so optimistic on an autocorrelated tail);
+    * ``slope`` / ``drift`` — a linear fit of value vs depth and the total change
+      it predicts across the window (``|slope| · span``); ``converged = drift ≤
+      std`` flags a tail that is still *trending* rather than merely scattering.
+
+    :return: the stats dict, or ``None`` when fewer than 2 finite values remain.
+    """
+    v = np.asarray(vals, dtype=float)
+    fin = np.isfinite(v)
+    finite = v[fin]
+    fdepths = np.asarray(tail_depths, dtype=float)[fin]
+    if finite.size < 2:
+        return None
+    mean = float(np.mean(finite))
+    std = float(np.std(finite, ddof=1))
+    sem = std / np.sqrt(finite.size)
+    slope = float(np.polyfit(fdepths, finite, 1)[0])
+    span = float(fdepths[-1] - fdepths[0])
+    drift = abs(slope) * span
+    return {
+        "mean": mean,
+        "std": std,
+        "sem": float(sem),
+        "slope": slope,
+        "drift": drift,
+        "last": float(finite[-1]),
+        "n": int(finite.size),
+        "depth_lo": int(fdepths[0]),
+        "depth_hi": int(fdepths[-1]),
+        "converged": bool(drift <= std),
+    }
+
+
+def compute_error_bound(handler, max_depth: int,
+                        window: int) -> Optional[dict]:
+    """Tail error bound on the final δ from a handler (see :func:`_tail_stats`).
+
+    Thin convenience wrapper for direct/programmatic use and tests; the plotting
+    path computes the δ and kamidelta bounds together inside
+    :func:`compute_curves` (sharing a single walk).
+    """
+    tail = _tail_depths(max_depth, window)
+    if tail is None:
+        return None
+    seq = handler.delta_sequence(tail)
+    raw = seq if len(seq) == len(tail) else [handler.delta(d) for d in tail]
+    return _tail_stats(tail, [_finite_or_nan(_as_float(v)) for v in raw])
 
 
 def _fast_kamidelta(handler, depths: List[int],
@@ -326,11 +445,17 @@ def _fast_kamidelta(handler, depths: List[int],
     The production :meth:`delta_prediction` recomputes ``gcd_slope(d)`` per depth,
     and each call re-walks from ``n=1`` to ``d`` — so plotting K depths costs
     O(Σ depths) of redundant walking.  Here the reduced-denominator sequence
-    ``log(q̃_n)`` is walked **once** to the deepest depth (replicating
-    ``ramanujantools.Matrix.gcd_slope``: same ``trajectory_matrix_typed``, start
-    ``{n: 1}``, identified ``initial_values`` / ``final_projection``).  Each
+    ``log(q̃_n)`` is walked **once** to the deepest depth via ``handler._limits``
+    — the *same* ``Limit`` objects δ is computed on (start ``{n: 0}``, walk_type
+    applied) — so the denominator slope refers to the same convergents as δ.  Each
     depth's ``gcd_slope`` is then a cheap linear fit of a prefix, and the
     eigenvalue-pair selection matches :meth:`delta_prediction` exactly.
+
+    (This deliberately does **not** replicate ``ramanujantools.Matrix.gcd_slope``,
+    which walks the denominator from ``{n: 1}`` — a *different* integer sequence
+    from the ``{n: 0}`` walk δ / the identified p/q live on.  Using it made the
+    denominator grow ~30 % too fast and pushed kamidelta far below δ; see the note
+    in :meth:`TrajectoryAttributesHandler.gcd_slope`.)
 
     :param handler: the trajectory attribute handler (already identified).
     :param depths: increasing depths to predict at.
@@ -347,19 +472,17 @@ def _fast_kamidelta(handler, depths: List[int],
     if not math.isfinite(actual_delta):
         return np.full(len(depths), np.nan)
     try:
-        iv = handler._initial_values()
-        if iv is None:
-            return np.full(len(depths), np.nan)
-        fp = handler._final_projection()
+        if handler._initial_values() is None:
+            return np.full(len(depths), np.nan)  # not identified
         pairs = handler._unique_eigenvalue_pairs()
         if not pairs:
             return np.full(len(depths), np.nan)
 
-        mat = handler.trajectory_matrix_typed
         max_n = max(depths)
-        limits = mat.limit({n: 1}, list(range(1, max_n)), {n: 1}, iv, fp)
-        if not isinstance(limits, (list, tuple)):
-            limits = [limits]
+        walk_ns = list(range(1, max_n))
+        limits = handler._limits(walk_ns)  # same walk as δ (start {n: 0}, walk_type)
+        if not limits or len(limits) != len(walk_ns):
+            return None  # walk failed / dropped a depth — fall back to slow path
         y = np.array([float(sp.log(lim.as_rational().q).evalf(30)) for lim in limits])
         x = np.arange(1, max_n)  # n values aligned with y
 
@@ -473,9 +596,59 @@ def _add_value_line(ax, x: np.ndarray, y: np.ndarray, norm, cmap, *,
                    marker=marker, alpha=alpha, edgecolor="none", zorder=5)
 
 
-# Per-kind styling: (result-tuple index, linestyle, marker, linewidth, alpha, label).
-_KIND_DELTA = (1, "-", None, 1.8, 1.0, "δ")
-_KIND_KAMI = (2, "--", "o", 1.4, 0.85, "kamiδ")
+# Per-kind styling:
+# (value index, linestyle, marker, linewidth, alpha, label, error-bound index).
+_KIND_DELTA = (1, "-", None, 1.8, 1.0, "δ", 3)
+_KIND_KAMI = (2, "--", "o", 1.4, 0.85, "kamiδ", 4)
+
+
+def _error_bound_of(res, eb_idx: int) -> Optional[dict]:
+    """The tail error-bound dict at *eb_idx* in a result tuple, or ``None``."""
+    return res[eb_idx] if len(res) > eb_idx else None
+
+
+def _draw_error_bounds(ax, results, kind, *, value_color: bool, norm, spec_cmap, tab) -> None:
+    """Shade the ±σ tail band and draw the mean line for one curve *kind*.
+
+    The band spans the error-window depth range at ``[mean − σ, mean + σ]`` (the
+    tail *scatter*, the headline bound); a dotted line marks the mean.  Colour
+    matches the curve (value spectrum in ``value_color`` mode, per-trajectory
+    otherwise).  Applies to whichever axis draws *kind* (δ or kamidelta).
+    """
+    eb_idx = kind[6]
+    for i, res in enumerate(results):
+        eb = _error_bound_of(res, eb_idx)
+        if not eb:
+            continue
+        lo, hi = eb["depth_lo"], eb["depth_hi"]
+        mean, std = eb["mean"], eb["std"]
+        color = spec_cmap(norm(mean)) if (value_color and norm is not None) else tab(i % 10)
+        ax.fill_between([lo, hi], [mean - std, mean - std], [mean + std, mean + std],
+                        color=color, alpha=0.15, linewidth=0, zorder=1)
+        ax.hlines(mean, lo, hi, color=color, linestyle=":", linewidth=1.3,
+                  alpha=0.9, zorder=6)
+
+
+def _error_summary_lines(results, kinds) -> List[str]:
+    """``label = mean ± σ`` summary lines, one per (trajectory, curve *kind*).
+
+    Covers every curve drawn (δ and, when shown, kamidelta), so both error bounds
+    are reported.  Labels are padded so the ``=`` columns align in the monospace
+    footer box.
+    """
+    width = max((len(k[5]) for k in kinds), default=1)
+    lines: List[str] = []
+    for res in results:
+        for kind in kinds:
+            eb = _error_bound_of(res, kind[6])
+            if not eb:
+                continue
+            flag = "" if eb["converged"] else "  ⚠ drift>σ (not converged)"
+            lines.append(
+                f"traj {res[0]}  {kind[5]:<{width}} = {eb['mean']:.4g} ± {eb['std']:.2g}"
+                f"  (SEM {eb['sem']:.2g}, n={eb['n']}, depths {eb['depth_lo']}–{eb['depth_hi']}){flag}"
+            )
+    return lines
 
 
 def _draw_series(ax, x, results, kind, *, value_color: bool, norm, spec_cmap, tab) -> List[float]:
@@ -483,7 +656,7 @@ def _draw_series(ax, x, results, kind, *, value_color: bool, norm, spec_cmap, ta
 
     :param ax: target axis.
     :param x: depths.
-    :param results: ``[(trajectory, delta_curve, kami_curve), ...]``.
+    :param results: ``[(trajectory, delta_curve, kami_curve, ...), ...]``.
     :param kind: one of ``_KIND_DELTA`` / ``_KIND_KAMI`` (index + style).
     :param value_color: colour by δ value (spectrum) vs one colour per trajectory.
     :param norm: shared value ``Normalize`` (spectrum mode).
@@ -491,7 +664,7 @@ def _draw_series(ax, x, results, kind, *, value_color: bool, norm, spec_cmap, ta
     :param tab: the per-trajectory colormap (non-spectrum mode).
     :return: the finite y values drawn (for axis limit fitting).
     """
-    idx, linestyle, marker, lw, alpha, kind_label = kind
+    idx, linestyle, marker, lw, alpha, kind_label, _eb = kind
     finite: List[float] = []
     for i, res in enumerate(results):
         traj, y = res[0], res[idx]
@@ -508,7 +681,11 @@ def _draw_series(ax, x, results, kind, *, value_color: bool, norm, spec_cmap, ta
 
 def _finish_axis(ax, x, results, ylabel, finite_vals, kinds, *,
                  value_color: bool, log_scale: bool, linthresh: float) -> None:
-    """Apply scale, limits, grid, legend and the empty-data note to one axis."""
+    """Apply scale, limits, grid and the empty-data note to one axis.
+
+    The legend is *not* drawn here — it lives in a shared figure footer (see
+    :func:`_footer_legend_handles`) so it never overlaps the curves.
+    """
     if log_scale:
         ylabel += "  (symlog)"
         ax.set_yscale("symlog", linthresh=linthresh)
@@ -532,25 +709,33 @@ def _finish_axis(ax, x, results, ylabel, finite_vals, kinds, *,
                 color="firebrick",
                 bbox=dict(boxstyle="round", fc="white", ec="firebrick", alpha=0.9))
 
-    _axis_legend(ax, results, value_color, kinds)
 
+def _footer_legend_handles(results, value_color: bool, kinds):
+    """Handles + labels for the shared figure-footer legend.
 
-def _axis_legend(ax, results, value_color: bool, kinds) -> None:
-    """Legend for one axis.  In spectrum mode colour encodes the δ value (shown by
-    the colorbar), so the legend only distinguishes line styles + trajectories."""
-    # Legend on the left so it never collides with the colorbar on the right.
-    if not value_color:
-        ax.legend(fontsize=9, loc="center left", framealpha=0.9,
-                  ncol=max(1, len(results) // 3 + 1))
-        return
-    handles = []
-    for _idx, linestyle, marker, _lw, _alpha, kind_label in kinds:
-        handles.append(Line2D([], [], color="grey", linestyle=linestyle,
-                              marker=marker or "", markersize=4, label=kind_label))
-    for res in results:
-        handles.append(Line2D([], [], color="none", label=f"traj {res[0]}"))
-    ax.legend(handles=handles, fontsize=9, loc="center left", framealpha=0.9,
-              ncol=max(1, len(handles) // 4 + 1))
+    In spectrum mode colour encodes the δ value (shown by the colorbar), so the
+    legend only distinguishes line styles (δ vs kamiδ) and lists the
+    trajectories.  In per-trajectory mode each (trajectory, kind) gets its own
+    coloured line entry.
+    :return: ``(handles, labels, ncol)``.
+    """
+    handles: List[Line2D] = []
+    if value_color:
+        for _idx, linestyle, marker, _lw, _alpha, kind_label, _eb in kinds:
+            handles.append(Line2D([], [], color="grey", linestyle=linestyle,
+                                  marker=marker or "", markersize=4, label=kind_label))
+        for res in results:
+            handles.append(Line2D([], [], color="none", label=f"traj {res[0]}"))
+    else:
+        tab = plt.get_cmap("tab10")
+        for i, res in enumerate(results):
+            for idx, linestyle, marker, _lw, _alpha, kind_label, _eb in kinds:
+                handles.append(Line2D([], [], color=tab(i % 10), linestyle=linestyle,
+                                      marker=marker or "", markersize=4,
+                                      label=f"traj {res[0]}: {kind_label}"))
+    labels = [h.get_label() for h in handles]
+    ncol = max(1, min(len(handles), 4))
+    return handles, labels, ncol
 
 
 def plot_curves(
@@ -565,11 +750,14 @@ def plot_curves(
     linthresh: float = 0.05,
     separate: bool = False,
     cmap_name: str = "coolwarm",
+    show_error_bound: bool = True,
 ):
     """Plot δ-vs-depth, with kamidelta either overlaid or on a second axis.
 
     :param depths: the x-axis depths.
-    :param results: ``[(trajectory, delta_curve, kami_curve), ...]``.
+    :param results: ``[(trajectory, delta_curve, kami_curve, delta_eb, kami_eb), ...]``.
+    :param show_error_bound: shade the ±σ tail band + mean line on **both** the δ
+        and the kamidelta curves, and report ``mean ± σ`` for each in the footer.
     :param constant_name: constant name, for axis text.
     :param title: optional figure title.
     :param show_kamidelta: include the kamidelta prediction.
@@ -602,6 +790,8 @@ def plot_curves(
         _finish_axis(ax_k, x, results, "kamidelta prediction", fv_k, [_KIND_KAMI], **fin_kw)
         ax_k.set_xlabel("walk depth $n$", fontsize=13)
         cbar_axes = [ax_d, ax_k]
+        kinds = [_KIND_DELTA, _KIND_KAMI]
+        band_axes = [(ax_d, _KIND_DELTA), (ax_k, _KIND_KAMI)]  # each band on its own axis
         if title:
             fig.suptitle(title, fontsize=14)
     else:
@@ -613,8 +803,21 @@ def plot_curves(
         _finish_axis(ax, x, results, base, fv, kinds, **fin_kw)
         ax.set_xlabel("walk depth $n$", fontsize=13)
         cbar_axes = [ax]
+        band_axes = [(ax, k) for k in kinds]  # both bands on the shared axis
         if title:
             ax.set_title(title, fontsize=14)
+
+    if show_error_bound:
+        for band_ax, kind in band_axes:
+            _draw_error_bounds(band_ax, results, kind, value_color=value_color,
+                               norm=norm, spec_cmap=spec_cmap, tab=tab)
+
+    # Reserve the bottom footer strip BEFORE the colorbar so the colorbar is
+    # placed relative to the shrunk axes; then fill the strip with the legend and
+    # the error-bound description (both kept off the plot area).
+    _layout_with_footer(fig, results, kinds, value_color=value_color,
+                        show_error_bound=show_error_bound, has_colorbar=norm is not None,
+                        separate=separate and show_kamidelta, has_title=bool(title))
 
     if norm is not None:
         sm = plt.cm.ScalarMappable(norm=norm, cmap=spec_cmap)
@@ -622,9 +825,70 @@ def plot_curves(
         cbar = fig.colorbar(sm, ax=cbar_axes, fraction=0.046, pad=0.02)
         cbar.set_label(base, fontsize=12)
 
-    if not (separate and show_kamidelta):
-        fig.tight_layout()
+    _fill_footer(fig, results, kinds, value_color=value_color,
+                 show_error_bound=show_error_bound)
     return fig
+
+
+# Vertical geometry of the bottom footer, in figure-fraction terms.
+_FOOT_PAD = 0.03      # margin below the error-text box
+_FOOT_GAP = 0.02      # gap between the error box and the legend
+_FOOT_BOX = 0.02      # padding inside each text/legend block
+
+
+def _footer_line_frac(fig, pt: float = 10.0) -> float:
+    """Figure-fraction height of one text line at *pt* points."""
+    return pt / 72.0 / fig.get_size_inches()[1]
+
+
+def _footer_extent(fig, results, kinds, *, value_color, show_error_bound):
+    """Footer sizing: ``(bottom_margin, err_h, legend_top_y)`` in fig fractions.
+
+    ``bottom_margin`` is how much of the figure to reserve below the axes;
+    ``err_h`` the height of the error-text block; ``legend_top_y`` the y at which
+    the legend's lower edge is anchored (just above the error text)."""
+    handles, _labels, ncol = _footer_legend_handles(results, value_color, kinds)
+    err_lines = _error_summary_lines(results, kinds) if show_error_bound else []
+    line = _footer_line_frac(fig)
+    legend_rows = int(np.ceil(len(handles) / ncol)) if handles else 0
+    err_h = (len(err_lines) * line + _FOOT_BOX) if err_lines else 0.0
+    legend_h = (legend_rows * (line + 0.004) + _FOOT_BOX) if handles else 0.0
+    legend_y = _FOOT_PAD + err_h + _FOOT_GAP
+    # Room between the legend top and the axes bottom for the x tick labels and
+    # the "walk depth n" x-label (which live just below the axes spine).
+    xlabel_allow = 0.6 / fig.get_size_inches()[1]
+    bottom = legend_y + legend_h + xlabel_allow
+    return bottom, err_h, legend_y
+
+
+def _layout_with_footer(fig, results, kinds, *, value_color, show_error_bound,
+                        has_colorbar, separate, has_title) -> None:
+    """Reserve figure margins so the footer (legend + error text) never overlaps
+    the axes.  Uses ``subplots_adjust`` (deterministic, and — unlike
+    ``tight_layout`` — compatible with the colorbar added afterwards)."""
+    bottom, _err_h, _legend_y = _footer_extent(
+        fig, results, kinds, value_color=value_color, show_error_bound=show_error_bound)
+    top = 0.93 if has_title else 0.965
+    right = 0.9 if has_colorbar else 0.95
+    fig.subplots_adjust(bottom=bottom, top=top, left=0.13, right=right,
+                        hspace=0.12 if separate else 0.2)
+
+
+def _fill_footer(fig, results, kinds, *, value_color, show_error_bound) -> None:
+    """Draw the shared legend and the error-bound description in the reserved
+    bottom strip (legend just under the axes, error text below it)."""
+    _bottom, err_h, legend_y = _footer_extent(
+        fig, results, kinds, value_color=value_color, show_error_bound=show_error_bound)
+    handles, labels, ncol = _footer_legend_handles(results, value_color, kinds)
+    if handles:
+        fig.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, legend_y),
+                   ncol=ncol, fontsize=9, framealpha=0.9,
+                   handlelength=2.2, columnspacing=1.4)
+    err_lines = _error_summary_lines(results, kinds) if show_error_bound else []
+    if err_lines:
+        fig.text(0.5, _FOOT_PAD, "\n".join(err_lines), ha="center", va="bottom",
+                 family="monospace", fontsize=8,
+                 bbox=dict(boxstyle="round", fc="white", ec="grey", alpha=0.9))
 
 
 # ===========================================================================
@@ -663,6 +927,10 @@ def _build_cli():
                         "--min-depth 100 to plot only depths 100..max).")
     p.add_argument("--num-points", type=int, default=20,
                    help="Number of depths sampled between --min-depth and --max-depth.")
+    p.add_argument("--error-window", type=int, default=100,
+                   help="Number of consecutive integer depths at the deep end used "
+                        "for the final-δ error bound (mean ± sample std, with SEM). "
+                        "0 disables the error bound.")
     p.add_argument("--use_inv_t", action="store_true",
                    help="Walk with the inverse-transpose recurrence (walk type 1) "
                         "instead of the direct matrix (walk type 2, the default).")
@@ -689,6 +957,13 @@ def _build_cli():
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """CLI entry point: parse flags, compute curves, render the plot."""
     args = _build_cli().parse_args(argv)
+
+    # δ is computed at the production constant resolution (CONSTANT_NO_DIGITS_HIGH_RES,
+    # 10_000 digits), auto-escalating up to MAX_CONSTANT_RESOLUTION whenever a deep
+    # approximation is good enough to underflow the current resolution.  Pin that
+    # ceiling explicitly so deep walks here always get the full precision headroom.
+    config.configure(search={"MAX_CONSTANT_RESOLUTION": 200_000})
+
     const = _resolve_constant(args.constant, args.constant_value)
     cmf_data = build_cmf(args.cmf, const, args.export_cmfs, args.use_inv_t)
     walk_type = 1 if args.use_inv_t else 2
@@ -700,21 +975,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"CMF {cmf_data.cmf_name!r} (dim {len(symbols)}, symbols "
           f"{[str(s) for s in symbols]}); constant {const.name!r} = "
           f"{const.value_sympy}; walk_type {walk_type} (use_inv_t={args.use_inv_t}).")
+    identify_depth = min(int(config.search.IDENTIFY_DEPTH), max(depths))
     print(f"{len(trajectories)} trajectory(ies), {len(depths)} depths in "
-          f"[{min(depths)}, {max(depths)}] (LIReC identification at depth {max(depths)}).")
+          f"[{min(depths)}, {max(depths)}] (LIReC identification at depth {identify_depth}, "
+          f"p/q reused for the deeper δ / kamidelta).")
 
     results = []
     for traj in trajectories:
         print(f"  computing δ / kamidelta for trajectory {traj} ...")
-        delta, kami = compute_curves(
-            cmf_data, const, start, traj, depths, walk_type=walk_type)
+        delta, kami, delta_eb, kami_eb = compute_curves(
+            cmf_data, const, start, traj, depths, walk_type=walk_type,
+            error_window=args.error_window)
         n_delta = int(np.isfinite(delta).sum())
         n_kami = int(np.isfinite(kami).sum())
         print(f"    δ finite at {n_delta}/{len(depths)} depths; "
               f"kamidelta at {n_kami}/{len(depths)}.")
-        results.append((traj, delta, kami))
+        for label, eb in (("δ", delta_eb), ("kamiδ", kami_eb)):
+            if eb is None:
+                continue
+            print(f"    final {label} = {eb['mean']:.6g} ± {eb['std']:.3g} "
+                  f"(sample std) over depths {eb['depth_lo']}–{eb['depth_hi']} "
+                  f"(n={eb['n']}); SEM = {eb['sem']:.3g}, last {label} = {eb['last']:.6g}.")
+            if not eb["converged"]:
+                print(f"    WARNING: {label} tail drift ({eb['drift']:.3g}) exceeds scatter "
+                      f"({eb['std']:.3g}) — still trending, so the ±std band is NOT a "
+                      f"converged error bound.  Increase --max-depth.")
+        results.append((traj, delta, kami, delta_eb, kami_eb))
 
-    total_finite = sum(int(np.isfinite(d).sum()) for _, d, _ in results)
+    total_finite = sum(int(np.isfinite(d).sum()) for _, d, _, _, _ in results)
     if total_finite == 0:
         print(
             "WARNING: no trajectory produced a finite δ — LIReC did not identify "
@@ -728,7 +1016,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                       show_kamidelta=not args.no_kamidelta,
                       value_color=not args.per_trajectory,
                       log_scale=args.log, linthresh=args.linthresh,
-                      separate=args.separate)
+                      separate=args.separate,
+                      show_error_bound=args.error_window >= 2)
 
     if args.save:
         fig.savefig(args.save, bbox_inches="tight")

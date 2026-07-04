@@ -102,6 +102,17 @@ class SearchConfig(Configurable):
         default=1e-10,
         metadata={"description": "Tolerance used when deciding whether a searched trajectory identifies the constant."},
     )
+    IDENTIFY_DEPTH: int = field(
+        default=1000,
+        metadata={"description": "Walk depth at which the p/q integer relation is identified via "
+                  "LIReC. The relation is depth-independent, so it is found once at this (cheap) "
+                  "depth and reused for the deeper delta / spectral computations, avoiding a "
+                  "redundant deep identification walk (LIReC and the walk feeding it get expensive "
+                  "at large depth). Capped by the actual walk depth; falls back to the full walk "
+                  "depth if identification fails here (slow-converging trajectory), so results are "
+                  "unchanged -- only faster. Not part of the Tier-1 config fingerprint for that "
+                  "reason."},
+    )
     COMPUTE_EIGEN_VALUES: bool = field( # deprecated
         default=False,
         metadata={"description": "Compute eigenvalue diagnostics for trajectory matrices in search results."},
@@ -458,7 +469,7 @@ class SearchConfig(Configurable):
     )
 
     MAX_CONSTANT_RESOLUTION: int = field(
-        default=100_000,
+        default=200_000,
         metadata={"description": "Maximum number of digits to use for constant values in delta computation."},
     )
 

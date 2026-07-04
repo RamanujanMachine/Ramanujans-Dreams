@@ -1,9 +1,11 @@
 """
 Tests for the δ-vs-depth graphing script (``graphs/delta_vs_depth.py``).
 
-Scope is the pure input-parsing / grid layer (the δ / kamidelta computation
-itself exercises the production attribute handler + LIReC and is covered by the
-attribute-management tests).  The Agg backend is forced so no display is needed.
+Scope is the pure input-parsing / grid / tail-error-bound layer (the δ /
+kamidelta computation itself exercises the production attribute handler + LIReC
+and is covered by the attribute-management tests; the error-bound statistics are
+tested here against a fake handler).  The Agg backend is forced so no display is
+needed.
 """
 
 import importlib.util
@@ -145,3 +147,156 @@ class TestFastKamidelta:
         out = dvd._fast_kamidelta(None, [2, 5, 10], float("nan"))
         assert out.shape == (3,)
         assert np.all(np.isnan(out))
+
+
+class _FakeHandler:
+    """Minimal handler exposing ``delta_sequence`` / ``delta`` for the tail
+    error-bound layer — returns a preset δ per depth via a callable."""
+
+    def __init__(self, fn):
+        self._fn = fn
+
+    def delta_sequence(self, depths):
+        return [self._fn(d) for d in depths]
+
+    def delta(self, d):
+        return self._fn(d)
+
+
+class TestComputeErrorBound:
+    def test_matches_numpy_on_converged_tail(self):
+        # A flat tail with small zero-mean noise: mean/std/sem must equal the
+        # numpy reference over exactly the last-`window` integer depths.
+        rng = np.random.default_rng(0)
+        noise = {d: float(rng.normal(0, 0.01)) for d in range(1, 501)}
+        h = _FakeHandler(lambda d: 0.30 + noise[d])
+        eb = dvd.compute_error_bound(h, 500, 100)
+        tail = np.array([0.30 + noise[d] for d in range(401, 501)])
+        assert eb["n"] == 100
+        assert eb["depth_lo"] == 401 and eb["depth_hi"] == 500
+        assert eb["mean"] == pytest.approx(float(tail.mean()))
+        assert eb["std"] == pytest.approx(float(tail.std(ddof=1)))
+        assert eb["sem"] == pytest.approx(float(tail.std(ddof=1)) / np.sqrt(100))
+        assert eb["converged"] is True
+
+    def test_trending_tail_flagged_not_converged(self):
+        # A strong linear drift makes total drift exceed the scatter → the
+        # bound is reported but marked not-converged.
+        rng = np.random.default_rng(1)
+        h = _FakeHandler(lambda d: 0.30 + 0.002 * d + float(rng.normal(0, 0.001)))
+        eb = dvd.compute_error_bound(h, 500, 100)
+        assert eb["drift"] > eb["std"]
+        assert eb["converged"] is False
+
+    def test_window_below_two_disables(self):
+        h = _FakeHandler(lambda d: 0.3)
+        assert dvd.compute_error_bound(h, 500, 0) is None
+        assert dvd.compute_error_bound(h, 500, 1) is None
+
+    def test_nonfinite_deltas_filtered(self):
+        # -inf / NaN tail values are dropped; n counts only the finite ones.
+        h = _FakeHandler(lambda d: float("-inf") if d % 2 == 0 else 0.3)
+        eb = dvd.compute_error_bound(h, 500, 100)
+        assert eb["n"] == sum(1 for d in range(401, 501) if d % 2 == 1)
+
+    def test_clamps_low_depth_to_two(self):
+        # window larger than max_depth starts the tail block at depth 2, not 1.
+        h = _FakeHandler(lambda d: 0.3)
+        eb = dvd.compute_error_bound(h, 10, 100)
+        assert eb["depth_lo"] == 2 and eb["depth_hi"] == 10
+
+
+def _eb(mean, std, converged=True):
+    """A minimal error-bound dict for summary / render tests."""
+    return {"mean": mean, "std": std, "sem": std / 10.0, "slope": 0.0,
+            "drift": 0.0 if converged else 10 * std, "last": mean, "n": 100,
+            "depth_lo": 3901, "depth_hi": 4000, "converged": converged}
+
+
+class TestErrorSummaryLines:
+    def test_one_line_per_traj_and_kind(self):
+        # δ (index 3) + kamiδ (index 4) both present → two lines for one traj.
+        results = [((1, 2), None, None, _eb(0.3, 0.01), _eb(0.29, 0.02))]
+        lines = dvd._error_summary_lines(results, [dvd._KIND_DELTA, dvd._KIND_KAMI])
+        assert len(lines) == 2
+        assert "δ" in lines[0] and "kamiδ" in lines[1]
+        assert "SEM" in lines[0] and "depths 3901–4000" in lines[0]
+
+    def test_missing_bound_skipped(self):
+        # kamiδ bound absent → only the δ line is emitted.
+        results = [((1, 2), None, None, _eb(0.3, 0.01), None)]
+        lines = dvd._error_summary_lines(results, [dvd._KIND_DELTA, dvd._KIND_KAMI])
+        assert len(lines) == 1 and "kamiδ" not in lines[0]
+
+    def test_not_converged_flagged(self):
+        results = [((1, 2), None, None, _eb(0.3, 0.01, converged=False), None)]
+        lines = dvd._error_summary_lines(results, [dvd._KIND_DELTA])
+        assert "not converged" in lines[0]
+
+
+class TestPlotCurvesRenders:
+    def _results(self):
+        depths = dvd.depth_grid(500, 8, 2)
+        delta = np.linspace(0.30, 0.31, len(depths))
+        kami = delta - 0.05
+        results = [((11, 13, 2), delta, kami, _eb(0.305, 0.01), _eb(0.255, 0.01))]
+        return depths, results
+
+    def test_overlay_has_footer_legend_and_text(self):
+        depths, results = self._results()
+        fig = dvd.plot_curves(depths, results, constant_name="zeta(2)",
+                              title="t", show_error_bound=True)
+        # A figure-level legend exists (the footer legend) ...
+        assert fig.legends, "expected a figure-level footer legend"
+        # ... and a footer text block carrying the error description.
+        texts = [t.get_text() for t in fig.texts]
+        assert any("SEM" in t and "±" in t for t in texts)
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+    def test_separate_mode_two_axes(self):
+        depths, results = self._results()
+        fig = dvd.plot_curves(depths, results, constant_name="zeta(2)",
+                              separate=True, show_error_bound=True)
+        # δ axis + kamidelta axis + colorbar axis.
+        assert len(fig.axes) >= 2
+        assert fig.legends
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+    def test_disabled_error_bound_no_footer_text(self):
+        depths, results = self._results()
+        fig = dvd.plot_curves(depths, results, constant_name="zeta(2)",
+                              show_error_bound=False)
+        texts = [t.get_text() for t in fig.texts]
+        assert not any("SEM" in t for t in texts)
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+
+class TestFastKamideltaMatchesProduction:
+    """The graph's fast kamidelta (single-walk prefix fits) must match the
+    production ``delta_prediction`` (per-depth slow path) — same eigenvalue-pair
+    selection and the same δ-consistent ``gcd_slope`` walk.  Uses a real handler
+    (LIReC + walk) on a small, quick-to-identify log(2) trajectory."""
+
+    def test_fast_matches_slow(self):
+        import sympy as sp
+        from ramanujantools import Position
+        from ramanujantools.cmf import pFq
+        from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
+
+        cmf = pFq(2, 1, -1)
+        syms = list(cmf.matrices.keys())
+        start = Position({s: sp.Rational(v) for s, v in zip(syms, (-1, 2, 1))})
+        direction = Position({s: sp.Rational(v) for s, v in zip(syms, (-4, 8, 5))})
+        h = TrajectoryAttributesHandler.from_cmf(
+            cmf, direction, start, sp.log(2), walk_depth=280, walk_type=1)
+
+        depths = [200, 240, 280]
+        fast = dvd._fast_kamidelta(h, depths, h.delta(280))
+        assert fast is not None
+        for d, kf in zip(depths, fast):
+            slow = h.delta_prediction(d)
+            assert slow is not None
+            assert abs(float(kf) - float(slow["predicted_delta"])) < 1e-6
