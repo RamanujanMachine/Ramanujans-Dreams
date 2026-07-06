@@ -24,6 +24,11 @@ from dreamer.utils.storage.atlas_writer import (
     reconstruct_shard_from_dto
 )
 from dreamer.utils.storage.summary import write_summary
+from dreamer.utils.storage.optimization_objectives import (
+    objective_display_label,
+    record_raw_value,
+    score_record,
+)
 from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 from dreamer.utils.types import CMFData
 from dreamer.utils.logger import Logger
@@ -614,11 +619,15 @@ class System:
         # Print best delta for each constant — scoped to *this run's* searched
         # shards so a previous run on a different CMF (same constant) sharing the
         # flat results dir cannot bleed its best delta into this report.
+        objective_name = sys_config.OPTIMIZATION_OBJECTIVE
+        label = objective_display_label(objective_name)
         for const in priorities.keys():
             run_shard_ids: Set[str] = {
                 derive_cmf_and_shard_ids(s)[1] for s in priorities.get(const, [])
             }
-            best_record, best_delta_val = self.__best_trajectory_record(const, run_shard_ids)
+            best_record, best_value = self.__best_trajectory_record(
+                const, run_shard_ids, objective_name
+            )
             if best_record is None:
                 Logger(
                     f'No trajectory results found for "{const.name}"',
@@ -626,11 +635,21 @@ class System:
                 ).log()
                 continue
 
+            # δ is always meaningful (the irrationality measure); when optimising a
+            # different objective, report both the objective value and δ.
+            extra = ""
+            if objective_name != "delta":
+                # Records are flat per-(trajectory, constant): δ is the scalar
+                # ``delta`` column on this constant's row (not a nested dict).
+                delta_val = best_record.get("delta")
+                if delta_val is not None:
+                    extra = f"\n* δ:             {float(delta_val):.6f}"
             Logger(
-                f'Best delta for "{const.name}" is {best_delta_val:.6f}\n'
+                f'Best {label} for "{const.name}" is {best_value:.6f}\n'
                 f'* Trajectory id: {best_record["trajectory_id"]}\n'
                 f'* Start:         {tuple(best_record["start_point"])}\n'
-                f'* Direction:     {tuple(best_record["direction"])}',
+                f'* Direction:     {tuple(best_record["direction"])}'
+                f'{extra}',
                 Logger.Levels.info,
             ).log()
 
@@ -643,29 +662,28 @@ class System:
                     pass
 
     @staticmethod
-    def __best_trajectory_record(const: Constant, shard_ids: Set[str]):
-        """Return the record with the largest ``delta_estimate`` for *const*
-        among **this run's** searched shards, plus that delta value.
+    def __best_trajectory_record(const: Constant, shard_ids: Set[str], objective_name: str):
+        """Return the best record for *const* under *objective_name* among **this
+        run's** searched shards, plus that objective's raw (display) value.
 
-        Only the JSONL files ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` for
-        ``shard_id in shard_ids`` are scanned.  ``shard_ids`` must be the set of
+        "Best" is the maximum **signed** objective score (via ``score_record``),
+        so it is correct for both "larger is better" and "smaller is better"
+        objectives; the returned value is the *raw* (unsigned) objective value for
+        display.  Only the JSONL files ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl``
+        for ``shard_id in shard_ids`` are scanned.  ``shard_ids`` must be the set of
         shard ids searched for *const* in the current run (derived from the
-        ``priorities`` dict).  This scoping is essential: the results directory
-        is flat and **persists across runs**, so a previous run on a different
-        CMF (but the same constant) leaves ``<other_shard_id>.jsonl`` files
-        behind; scanning the whole directory would report that stale run's best
-        delta.  Mirrors how the summary stage scopes to ``this_run_shards``.
+        ``priorities`` dict) — the results directory is flat and **persists across
+        runs**, so scanning the whole directory would report a stale run's best.
 
         Returns ``(None, None)`` when the dir is missing, no listed shard file
-        exists, or no record carries a finite delta for this constant.
-        ``delta_estimate`` is a ``{const_name: float}`` dict.
+        exists, or no record carries a finite objective score for this constant.
         """
         dir_path = sys_config.EXPORT_SEARCH_RESULTS
         if not os.path.isdir(dir_path):
             return None, None
 
         jsonl_ext = '.' + Formats.JSONL.value
-        best_delta: float = -float('inf')
+        best_score: float = -float('inf')
         best_record = None
 
         for shard_id in sorted(shard_ids):
@@ -675,23 +693,21 @@ class System:
                 continue
             records = Importer.imprt(fpath)
             for record in records:
-                delta_raw = record.get("delta_estimate")
-                if isinstance(delta_raw, dict):
-                    delta = delta_raw.get(const.name)
-                else:
-                    delta = delta_raw  # backward compat with old scalar records
-                if delta is None:
+                # Rows are per-(trajectory, constant); only this constant's rows.
+                if record.get("constant") != const.name:
                     continue
-                try:
-                    delta = float(delta)
-                except (TypeError, ValueError):
+                scored = score_record(record, objective_name)
+                if scored is None:
                     continue
-                if not math.isfinite(delta):
+                score, _ = scored
+                if not math.isfinite(score):
                     continue
-                if delta > best_delta:
-                    best_delta = delta
+                if score > best_score:
+                    best_score = score
                     best_record = record
-        return best_record, best_delta if best_record is not None else None
+        if best_record is None:
+            return None, None
+        return best_record, record_raw_value(best_record, objective_name)
 
     @staticmethod
     def __compact_analysis_results(dicts: List[Dict[Constant, List[Searchable]]]) -> Dict[Constant, List[Searchable]]:

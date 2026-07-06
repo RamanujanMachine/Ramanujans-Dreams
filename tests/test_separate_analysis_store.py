@@ -60,9 +60,9 @@ class TestLoadSeenForSearch:
 
         shard_id = "shardA"
         search_path = search_dir / f"{shard_id}.jsonl"
-        _write_jsonl(search_path, [{"trajectory_id": "s1"}])
+        _write_jsonl(search_path, [{"trajectory_id": "s1", "constant": "e"}])
         # An analysis-store record that must be IGNORED while the flag is off.
-        _write_jsonl(analysis_dir / f"{shard_id}.jsonl", [{"trajectory_id": "a1"}])
+        _write_jsonl(analysis_dir / f"{shard_id}.jsonl", [{"trajectory_id": "a1", "constant": "e"}])
 
         seen = load_seen_trajectories_for_search(str(search_path), shard_id)
 
@@ -76,20 +76,20 @@ class TestLoadSeenForSearch:
 
         shard_id = "shardB"
         search_path = search_dir / f"{shard_id}.jsonl"
-        _write_jsonl(search_path, [{"trajectory_id": "s1", "delta_estimate": {"e": 0.5}}])
+        _write_jsonl(search_path, [{"trajectory_id": "s1", "constant": "e", "delta": 0.5}])
         _write_jsonl(
             analysis_dir / f"{shard_id}.jsonl",
             [
-                {"trajectory_id": "a1", "delta_estimate": {"e": 1.0}},
-                {"trajectory_id": "a2", "delta_estimate": {"e": 2.0}},
+                {"trajectory_id": "a1", "constant": "e", "delta": 1.0},
+                {"trajectory_id": "a2", "constant": "e", "delta": 2.0},
             ],
         )
 
         seen = load_seen_trajectories_for_search(str(search_path), shard_id)
 
-        # Returned cache is the union.
+        # Returned cache is the union (nested {tid: {const: record}}).
         assert set(seen) == {"s1", "a1", "a2"}
-        assert seen["a2"]["delta_estimate"] == {"e": 2.0}
+        assert seen["a2"]["e"]["delta"] == 2.0
         # The analysis records were physically copied into the search file.
         assert set(_read_ids(search_path)) == {"s1", "a1", "a2"}
 
@@ -100,15 +100,15 @@ class TestLoadSeenForSearch:
 
         shard_id = "shardC"
         search_path = search_dir / f"{shard_id}.jsonl"
-        _write_jsonl(search_path, [{"trajectory_id": "t1", "delta_estimate": {"e": 9.9}}])
+        _write_jsonl(search_path, [{"trajectory_id": "t1", "constant": "e", "delta": 9.9}])
         _write_jsonl(
             analysis_dir / f"{shard_id}.jsonl",
-            [{"trajectory_id": "t1", "delta_estimate": {"e": 0.0}}],
+            [{"trajectory_id": "t1", "constant": "e", "delta": 0.0}],
         )
 
         seen = load_seen_trajectories_for_search(str(search_path), shard_id)
 
-        assert seen["t1"]["delta_estimate"] == {"e": 9.9}
+        assert seen["t1"]["e"]["delta"] == 9.9
         # No duplicate line appended for the already-present id.
         assert _read_ids(search_path) == ["t1"]
 
@@ -119,8 +119,8 @@ class TestLoadSeenForSearch:
 
         shard_id = "shardD"
         search_path = search_dir / f"{shard_id}.jsonl"
-        _write_jsonl(search_path, [{"trajectory_id": "s1"}])
-        _write_jsonl(analysis_dir / f"{shard_id}.jsonl", [{"trajectory_id": "a1"}])
+        _write_jsonl(search_path, [{"trajectory_id": "s1", "constant": "e"}])
+        _write_jsonl(analysis_dir / f"{shard_id}.jsonl", [{"trajectory_id": "a1", "constant": "e"}])
 
         load_seen_trajectories_for_search(str(search_path), shard_id)
         seen = load_seen_trajectories_for_search(str(search_path), shard_id)
@@ -135,7 +135,7 @@ class TestLoadSeenForSearch:
 
         shard_id = "shardE"
         search_path = search_dir / f"{shard_id}.jsonl"
-        _write_jsonl(search_path, [{"trajectory_id": "s1"}])
+        _write_jsonl(search_path, [{"trajectory_id": "s1", "constant": "e"}])
 
         seen = load_seen_trajectories_for_search(str(search_path), shard_id)
 
@@ -152,7 +152,7 @@ class TestLoadSeenForSearch:
 
         shard_id = "shardF"
         search_path = shared / f"{shard_id}.jsonl"
-        _write_jsonl(search_path, [{"trajectory_id": "s1"}])
+        _write_jsonl(search_path, [{"trajectory_id": "s1", "constant": "e"}])
 
         seen = load_seen_trajectories_for_search(str(search_path), shard_id)
 

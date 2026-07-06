@@ -19,7 +19,10 @@ from dreamer import e
 from dreamer.extraction.hyperplanes import Hyperplane
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
-from dreamer.search.methods.flatland.evaluator import flatland_trajectory_key
+from dreamer.search.methods.flatland.evaluator import (
+    _score_from_record,
+    flatland_trajectory_key,
+)
 from dreamer.search.methods.flatland import parallel_eval as pe
 
 
@@ -51,8 +54,11 @@ def simple_shard(simple_cmf, symbols, zero_shift):
 
 
 class _DummyPool:
-    """Runs pool.map in-process (no real worker processes)."""
+    """Runs the pool API in-process (no real worker processes)."""
     def map(self, fn, args):
+        return [fn(a) for a in args]
+
+    def imap_unordered(self, fn, args, chunksize=1):
         return [fn(a) for a in args]
 
 
@@ -71,20 +77,43 @@ def _make_ctx(shard, constant):
 
 def _stub_walk(monkeypatch):
     """Stub the pool worker: δ = sum of the primitive direction's coords."""
+    from dreamer.utils.storage.dtos import TrajectoryDTO
+
     def fake_pool_walk(args):
-        direction, constant, *_ = args
+        idx, direction, constant, cmf_id, shard_id, shard_encoding_str = args
         val = float(sum(int(v) for v in direction.values()))
-        dto = SimpleNamespace(
-            delta_estimate={constant.name: val},
-            identified={constant.name: True},
+        dto = TrajectoryDTO(
+            trajectory_id="t", cmf_id=cmf_id, shard_id=shard_id,
+            constant=constant.name, start_point=(), direction=(),
+            identified=True, delta=val,
         )
-        return ("MATRIX", constant.value_sympy, dto)
+        return (idx, ("MATRIX", constant.value_sympy, dto))
 
     monkeypatch.setattr(pe, "_pool_walk", fake_pool_walk)
 
 
 def _deltas(results):
     return [d for d, _ in results]
+
+
+class TestScoreFromRecord:
+    """The evaluator's objective-aware cache reader (flat per-constant rows)."""
+
+    def test_reads_metric_column(self):
+        rec = {"convergence_rate": 0.4, "identified": True}
+        assert _score_from_record(rec, "convergence_rate") == (0.4, True)
+
+    def test_reads_delta_core_column(self):
+        rec = {"delta": 1.7, "identified": True}
+        assert _score_from_record(rec, "delta") == (1.7, True)
+
+    def test_missing_column_returns_none(self):
+        rec = {"delta": 1.7, "identified": True}
+        assert _score_from_record(rec, "convergence_rate") is None
+
+    def test_none_value_maps_to_worst_score(self):
+        rec = {"convergence_rate": None, "identified": False}
+        assert _score_from_record(rec, "convergence_rate") == (float("-inf"), False)
 
 
 class TestEvaluateBatch:
@@ -123,9 +152,10 @@ class TestEvaluateBatch:
             shard_id="s", shard_encoding_str="",
         )
         ctx["seen_trajectories"][tid] = {
-            "delta_estimate": {e.name: 42.0},
-            "identified": {e.name: True},
-            "config_fingerprint": fp,
+            e.name: {
+                "trajectory_id": tid, "constant": e.name,
+                "delta": 42.0, "identified": True, "config_fingerprint": fp,
+            }
         }
         # Two genomes so the parallel path runs; both share the cached ray.
         results = pe.evaluate_batch([z.copy(), z.copy()], eval_ctx=ctx, pool=_DummyPool())
@@ -134,7 +164,7 @@ class TestEvaluateBatch:
 
     def test_walk_error_degrades_to_neg_inf(self, whole_space_shard, monkeypatch):
         """A worker WalkError maps to −∞ without aborting the batch / emitting."""
-        monkeypatch.setattr(pe, "_pool_walk", lambda args: pe.WalkError("boom"))
+        monkeypatch.setattr(pe, "_pool_walk", lambda args: (args[0], pe.WalkError("boom")))
         ctx, sink_items = _make_ctx(whole_space_shard, e)
         d = ctx["geom"].d_flat
         batch = [np.array([1, 0], dtype=np.int64)[:d],

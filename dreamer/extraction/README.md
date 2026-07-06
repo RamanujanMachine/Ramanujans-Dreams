@@ -49,6 +49,26 @@ the analysis and search stages consume.
   `heuristic` on timeout.
 - **`legacy`** — brute-force lattice scan (fallback only).
 
+### Trajectory direction constraints (optional)
+
+`config.extraction.TRAJECTORY_CONSTRAINTS` (default `None`) pins the **direction** of
+every sampled trajectory, e.g. `{"x0": 12, "y1": 28}` means "always take 12 steps in
+`x0` for every 28 in `y1`". Keys are CMF variable names; values are integers.
+
+Because downstream trajectories may be length-scaled, only the **scale-invariant** part
+is enforced: the reduced **ratio** between the fixed coordinates (`12:28 = 3:7`) and their
+**sign**. So the constraint is a *homogeneous sub-cone* of the shard's recession cone,
+which means:
+
+- **Shards are filtered** — a shard whose cone admits no such direction is dropped at
+  extraction (you only ever search shards that can contain a constrained trajectory).
+- **Every sampler honours it** (folded into the flatland conditioner), and **search stays
+  on the sub-cone** too — so all stages respect the constraint.
+- A **single** fixed coordinate degenerates to a sign constraint (`x0 > 0`); you need
+  **≥ 2** fixed coordinates for a real ratio. A fixed value of `0` means that coordinate
+  is exactly `0`. The literal numbers survive only through their ratio/sign (a harvested
+  direction for `{x0:12,y1:28}` may print as `(3,…,7)`).
+
 ### Trajectory samplers
 
 The trajectory-direction samplers live in this package (`samplers/`,
@@ -84,7 +104,8 @@ main process only (workers do deterministic work).
 ## Key configurations
 
 `config.extraction.*` — `STRATEGY`, the `EXACT_*` / `HEURISTIC_*` budgets and
-tuning knobs, `LOAD_SHARD_CACHE`, `IGNORE_DUPLICATE_SEARCHABLES`. (The sampler
+tuning knobs, `LOAD_SHARD_CACHE`, `IGNORE_DUPLICATE_SEARCHABLES`,
+`TRAJECTORY_CONSTRAINTS` (the direction filter described above). (The sampler
 engine is set on the analysis/search configs, not here — see above.) See the
 [configuration index](../configs/README.md#extraction) for the full, annotated list.
 

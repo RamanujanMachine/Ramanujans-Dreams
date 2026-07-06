@@ -195,7 +195,7 @@ class GeneticSearch(SearchMethod):
         # (selection / crossover / mutation / population top-up).  Same GLOBAL_SEED
         # + shard + constant => identical evolution; distinct shards/constants get
         # independent streams (nondeterministic when GLOBAL_SEED is None).
-        self._rng_py = derive_py_random(shard_id, "genetic", str(constant))
+        self._rng_py = derive_py_random(shard_id, "genetic", constant.name)
 
         shard: Shard = self.space
         if geom is None:

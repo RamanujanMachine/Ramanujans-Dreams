@@ -85,28 +85,27 @@ def compute_tier3_for_item(item):
     gates (``top N highest <metric> in shard|cmf``) fire; ``None`` for the
     legacy no-context path.
 
-    Reads ``post_process.TIER3_ATTRIBUTES`` from the (subprocess-local)
-    config and computes every entry not already present in
-    ``patch_dict['extended_metrics']``.  Per-attribute failures are stored as
-    ``<name>_error``; a fatal handler failure is recorded under
-    ``worker_error``.  The patch is returned for the writer.
+    Reads ``post_process.TIER3_ATTRIBUTES`` from the (subprocess-local) config and
+    computes every entry not already present as a **top-level** key on the flat
+    *patch* record.  Per-attribute failures are stored as ``<name>_error``; a
+    fatal handler failure is recorded under ``worker_error``.  The patch (a flat
+    dict) is returned for the writer.
     """
     from dreamer.configs import config
 
     traj_matrix, constant, patch, context = item
     attrs_to_compute = config.post_process.TIER3_ATTRIBUTES
-    extended_metrics = patch.setdefault("extended_metrics", {})
     # Specs may be bare strings or ``(name, predicate)`` tuples; filter by
     # resolved name so predicates still fire inside ``compute_attributes``.
     missing = [
         spec for spec in attrs_to_compute
-        if attribute_name(spec) not in extended_metrics
+        if attribute_name(spec) not in patch
     ]
 
     if missing and traj_matrix is not None:
         try:
             handler = TrajectoryAttributesHandler(traj_matrix, constant=constant)
-            extended_metrics.update(
+            patch.update(
                 compute_attributes(handler, missing, on_error="store", context=context)
             )
         except Exception as e:
@@ -115,7 +114,7 @@ def compute_tier3_for_item(item):
                 f"compute_tier3_for_item error on trajectory {tid}: {e}",
                 Logger.Levels.warning,
             ).log()
-            extended_metrics["worker_error"] = str(e)
+            patch["worker_error"] = str(e)
     return patch
 
 
@@ -270,11 +269,12 @@ class Tier3PostProcessModV1(PostProcessModScheme):
             return
 
         desired = {attribute_name(s) for s in post_process_config.TIER3_ATTRIBUTES}
-        # Quickly scan first — if nothing is missing anywhere, skip
-        # spawning the worker pool entirely.
+        # Quickly scan first — if nothing is missing on any (traj, const) row, skip
+        # spawning the worker pool entirely.  Rows are flat, so a row's computed
+        # attributes are its top-level keys.
         if not any(
-            desired - set((r.get("extended_metrics") or {}).keys())
-            for r in merged.values()
+            desired - set(rec.keys())
+            for by_const in merged.values() for rec in by_const.values()
         ):
             return
 
@@ -312,18 +312,20 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         progress indicator a long shard looks indistinguishable from a hang.
         """
         resolved_specs = self._resolved_specs()
+        # One item per (trajectory, constant) row that is missing a Tier-3 attr.
         items = [
             (tid, record)
-            for tid, record in merged.items()
-            if desired - set((record.get("extended_metrics") or {}).keys())
+            for by_const in merged.values()
+            for record in by_const.values()
+            for tid in (record.get("trajectory_id"),)
+            if desired - set(record.keys())
         ]
         for tid, record in SmartTQDM(
             items,
             desc='Tier-3 trajectories: ',
             **sys_config.TQDM_CONFIG,
         ):
-            existing = set((record.get("extended_metrics") or {}).keys())
-            missing = desired - existing
+            missing = desired - set(record.keys())
             if not missing:
                 continue
 
@@ -375,7 +377,7 @@ class Tier3PostProcessModV1(PostProcessModScheme):
                 ).log()
                 continue
 
-            patch = {"trajectory_id": tid, "extended_metrics": {}}
+            patch = {"trajectory_id": tid, "constant": record.get("constant")}
             context = self._build_context(tid, top_n_sets, resolved_specs)
             sink((handler.trajectory_matrix, constant_sympy, patch, context))
 
@@ -497,12 +499,19 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         selector: TopNSelector,
         const_name: Optional[str],
     ) -> None:
-        """Rank *records* by the selector's metric and add the top-N ids to *target*."""
+        """Rank *records* by the selector's metric and add the top-N ids to *target*.
+
+        *records* is the nested ``{trajectory_id: {constant: row}}`` map; ranking is
+        per *const_name*, so each trajectory contributes its row for that constant.
+        """
         extractor = METRIC_EXTRACTORS.get(selector.metric)
         if extractor is None:
             return
         scored: List[Tuple[float, str]] = []
-        for tid, rec in records.items():
+        for tid, by_const in records.items():
+            rec = by_const.get(const_name)
+            if rec is None:
+                continue
             value = extractor(rec, const_name)
             if value is None:
                 continue

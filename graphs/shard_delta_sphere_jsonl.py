@@ -77,12 +77,16 @@ ValueFn = Callable[[Dict[str, Any]], Optional[float]]
 def delta_value(constant: Constant) -> ValueFn:
     """Value function returning δ for *constant* (the default, classic behaviour).
 
-    :param constant: the constant whose entry to read from ``delta_estimate``.
-    :return: a :data:`ValueFn` extracting ``record["delta_estimate"][name]``.
+    Rows are flat, one per ``(trajectory, constant)``, so this reads the core
+    ``delta`` column of the rows that belong to *constant*.
+
+    :param constant: the constant whose rows to read δ from.
+    :return: a :data:`ValueFn` extracting ``record["delta"]``.
     """
     def _fn(rec: Dict[str, Any]) -> Optional[float]:
-        d = rec.get("delta_estimate") or {}
-        v = d.get(constant.name)
+        if rec.get("constant") != constant.name:
+            return None
+        v = rec.get("delta")
         return None if v is None else float(v)
     return _fn
 
@@ -118,10 +122,10 @@ def extended_metric_value(
     :return: a :data:`ValueFn`.
     """
     def _fn(rec: Dict[str, Any]) -> Optional[float]:
-        em = rec.get("extended_metrics") or {}
-        if key not in em:
+        # Rows are flat: metrics are top-level columns.
+        if key not in rec:
             return None
-        raw = em[key]
+        raw = rec[key]
         if raw is None:
             return None
         return float(transform(raw)) if transform is not None else float(raw)
@@ -154,8 +158,8 @@ def sympy_attribute_value(
     sym_subs = {sp.Symbol(k): v for k, v in subs.items()}
 
     def _fn(rec: Dict[str, Any]) -> Optional[float]:
-        container = (rec.get("extended_metrics") or {}) if in_extended_metrics else rec
-        raw = container.get(key)
+        # Rows are flat, so both cases read the top-level record.
+        raw = rec.get(key)
         if not isinstance(raw, str) or not raw.strip():
             return None
         try:
@@ -189,7 +193,7 @@ def eigenvalue_lognorm_value(index: int = 0) -> ValueFn:
     import sympy as sp
 
     def _fn(rec: Dict[str, Any]) -> Optional[float]:
-        eigs = (rec.get("extended_metrics") or {}).get("eigenvalues")
+        eigs = rec.get("eigenvalues")   # flat column
         if not isinstance(eigs, (list, tuple)) or index >= len(eigs):
             return None
         direction = rec.get("direction")
@@ -209,9 +213,23 @@ def eigenvalue_lognorm_value(index: int = 0) -> ValueFn:
     return _fn
 
 def convergence_rate(neg: bool) -> ValueFn:
+    """Value function for the **stored** single-definition convergence rate.
+
+    Reads the ``convergence_rate`` column (the length-normalised spectral rate
+    ``approximated_digits_per_step / ||v||₂`` computed by
+    ``TrajectoryAttributesHandler.convergence_rate``) rather than recomputing a raw
+    eigenvalue gap — so the sphere matches the rest of the system's definition.
+    ``neg=True`` flips the sign (for a "lower is better" colouring).
+    """
     def _fn(rec: Dict[str, Any]) -> Optional[float]:
-        result = eigenvalue_lognorm_value(1)(rec) - eigenvalue_lognorm_value(0)(rec)
-        return -result if neg else result
+        raw = rec.get("convergence_rate")
+        if raw is None:
+            return None
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return -val if neg else val
     return _fn
 
 
@@ -238,6 +256,7 @@ class ProjectionSpec:
 
     axes: Tuple[int, int, int] = (0, 1, 2)
     dependent: Dict[int, Tuple[float, float, float]] = field(default_factory=dict)
+    dim: Optional[int] = None  # full CMF dimension (for embedding back to D-space)
 
     @classmethod
     def identity(cls, dim: int) -> "ProjectionSpec":
@@ -248,7 +267,93 @@ class ProjectionSpec:
         """
         if dim < 3:
             raise ValueError(f"Need at least 3 coordinates to project, got {dim}.")
-        return cls(axes=(0, 1, 2), dependent={})
+        return cls(axes=(0, 1, 2), dependent={}, dim=dim)
+
+    @classmethod
+    def ignoring(cls, dim: int, ignore: Sequence[int]) -> "ProjectionSpec":
+        """Spec that **ignores** the given coordinates and uses the rest as axes.
+
+        The non-ignored coordinates become the sphere's ``(x, y, z)`` (in
+        ascending index order) and the ignored ones are dropped entirely — they
+        do not enter the unit-vector projection at all.  This is the natural way
+        to draw a CMF whose sampling fixed some coordinates (a constant component
+        would otherwise swamp the angular spread): ignore those coordinates.
+
+        Exactly three coordinates must remain.
+
+        :param dim: the CMF dimensionality (number of symbols).
+        :param ignore: coordinate indices to ignore (0-based).
+        :raises ValueError: if any index is out of range or the kept count != 3.
+        """
+        ig = sorted(set(int(i) for i in ignore))
+        if any(i < 0 or i >= dim for i in ig):
+            raise ValueError(f"--ignore-coords indices must be in [0, {dim - 1}]; got {ig}.")
+        kept = [i for i in range(dim) if i not in set(ig)]
+        if len(kept) != 3:
+            raise ValueError(
+                f"Ignoring {ig} leaves {len(kept)} coordinate(s) {kept}, but exactly "
+                f"3 are needed for a sphere.  Ignore {dim - 3} of the {dim} coords "
+                f"(or use --layout for finer control)."
+            )
+        return cls(axes=(kept[0], kept[1], kept[2]), dependent={}, dim=dim)
+
+    @classmethod
+    def from_constraints(cls, dim: int, symbols: Sequence,
+                         constraints: Dict[str, int]) -> "ProjectionSpec":
+        r"""Spec from trajectory **direction constraints** (ratio + sign).
+
+        A constraint ``{x0: 12, x1: 14, y1: 28}`` pins the scale-invariant ratio
+        of those coordinates (see ``dreamer/extraction/samplers/constraints.py``).
+        Geometrically the ratio equalities make the constrained coordinates depend
+        linearly on a single **anchor** coordinate (the first constrained one):
+        ``v_b = (c_b / c_anchor) · v_anchor``.  So the anchor is kept as a sphere
+        axis (it carries the block's overall scale — the degree of freedom plain
+        ignoring would lose), the other constrained coordinates become
+        :attr:`dependent` relations on it, and the unconstrained coordinates are
+        the remaining axes.  This keeps the cone homogeneous, so the projection is
+        one-to-one (smooth δ) and the hyperplanes stay honest great circles.
+
+        Exactly three effective axes (= 1 anchor + the unconstrained coords, or
+        just the unconstrained coords if no non-zero constraint) must result, so
+        for a ``D``-dim CMF one ratio group must fix ``D − 2`` coordinates.
+
+        :param dim: the CMF dimensionality.
+        :param symbols: ordered shard symbols (maps names → indices).
+        :param constraints: ``{name: value}`` direction constraints.
+        :raises ValueError: if the constraints don't leave exactly 3 axes.
+        """
+        from dreamer.extraction.samplers.constraints import resolve_constraint_indices
+
+        resolved = resolve_constraint_indices(symbols, constraints)  # {idx: int}
+        zeros = sorted(i for i, v in resolved.items() if v == 0)
+        nonzero = sorted((i, v) for i, v in resolved.items() if v != 0)
+        constrained = set(resolved)
+        free = [i for i in range(dim) if i not in constrained]
+
+        axes_list = list(free)
+        anchor_i = nonzero[0][0] if nonzero else None
+        if anchor_i is not None:
+            axes_list.append(anchor_i)
+        axes = tuple(sorted(axes_list))
+        if len(axes) != 3:
+            raise ValueError(
+                f"Constraints fix {len(constrained)} of {dim} coords, leaving "
+                f"{len(axes)} effective axis(es) {list(axes)}; exactly 3 are needed. "
+                f"For a {dim}-D CMF, one ratio group must fix {dim - 2} coordinates "
+                f"(so 2 stay free) — adjust your constraints."
+            )
+
+        dependent: Dict[int, Tuple[float, float, float]] = {
+            i: (0.0, 0.0, 0.0) for i in zeros
+        }
+        if anchor_i is not None:
+            anchor_slot = axes.index(anchor_i)
+            anchor_c = nonzero[0][1]
+            for b_i, b_c in nonzero[1:]:
+                coeffs = [0.0, 0.0, 0.0]
+                coeffs[anchor_slot] = b_c / anchor_c
+                dependent[b_i] = (coeffs[0], coeffs[1], coeffs[2])
+        return cls(axes=axes, dependent=dependent, dim=dim)
 
     @classmethod
     def from_layout(cls, layout: Sequence) -> "ProjectionSpec":
@@ -283,7 +388,21 @@ class ProjectionSpec:
             raise ValueError(
                 f"Layout must mark exactly one each of x, y, z; got {sorted(free)}."
             )
-        return cls(axes=(free["x"], free["y"], free["z"]), dependent=dependent)
+        return cls(axes=(free["x"], free["y"], free["z"]), dependent=dependent,
+                   dim=len(layout))
+
+    @property
+    def ignores_coords(self) -> bool:
+        """Whether some coordinates are dropped (neither an axis nor dependent).
+
+        When ``True`` the shard cone cannot be projected faithfully (the dropped
+        coordinates carry the data away from the ``ignored = 0`` slice), so the
+        surface renderer skips the ``A·v ≤ 0`` cone trim and bounds the patch by
+        the data hull / angular extent instead.
+        """
+        if self.dim is None:
+            return False
+        return (len(self.axes) + len(self.dependent)) < self.dim
 
     def free_to_full(self, xyz: np.ndarray) -> np.ndarray:
         r"""Embed sphere points ``(x, y, z)`` back into full ``D``-dim space.
@@ -294,8 +413,13 @@ class ProjectionSpec:
 
         :param xyz: ``(N, 3)`` array of sphere points.
         :return: ``(N, D)`` array in the CMF coordinate frame.
+
+        Coordinates that are neither an axis nor dependent (i.e. *ignored*) are
+        left at 0, so ``A @ free_to_full(xyz)`` reduces to ``A[:, axes] · xyz`` —
+        the same projection the great circles are drawn with (see
+        :func:`plot_hyperplanes_on_sphere`), keeping the cone trim consistent.
         """
-        n = len(self.axes) + len(self.dependent)
+        n = self.dim if self.dim is not None else (len(self.axes) + len(self.dependent))
         full = np.zeros((xyz.shape[0], n), dtype=float)
         for slot, ax in enumerate(self.axes):
             full[:, ax] = xyz[:, slot]
@@ -388,23 +512,18 @@ def _available_cmf_ids(export_cmfs: str, constant: Constant) -> List[str]:
     return sorted(f.stem for f in const_dir.glob("*.json"))
 
 
-def _merge_jsonl(path: Path) -> Dict[str, dict]:
-    """Read a per-shard JSONL, folding patch lines into base records.
+def _merge_jsonl(path: Path) -> Dict[Tuple[str, str], dict]:
+    """Read a per-shard JSONL, folding patch lines into base rows.
 
-    Mirrors ``data_utils/search_data.py._merge_jsonl`` (last-write-wins on scalar
-    fields, **union** on ``extended_metrics``).  The union is essential: the
-    Tier-2/Tier-3 attributes (eigenvalues, gcd_slope, ...) arrive on a *separate*
-    patch line written by the background worker, and the base line for the same
-    trajectory carries ``extended_metrics: {}``.  A plain ``dict.update`` would
-    let whichever line comes last win outright, so an empty ``{}`` could wipe the
-    attributes - which is exactly why attribute spheres came out blank.  Unioning
-    the two ``extended_metrics`` dicts preserves the populated keys regardless of
-    line order.
+    Rows are flat, one per ``(trajectory_id, constant)`` — every attribute is a
+    top-level column — so folding a Tier-2/Tier-3 patch (which carries only the new
+    columns) into its base row is a plain last-write-wins ``dict.update`` (no more
+    special-cased ``extended_metrics`` union).
 
     :param path: the ``<shard_id>.jsonl`` file.
-    :return: ``{trajectory_id: merged_record}``.
+    :return: ``{(trajectory_id, constant): merged_record}``.
     """
-    merged: Dict[str, dict] = {}
+    merged: Dict[Tuple[str, str], dict] = {}
     with open(path, "r") as f:
         for line in f:
             line = line.strip()
@@ -415,15 +534,14 @@ def _merge_jsonl(path: Path) -> Dict[str, dict]:
             except json.JSONDecodeError:
                 continue
             tid = record.get("trajectory_id")
-            if tid is None:
+            const = record.get("constant")
+            if tid is None or const is None:
                 continue
-            if tid not in merged:
-                merged[tid] = record
+            key = (tid, const)
+            if key not in merged:
+                merged[key] = record
             else:
-                existing_em = dict(merged[tid].get("extended_metrics") or {})
-                new_em = dict(record.get("extended_metrics") or {})
-                merged[tid].update(record)
-                merged[tid]["extended_metrics"] = {**existing_em, **new_em}
+                merged[key].update(record)
     return merged
 
 
@@ -510,6 +628,9 @@ def load_shard_samples(
     values: List[float] = []
     identified: List[bool] = []
     for rec in merged.values():
+        # Rows are per-(trajectory, constant); only this constant's rows.
+        if rec.get("constant") != constant.name:
+            continue
         direction = rec.get("direction")
         if direction is None:
             continue
@@ -517,7 +638,7 @@ def load_shard_samples(
             val = value_fn(rec)
         except Exception:
             val = None
-        ident = bool((rec.get("identified") or {}).get(constant.name))
+        ident = bool(rec.get("identified"))   # flat scalar
         directions.append([float(v) for v in direction])
         values.append(float(val) if val is not None and np.isfinite(val) else np.nan)
         identified.append(ident)
@@ -546,8 +667,7 @@ def shard_has_identified(shard, constant: Constant, results_root: str) -> bool:
     if not path.is_file():
         return False
     for rec in _merge_jsonl(path).values():
-        ident = rec.get("identified") or {}
-        if ident.get(constant.name):
+        if rec.get("constant") == constant.name and rec.get("identified"):
             return True
     return False
 
@@ -652,6 +772,12 @@ def plot_hyperplanes_on_sphere(ax, shard, spec: ProjectionSpec,
     chosen coordinate axes (``spec.axes``); the camera-facing half of the
     resulting great circle is drawn.
 
+    Nothing is drawn when coordinates are **ignored**: the shard's cone is
+    homogeneous in full D (``A·v ≤ 0``), but dropping coordinates makes it
+    inhomogeneous in the reduced space (the dropped coords add a
+    magnitude-dependent offset), so no fixed great circle represents the boundary
+    — drawing one would misplace it (it could even cut through the shard).
+
     :param ax: a 3-D matplotlib axis.
     :param shard: the shard whose constraint matrix ``A`` supplies the normals.
     :param spec: the active projection spec (selects the 3 axes).
@@ -660,14 +786,22 @@ def plot_hyperplanes_on_sphere(ax, shard, spec: ProjectionSpec,
     :param line_width: stroke width of the great circles.
     :param zorder: draw order for the great circles.
     """
-    if shard.A is None:
+    if shard.A is None or spec.ignores_coords:
         return
     A = np.array(shard.A, dtype=float)
+    # Effective normal in the (x, y, z) axis space.  A point xyz embeds back to
+    # full D via the spec (axes + dependent relations), so the projected normal
+    # is ``A @ M`` where ``M`` is that linear embedding (``emb[k]`` = full vector
+    # for axis k).  This includes the dependent-coordinate contributions — e.g. a
+    # constraint folding ``y1 = (7/3)·x0`` adds ``(7/3)·A[:, y1]`` onto the x0
+    # axis.  For the identity / ignore spec ``M`` is just the axis selection, so
+    # this reduces to the old ``A[:, axes]``.
+    emb = spec.free_to_full(np.eye(3))   # (3, dim): emb[k] = embedding of axis k
+    A_eff = A @ emb.T                    # (rows, 3): effective normals in (x,y,z)
     cam = _camera_vector(cam_elev, cam_azim)
     theta = np.linspace(0, 2 * np.pi, 300)
 
-    for row in A:
-        n = row[list(spec.axes)]
+    for n in A_eff:
         norm_n = np.linalg.norm(n)
         if norm_n < 1e-8:
             continue
@@ -793,7 +927,11 @@ def render_shard_surface(
     grid_pts = np.c_[gx.ravel(), gy.ravel(), gz.ravel()] @ R  # back to global frame
 
     # --- clip to the shard cone (embed sphere pts into full CMF dim first) ---
-    if shard.A is not None:
+    # Skipped when coordinates are ignored: the shard cone lives in full D and
+    # does not project onto the kept-coords subspace (the dropped coords carry the
+    # data off the ``ignored = 0`` slice), so the trim would wrongly erase the
+    # whole patch.  The data hull / angular extent then bounds the patch instead.
+    if shard.A is not None and not spec.ignores_coords:
         A = np.array(shard.A, dtype=float)
         A_norm = A / np.linalg.norm(A, axis=1, keepdims=True)
         full = spec.free_to_full(grid_pts)
@@ -996,6 +1134,8 @@ def generate_spheres(
     mode: str = "surface",
     mark_identified: bool = True,
     spec: Optional[ProjectionSpec] = None,
+    ignore_coords: Optional[Sequence[int]] = None,
+    constraints: Optional[Dict[str, int]] = None,
     subspace_tol: float = 1e-6,
     value_fn: Optional[ValueFn] = None,
     value_label: Optional[str] = None,
@@ -1037,7 +1177,18 @@ def generate_spheres(
         trajectories by δ and draw non-identified ones faint grey; if ``False``,
         draw every sample in one neutral colour (sampling geometry only).
     :param spec: projection spec; defaults to the identity ``(0, 1, 2)`` spec for
-        a 3-D CMF.  Required (non-identity) for ``D > 3``.
+        a 3-D CMF (or, if *ignore_coords* is given, a spec over the kept coords).
+        Required (non-identity) for ``D > 3`` unless *ignore_coords* is used.
+    :param ignore_coords: coordinate indices to ignore (drop from the projection)
+        when *spec* is not given; the remaining coordinates (which must number
+        exactly 3) become the sphere axes.  Useful when sampling fixed some
+        coordinates and their constant value would otherwise dominate the plot.
+    :param constraints: trajectory direction constraints ``{name: value}`` (ratio
+        + sign, as in ``config.extraction.TRAJECTORY_CONSTRAINTS``); when *spec*
+        is not given they are folded into a projection (anchor kept as an axis,
+        the other constrained coords dependent on it).  Gives a faithful, smooth
+        sphere with correct hyperplanes — requires the constraints to leave
+        exactly 3 effective axes (fix ``D − 2`` coords for a ``D``-dim CMF).
     :param subspace_tol: relative tolerance for the subspace membership test.
     :param value_fn: scalar extractor (see :data:`ValueFn`); ``None`` →
         :func:`delta_value` for *constant*.
@@ -1102,7 +1253,13 @@ def generate_spheres(
     skipped_unidentified = 0
     for shard in shards:
         if spec is None:
-            spec = ProjectionSpec.identity(len(shard.symbols))
+            dim = len(shard.symbols)
+            if constraints:
+                spec = ProjectionSpec.from_constraints(dim, shard.symbols, constraints)
+            elif ignore_coords:
+                spec = ProjectionSpec.ignoring(dim, ignore_coords)
+            else:
+                spec = ProjectionSpec.identity(dim)
         if require_identified and not shard_has_identified(shard, constant, results_root):
             skipped_unidentified += 1
             continue
@@ -1467,6 +1624,15 @@ def _build_cli():
     p.add_argument("--layout", default=None,
                    help="D>3 subspace, e.g. 'x,y,z,1:-1:0' (free axes x/y/z, "
                         "dependent coord a:b:c = a*x+b*y+c*z).")
+    p.add_argument("--ignore-coords", default=None,
+                   help="Coordinate indices to ignore when projecting, e.g. '0,4'. "
+                        "The remaining coords (must be exactly 3) become the sphere "
+                        "axes - handy when sampling fixed some coordinates.")
+    p.add_argument("--constraints", default=None,
+                   help="Trajectory direction constraints, e.g. 'x0=12,x1=14,y1=28' "
+                        "(ratio + sign).  Folds the constrained coords into a faithful "
+                        "projection (anchor kept as an axis) giving a smooth sphere with "
+                        "correct hyperplanes.  Must leave exactly 3 effective axes.")
     p.add_argument("--subspace-tol", type=float, default=1e-6,
                    help="Relative tolerance for the subspace membership test.")
 
@@ -1520,6 +1686,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "every CMF at once is not supported (huge figure / pixmap exhaustion)."
         )
 
+    if sum(bool(x) for x in (args.layout, args.ignore_coords, args.constraints)) > 1:
+        raise SystemExit("Use only one of --layout / --ignore-coords / --constraints.")
+    ignore_coords = None
+    if args.ignore_coords:
+        try:
+            ignore_coords = [int(t) for t in args.ignore_coords.replace(" ", "").split(",") if t]
+        except ValueError:
+            raise SystemExit(f"--ignore-coords must be comma-separated integers, "
+                             f"got {args.ignore_coords!r}.")
+    constraints = None
+    if args.constraints:
+        constraints = {}
+        for tok in args.constraints.replace(" ", "").split(","):
+            if not tok:
+                continue
+            name, _, val = tok.partition("=")
+            if not name or val == "":
+                raise SystemExit(f"--constraints must be 'name=value' pairs, got {tok!r}.")
+            try:
+                constraints[name] = int(val)
+            except ValueError:
+                raise SystemExit(f"--constraints value must be an integer, got {val!r}.")
+
     shards = load_shards(args.export_cmfs, const, cmf_id=args.cmf)
     value_fn, value_label = _resolve_value_fn(args)
 
@@ -1542,6 +1731,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         mode="scatter" if args.scatter else "surface",
         mark_identified=args.mark_identified,
         spec=_parse_layout(args.layout),
+        ignore_coords=ignore_coords,
+        constraints=constraints,
         subspace_tol=args.subspace_tol,
         value_fn=value_fn,
         value_label=value_label,

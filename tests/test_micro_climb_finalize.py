@@ -52,15 +52,26 @@ def whole_space_shard(simple_cmf, symbols):
     return Shard(simple_cmf, e, [], [], zero_shift)
 
 
-def _rec(tid, direction, delta, identified=True, const="e"):
+def _rec(tid, direction, delta, identified=True, const="e", **extra):
+    # One flat per-(trajectory, constant) row; metrics are top-level columns.
     return {
         "trajectory_id": tid,
+        "constant": const,
         "start_point": [0, 0],
         "direction": list(direction),
-        "delta_estimate": {const: delta},
-        "identified": {const: identified},
+        "delta": delta,
+        "identified": identified,
         "config_fingerprint": "fp",
+        **extra,
     }
+
+
+def _seen(*recs):
+    """Nest flat records into the ``{trajectory_id: {constant: record}}`` shape."""
+    out = {}
+    for r in recs:
+        out.setdefault(r["trajectory_id"], {})[r["constant"]] = r
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -69,30 +80,47 @@ def _rec(tid, direction, delta, identified=True, const="e"):
 
 class TestBestRecordsForConstant:
     def test_selects_ties_within_two_decimals(self):
-        seen = {
-            "a": _rec("a", (3, 1), 0.204),   # max
-            "b": _rec("b", (1, 3), 0.196),   # ties at 0.20
-            "c": _rec("c", (1, 1), 0.101),   # 0.10 — not tied
-        }
-        max_delta, best = _best_records_for_constant(seen, "e")
+        seen = _seen(
+            _rec("a", (3, 1), 0.204),   # max
+            _rec("b", (1, 3), 0.196),   # ties at 0.20
+            _rec("c", (1, 1), 0.101),   # 0.10 — not tied
+        )
+        max_delta, best = _best_records_for_constant(seen, "e", "delta")
         assert max_delta == pytest.approx(0.204)
         ids = {r["trajectory_id"] for r in best}
         assert ids == {"a", "b"}
 
     def test_ignores_unidentified_and_other_constants(self):
-        seen = {
-            "a": _rec("a", (3, 1), 0.5, identified=False),     # not identified
-            "b": _rec("b", (1, 3), 0.4, const="pi"),           # other constant
-            "c": _rec("c", (1, 1), 0.3),                       # the only valid one
-        }
-        max_delta, best = _best_records_for_constant(seen, "e")
+        seen = _seen(
+            _rec("a", (3, 1), 0.5, identified=False),     # not identified
+            _rec("b", (1, 3), 0.4, const="pi"),           # other constant
+            _rec("c", (1, 1), 0.3),                       # the only valid one
+        )
+        max_delta, best = _best_records_for_constant(seen, "e", "delta")
         assert max_delta == pytest.approx(0.3)
         assert [r["trajectory_id"] for r in best] == ["c"]
 
     def test_empty_when_no_records(self):
-        max_delta, best = _best_records_for_constant({}, "e")
+        max_delta, best = _best_records_for_constant({}, "e", "delta")
         assert best == []
         assert max_delta == float("-inf")
+
+    def test_ranks_by_objective_column_when_objective_active(self):
+        """Under a non-δ objective, ranking follows the convergence_rate column —
+        the record with the worse δ but better convergence_rate wins."""
+        seen = _seen(
+            _rec("a", (3, 1), 0.9, convergence_rate=0.10),
+            _rec("b", (1, 3), 0.2, convergence_rate=0.50),
+        )
+        max_score, best = _best_records_for_constant(seen, "e", "convergence_rate")
+        assert max_score == pytest.approx(0.50)
+        assert [r["trajectory_id"] for r in best] == ["b"]
+
+    def test_ranks_by_delta_under_delta_objective(self):
+        seen = _seen(_rec("a", (1, 1), 0.7), _rec("b", (2, 1), 0.3))
+        max_score, best = _best_records_for_constant(seen, "e", "delta")
+        assert max_score == pytest.approx(0.7)
+        assert [r["trajectory_id"] for r in best] == ["a"]
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +133,7 @@ class TestFinalize:
 
         def boom(*a, **k):
             raise AssertionError("disabled finalization must not climb")
-        monkeypatch.setattr(fin, "discrete_micro_climb", boom)
+        monkeypatch.setattr(fin, "parallel_micro_climb", boom)
 
         # Returns immediately without reading the (absent) JSONL or climbing.
         finalize_best_trajectories(
@@ -137,14 +165,18 @@ class TestFinalize:
             for r in records:
                 f.write(json.dumps(r) + "\n")
 
-        # Anchor evaluation: identified, finite (a cache hit in production).
-        monkeypatch.setattr(fin, "evaluate_in_flatland", lambda z, **kw: (0.20, True))
+        # Anchor evaluation (batched cache hits in production): identified, finite.
+        monkeypatch.setattr(
+            fin, "evaluate_neighbours", lambda zs, ctx, pool: [(0.20, True) for _ in zs]
+        )
 
+        # The concurrent climb receives one anchor per distinct tied-best ray.
         climbed_keys = []
-        def fake_climb(z, cur_delta, **kw):
-            climbed_keys.append(primitive_ray_key(z, kw["geom"]))
-            return np.asarray(z), cur_delta
-        monkeypatch.setattr(fin, "discrete_micro_climb", fake_climb)
+        def fake_parallel(anchors, **kw):
+            for z, cur_delta in anchors:
+                climbed_keys.append(primitive_ray_key(z, kw["geom"]))
+            return [(np.asarray(z), cur_delta) for z, cur_delta in anchors]
+        monkeypatch.setattr(fin, "parallel_micro_climb", fake_parallel)
 
         finalize_best_trajectories(
             shard=whole_space_shard, identified_consts=[e], geom=geom,

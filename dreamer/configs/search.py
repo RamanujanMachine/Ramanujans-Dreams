@@ -102,6 +102,17 @@ class SearchConfig(Configurable):
         default=1e-10,
         metadata={"description": "Tolerance used when deciding whether a searched trajectory identifies the constant."},
     )
+    IDENTIFY_DEPTH: int = field(
+        default=1000,
+        metadata={"description": "Walk depth at which the p/q integer relation is identified via "
+                  "LIReC. The relation is depth-independent, so it is found once at this (cheap) "
+                  "depth and reused for the deeper delta / spectral computations, avoiding a "
+                  "redundant deep identification walk (LIReC and the walk feeding it get expensive "
+                  "at large depth). Capped by the actual walk depth; falls back to the full walk "
+                  "depth if identification fails here (slow-converging trajectory), so results are "
+                  "unchanged -- only faster. Not part of the Tier-1 config fingerprint for that "
+                  "reason."},
+    )
     COMPUTE_EIGEN_VALUES: bool = field( # deprecated
         default=False,
         metadata={"description": "Compute eigenvalue diagnostics for trajectory matrices in search results."},
@@ -134,6 +145,7 @@ class SearchConfig(Configurable):
             ("delta_prediction", "if_identified"),
             ("gcd_slope", "if_identified"), ("error_formula_ratio", "if_identified"),
             ("approximated_digits_per_step", "if_identified"), ("digits_approximation", "if_identified"),
+            ("convergence_rate", "if_identified"),
             ("digits_computed", "if_identified"), ("avg_computed_digits_per_step", "if_identified"),
         ),
         metadata={"description": "Background-worker attributes computed asynchronously during search. Empty disables the worker/writer subprocesses entirely."},
@@ -143,7 +155,7 @@ class SearchConfig(Configurable):
         default=False,
         metadata={"description": (
             "When True, use delta_prediction (eigenvalue-based) as the primary ranking "
-            "metric stored in delta_estimate for analysis and search, instead of the "
+            "metric stored in the `delta` column for analysis and search, instead of the "
             "regular walk-based delta.  The regular delta is always computed first because "
             "it is needed to select the best eigenvalue pair for delta_prediction; both "
             "values are computed, only the ranking metric changes."
@@ -457,7 +469,7 @@ class SearchConfig(Configurable):
     )
 
     MAX_CONSTANT_RESOLUTION: int = field(
-        default=100_000,
+        default=200_000,
         metadata={"description": "Maximum number of digits to use for constant values in delta computation."},
     )
 

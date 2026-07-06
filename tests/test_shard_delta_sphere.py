@@ -86,12 +86,72 @@ class TestProjectionSpec:
         with pytest.raises(ValueError):
             sds.ProjectionSpec.from_layout(["x", "y", "z", (1, -1)])  # bad coeffs
 
+    def test_ignoring_picks_remaining_axes(self):
+        spec = sds.ProjectionSpec.ignoring(5, [0, 4])
+        assert spec.axes == (1, 2, 3)
+        assert spec.dependent == {} and spec.dim == 5
+
+    def test_ignoring_drops_coords_in_projection(self):
+        spec = sds.ProjectionSpec.ignoring(5, [0, 4])
+        # direction (3, 2, 0, 4, 7): the ignored 3 and 7 must not affect the unit
+        # vector — it is the normalisation of (dir[1], dir[2], dir[3]) = (2, 0, 4).
+        dirs = np.array([[3.0, 2.0, 0.0, 4.0, 7.0]])
+        unit, mask = spec.project(dirs, tol=1e-6)
+        assert mask.all()
+        expected = np.array([2.0, 0.0, 4.0])
+        expected /= np.linalg.norm(expected)
+        np.testing.assert_allclose(unit[0], expected)
+
+    def test_ignoring_free_to_full_is_full_dim(self):
+        spec = sds.ProjectionSpec.ignoring(5, [0, 4])
+        full = spec.free_to_full(np.array([[0.6, 0.0, 0.8]]))
+        assert full.shape == (1, 5)
+        # ignored coords (0, 4) stay 0; kept coords carry x/y/z.
+        np.testing.assert_allclose(full[0], [0.0, 0.6, 0.0, 0.8, 0.0])
+
+    def test_ignoring_wrong_count_raises(self):
+        with pytest.raises(ValueError):
+            sds.ProjectionSpec.ignoring(5, [0])      # leaves 4
+        with pytest.raises(ValueError):
+            sds.ProjectionSpec.ignoring(5, [9])      # out of range
+
+    def test_ignores_coords_flag(self):
+        # ignoring drops coords → True (cone trim must be skipped in surface mode)
+        assert sds.ProjectionSpec.ignoring(5, [0, 4]).ignores_coords is True
+        # identity / full layout cover every coord → False (cone trim valid)
+        assert sds.ProjectionSpec.identity(3).ignores_coords is False
+        assert sds.ProjectionSpec.from_layout(["x", "y", "z", (1, 0, 0)]).ignores_coords is False
+
     def test_free_to_full_embedding(self):
         spec = sds.ProjectionSpec.from_layout(["x", "y", "z", (1, -1, 0)])
         xyz = np.array([[0.3, 0.4, 0.5]])
         full = spec.free_to_full(xyz)
         assert full.shape == (1, 4)
         np.testing.assert_allclose(full[0], [0.3, 0.4, 0.5, 0.3 - 0.4])
+
+    def test_from_constraints_folds_dependents(self):
+        syms = ["x0", "x1", "x2", "y0", "y1"]
+        spec = sds.ProjectionSpec.from_constraints(5, syms, {"x0": 12, "x1": 14, "y1": 28})
+        # anchor x0 kept as an axis with the two free coords; x1, y1 dependent on it.
+        assert spec.axes == (0, 2, 3) and spec.dim == 5
+        assert spec.dependent[1] == pytest.approx((14 / 12, 0.0, 0.0))
+        assert spec.dependent[4] == pytest.approx((28 / 12, 0.0, 0.0))
+        assert spec.ignores_coords is False  # 3 axes + 2 dependent = 5 = dim
+
+    def test_from_constraints_wrong_count_raises(self):
+        syms = ["x0", "x1", "x2", "y0", "y1"]
+        with pytest.raises(ValueError):  # only 2 fixed → 4 effective axes
+            sds.ProjectionSpec.from_constraints(5, syms, {"x0": 12, "y1": 28})
+
+    def test_from_constraints_effective_normal_embedding(self):
+        # The hyperplane great circles use A @ free_to_full(eye3).T; check the
+        # embedding folds the dependent (ratio) coords onto the anchor axis.
+        syms = ["x0", "x1", "x2", "y0", "y1"]
+        spec = sds.ProjectionSpec.from_constraints(5, syms, {"x0": 12, "x1": 14, "y1": 28})
+        emb = spec.free_to_full(np.eye(3))  # (3, 5)
+        np.testing.assert_allclose(emb[0], [1.0, 14 / 12, 0.0, 0.0, 28 / 12])
+        np.testing.assert_allclose(emb[1], [0.0, 0.0, 1.0, 0.0, 0.0])
+        np.testing.assert_allclose(emb[2], [0.0, 0.0, 0.0, 1.0, 0.0])
 
     def test_project_filters_and_normalises(self):
         spec = sds.ProjectionSpec.from_layout(["x", "y", "z", (1, 0, 0)])
@@ -121,8 +181,9 @@ class TestProjectionSpec:
 class TestValueExtractors:
     def test_delta_value(self, const):
         fn = sds.delta_value(const)
-        assert fn({"delta_estimate": {"log-2": 0.28}}) == pytest.approx(0.28)
-        assert fn({"delta_estimate": {}}) is None
+        assert fn({"constant": const.name, "delta": 0.28}) == pytest.approx(0.28)
+        assert fn({"constant": const.name}) is None       # no δ column
+        assert fn({"constant": "other", "delta": 0.28}) is None  # different constant
         assert fn({}) is None
 
     def test_field_value(self):
@@ -134,19 +195,18 @@ class TestValueExtractors:
 
     def test_extended_metric_value(self):
         fn = sds.extended_metric_value("digits_per_step")
-        assert fn({"extended_metrics": {"digits_per_step": 1.5}}) == pytest.approx(1.5)
-        assert fn({"extended_metrics": {}}) is None
+        assert fn({"digits_per_step": 1.5}) == pytest.approx(1.5)   # flat column
         assert fn({}) is None
-        assert fn({"extended_metrics": {"digits_per_step": None}}) is None
+        assert fn({"digits_per_step": None}) is None
 
     def test_sympy_attribute_value(self):
         fn = sds.sympy_attribute_value("asymptotics", {"n": 1e6})
-        assert fn({"extended_metrics": {"asymptotics": "3*n + 1"}}) == pytest.approx(3e6 + 1)
-        assert fn({"extended_metrics": {}}) is None
+        assert fn({"asymptotics": "3*n + 1"}) == pytest.approx(3e6 + 1)  # flat column
+        assert fn({}) is None
         # Complex / non-real → skipped.
-        assert fn({"extended_metrics": {"asymptotics": "sqrt(-1)"}}) is None
+        assert fn({"asymptotics": "sqrt(-1)"}) is None
         # Non-string → skipped.
-        assert fn({"extended_metrics": {"asymptotics": 5}}) is None
+        assert fn({"asymptotics": 5}) is None
 
     def test_sympy_attribute_top_level(self):
         fn = sds.sympy_attribute_value("expr", {"n": 2}, in_extended_metrics=False)
@@ -156,17 +216,17 @@ class TestValueExtractors:
         fn0 = sds.eigenvalue_lognorm_value(0)
         fn1 = sds.eigenvalue_lognorm_value(1)
         rec = {"direction": [3, 4, 0],  # ||v|| = 5
-               "extended_metrics": {"eigenvalues": ["2.0", "0.5"]}}
+               "eigenvalues": ["2.0", "0.5"]}
         assert fn0(rec) == pytest.approx(math.log(2.0) / 5.0)
         assert fn1(rec) == pytest.approx(math.log(0.5) / 5.0)
         # Negative / complex eigenvalue → log of magnitude (well-defined).
-        rec_neg = {"direction": [1, 0, 0], "extended_metrics": {"eigenvalues": ["-2"]}}
+        rec_neg = {"direction": [1, 0, 0], "eigenvalues": ["-2"]}
         assert fn0(rec_neg) == pytest.approx(math.log(2.0))
         # Missing / too-short list, zero vector, or λ=0 → skipped.
-        assert fn1({"direction": [1, 0, 0], "extended_metrics": {"eigenvalues": ["2"]}}) is None
-        assert fn0({"extended_metrics": {}}) is None
-        assert fn0({"direction": [0, 0, 0], "extended_metrics": {"eigenvalues": ["2"]}}) is None
-        assert fn0({"direction": [1, 0, 0], "extended_metrics": {"eigenvalues": ["0"]}}) is None
+        assert fn1({"direction": [1, 0, 0], "eigenvalues": ["2"]}) is None
+        assert fn0({}) is None
+        assert fn0({"direction": [0, 0, 0], "eigenvalues": ["2"]}) is None
+        assert fn0({"direction": [1, 0, 0], "eigenvalues": ["0"]}) is None
 
 
 # ===========================================================================
@@ -206,12 +266,12 @@ class TestCliParsers:
         fn, label = sds._resolve_value_fn(
             self._args(sympy_attr="asymptotics", subs="n=10", value_label="asy"))
         assert label == "asy"
-        assert fn({"extended_metrics": {"asymptotics": "n+5"}}) == pytest.approx(15.0)
+        assert fn({"asymptotics": "n+5"}) == pytest.approx(15.0)
 
     def test_resolve_value_fn_eigen(self):
         fn, label = sds._resolve_value_fn(self._args(eigen_lognorm=1))
         assert "lambda_1" in label
-        rec = {"direction": [3, 4, 0], "extended_metrics": {"eigenvalues": ["2.0"]}}
+        rec = {"direction": [3, 4, 0], "eigenvalues": ["2.0"]}
         assert fn(rec) == pytest.approx(math.log(2.0) / 5.0)
 
 
@@ -230,28 +290,41 @@ def _fake_shard(symbols=("x", "y", "z")):
 
 
 def _write_shard_jsonl(root: Path, shard, records):
+    """Write shard trajectory records, flattening any legacy per-constant dicts
+    (``delta_estimate`` / ``identified`` / ``extended_metrics``) into the current
+    flat per-(trajectory, constant) schema (constant ``"log-2"``)."""
     _, shard_id, _ = sds.derive_cmf_and_shard_ids(shard)
     path = root / f"{shard_id}.jsonl"
     with open(path, "w") as f:
         for i, rec in enumerate(records):
+            rec = dict(rec)
             rec.setdefault("trajectory_id", f"{shard_id}__t{i}")
+            de = rec.pop("delta_estimate", None)
+            idd = rec.pop("identified", None)
+            em = rec.pop("extended_metrics", None)
+            rec["constant"] = "log-2"
+            if isinstance(de, dict) and "log-2" in de:
+                rec["delta"] = de["log-2"]
+            if isinstance(idd, dict):
+                rec["identified"] = bool(idd.get("log-2", False))
+            if isinstance(em, dict):
+                rec.update(em)   # flatten metric columns to top level
             f.write(json.dumps(rec) + "\n")
     return path
 
 
 class TestJsonlLoaders:
-    def test_merge_unions_extended_metrics(self, tmp_path):
-        # Regression: a base line with empty extended_metrics and a patch line
-        # carrying the Tier-2 attributes (any order) must NOT wipe each other —
-        # the merged record keeps the populated attributes.
+    def test_merge_keeps_flat_metric_columns(self, tmp_path):
+        # A base row and a Tier-2 patch (flat columns, any order) merge without
+        # wiping each other; keyed by (trajectory_id, constant).
         path = tmp_path / "s.jsonl"
         with open(path, "w") as f:
-            f.write(json.dumps({"trajectory_id": "t1", "direction": [1, 0, 0],
-                                "extended_metrics": {"gcd_slope": 14.5}}) + "\n")
-            f.write(json.dumps({"trajectory_id": "t1", "direction": [1, 0, 0],
-                                "extended_metrics": {}}) + "\n")
+            f.write(json.dumps({"trajectory_id": "t1", "constant": "log-2",
+                                "direction": [1, 0, 0], "gcd_slope": 14.5}) + "\n")
+            f.write(json.dumps({"trajectory_id": "t1", "constant": "log-2",
+                                "direction": [1, 0, 0]}) + "\n")
         merged = sds._merge_jsonl(path)
-        assert merged["t1"]["extended_metrics"]["gcd_slope"] == pytest.approx(14.5)
+        assert merged[("t1", "log-2")]["gcd_slope"] == pytest.approx(14.5)
 
     def test_load_shard_trajectories(self, tmp_path, const):
         shard = _fake_shard()

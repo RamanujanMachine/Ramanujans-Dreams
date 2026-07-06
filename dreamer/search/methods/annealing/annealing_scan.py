@@ -167,7 +167,7 @@ class SimulatedAnnealingSearch(SearchMethod):
         # shards/constants get independent streams.  Nondeterministic when
         # GLOBAL_SEED is None.  (Neighbour generation is deterministic; the seed
         # reservoir comes from the already-seeded sampler.)
-        self._rng_py = derive_py_random(shard_id, "annealing", str(constant))
+        self._rng_py = derive_py_random(shard_id, "annealing", constant.name)
 
         shard: Shard = self.space
         if geom is None:

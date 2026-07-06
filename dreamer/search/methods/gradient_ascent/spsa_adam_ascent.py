@@ -190,7 +190,7 @@ class HybridSPSASearch(SearchMethod):
         # Same GLOBAL_SEED + shard + constant => identical run; distinct shards/
         # constants get independent streams (nondeterministic when GLOBAL_SEED is
         # None).  Overrides the unseeded generator created in __init__.
-        self._rng = derive_rng(shard_id, "spsa_adam", str(constant))
+        self._rng = derive_rng(shard_id, "spsa_adam", constant.name)
 
         shard: Shard = self.space
         if geom is None:
