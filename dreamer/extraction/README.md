@@ -44,7 +44,11 @@ the analysis and search stages consume.
 - **`exact`** — `lrs` reverse-search enumeration + MILP witnesses (authoritative,
   but can be infeasible in high dimension).
 - **`heuristic`** — ray-shooting from the origin (+ an optional face-aligned
-  phase for thin/unbounded cells). Scales to high-dimensional CMFs.
+  phase for thin/unbounded cells). Scales to high-dimensional CMFs. Uses all
+  cores (`HEURISTIC_WORKERS`, pool starts after `HEURISTIC_PARALLEL_AFTER_SECONDS`)
+  and gives the **same shards for any worker count**; seeded from `GLOBAL_SEED`.
+  It is not exhaustive: thin cells far from the origin can be missed (more so in
+  high dimension — a lower `HEURISTIC_MISSING_MASS` finds more, at a time cost).
 - **`auto`** (default) — try `exact` within a time budget, fall back to
   `heuristic` on timeout.
 - **`legacy`** — brute-force lattice scan (fallback only).

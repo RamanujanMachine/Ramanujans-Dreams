@@ -1,3 +1,30 @@
+# Test Audit Report (2026-10-10, c)
+
+Bottom line: the heuristic ray shooter now uses all cores with a result that is
+**independent of the worker count** (per-batch seeded streams, ordered merge), a
+vectorised cell collection, and `GLOBAL_SEED` seeding. Full suite: `930 passed, 2 skipped`.
+
+## Touched Modules (Detailed Review)
+
+| Touched module | Changes made | Coverage evidence | Challenge rubric (/5) | Regression evidence |
+|---|---|---|---:|---|
+| `dreamer/extraction/v2/ray_extractor.py` | `_ShootRunner` (lazy pool after `parallel_after_seconds`, bounded window, ordered), per-unit streams `(seed, phase, index)`, `_summarize`/`_merge_summary` (vectorised, L1 cache), `_resolve_workers`, refine workers `0`=all cores. | `tests/test_heuristic_parallel.py` (16); 92%. | 5 | Old per-point loop copied verbatim as oracle (with/without symmetry, ties, sign-0 points); 1 vs N workers and mid-phase pool switch give identical maps; ray cap respected; coverage vs known exact count. |
+| `dreamer/extraction/v2/manager.py`, `dreamer/extraction/extractor.py` | Forward `heuristic_workers`, `heuristic_parallel_after_seconds`, `heuristic_seed` (= `derive_seed("heuristic-extraction", cmf_name)`). | `tests/test_extractor.py` routing test extended. | 4 | Test asserts the forwarded values. |
+| `dreamer/configs/extraction.py` | `HEURISTIC_WORKERS`, `HEURISTIC_PARALLEL_AFTER_SECONDS`; `HEURISTIC_REFINE_WORKERS` default 0 (all cores). | Covered via routing + resolve tests. | 4 | — |
+
+Benchmarks (18 cores, pFq z=±1, symmetry on, face-aligned): 9D default 18.1 s → 6.2 s; 9D strict
+(`1e-5`) 154 s → 41 s (before the merge speed-ups); coverage over 5 seeds old vs new: 5D 147.0±0.9 vs
+146.6±1.0, 7D 1253±12 vs 1264±5, 9D 11233±28 vs 11214±31 (within one σ).
+
+## Non-Touched Modules (Repository-Wide Summary)
+
+| Area | Status | Risk / follow-up |
+|---|---|---|
+| Heuristic coverage | Unchanged statistically. | Misses thin far-out cells (≥6.5 % in 7D, ≥7.5 % in 9D at the default stop) — parked for later touch-ups. |
+| Exact extractor | Unchanged. | Parallel path inactive with symmetry (serial canonical BFS). |
+
+---
+
 # Test Audit Report (2026-10-10, b)
 
 Bottom line: simulated annealing gained an asynchronous speculative look-ahead

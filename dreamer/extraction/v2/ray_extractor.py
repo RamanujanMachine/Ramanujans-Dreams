@@ -162,6 +162,101 @@ class _Budget:
         return False
 
 
+_PHASE_GENERIC = 0
+_PHASE_FACE = 1
+
+
+def _resolve_workers(workers: Optional[int]) -> int:
+    """``None``/``0`` → all cores (``system.TOTAL_CORES`` or ``os.cpu_count()``)."""
+    if workers:
+        return max(1, int(workers))
+    import os
+    from dreamer.configs.system import sys_config
+    return max(1, int(sys_config.TOTAL_CORES or os.cpu_count() or 1))
+
+# Per-worker shooting context, set once by the pool initializer.
+_SHOOT_STATE: dict = {}
+
+
+def _shoot_init(extractor, A, c, base_seed) -> None:
+    """Pool initializer: keep the extractor, arrangement and base seed."""
+    _SHOOT_STATE.update(ex=extractor, A=A, c=c, base=base_seed)
+
+
+def _shoot_task(args):
+    """Worker task: one generic batch summary or one face subset's witnesses."""
+    phase, index = args
+    st = _SHOOT_STATE
+    if phase == _PHASE_GENERIC:
+        return st["ex"]._generic_batch(st["A"], st["c"], st["base"], index)
+    return st["ex"]._face_subset(st["A"], st["c"], st["base"], index)
+
+
+class _ShootRunner:
+    """Produces per-index shooting units in index order -- in-process or pooled.
+
+    Units (generic batches, face subsets) are pure functions of
+    ``(base_seed, phase, index)``, so *who* computes a unit never changes its
+    value; results are always yielded in index order.  The pool is started
+    lazily, only once the extraction has run ``parallel_after_seconds``
+    in-process, and keeps at most ``2 * workers`` units in flight (a bounded
+    window, so an infinite phase never floods the task queue).  Units still in
+    flight when a phase stops are discarded.
+    """
+
+    def __init__(self, ex: "RayShootingExtractor", A: np.ndarray, c: np.ndarray, base_seed: int):
+        self.ex, self.A, self.c, self.base = ex, A, c, base_seed
+        self.workers = _resolve_workers(ex.workers)
+        self.t_start = time.time()
+        self.pool = None
+
+    def _maybe_start_pool(self) -> None:
+        if (
+            self.pool is None
+            and self.workers > 1
+            and time.time() - self.t_start >= self.ex.parallel_after_seconds
+        ):
+            ctx = get_context()
+            self.pool = ctx.Pool(
+                processes=self.workers,
+                initializer=_shoot_init,
+                initargs=(self.ex, self.A, self.c, self.base),
+            )
+
+    def _local(self, phase: int, index: int):
+        if phase == _PHASE_GENERIC:
+            return self.ex._generic_batch(self.A, self.c, self.base, index)
+        return self.ex._face_subset(self.A, self.c, self.base, index)
+
+    def ordered(self, phase: int, total: Optional[int]):
+        """Yield the units ``0, 1, 2, ...`` (``< total`` if given) of *phase* in order."""
+        from collections import deque
+
+        index = 0            # next unit to yield
+        submitted = 0        # next unit to submit to the pool
+        pending: deque = deque()
+        while total is None or index < total:
+            if self.pool is None:
+                self._maybe_start_pool()
+            if self.pool is None:
+                yield self._local(phase, index)
+            else:
+                if submitted < index:
+                    submitted = index
+                while len(pending) < 2 * self.workers and (total is None or submitted < total):
+                    pending.append(self.pool.apply_async(_shoot_task, ((phase, submitted),)))
+                    submitted += 1
+                yield pending.popleft().get()
+            index += 1
+
+    def close(self) -> None:
+        """Stop the pool (in-flight units are discarded)."""
+        if self.pool is not None:
+            self.pool.terminate()
+            self.pool.join()
+            self.pool = None
+
+
 class RayShootingExtractor(BaseExtractor):
     """
     Vectorised algebraic ray-shooting heuristic.
@@ -214,7 +309,17 @@ class RayShootingExtractor(BaseExtractor):
         ``0`` refines every cell.  Default ``50``.
     :param refine_workers: Process count for the refinement MILPs (they are
         independent per cell).  ``>1`` dispatches them across processes;
-        ``1`` (default) runs serially.
+        ``1`` (default) runs serially; ``None``/``0`` = all cores.
+    :param workers: Process count for the shooting phases.  ``None``/``0``
+        = all cores (``system.TOTAL_CORES`` or ``os.cpu_count()``); ``1``
+        (default) runs in-process.  Every ray batch / face subset draws from
+        its **own** seeded stream ``(seed, phase, index)`` and results are
+        merged strictly in index order, so the output is **identical for any
+        worker count**.
+    :param parallel_after_seconds: Start the worker pool only once the shoot
+        has run this long in-process (default ``3.0``) -- small arrangements
+        finish before paying the pool start-up.  Switching mid-phase does not
+        change the result (see ``workers``).
     :param symmetry: Optional :class:`SymmetryStrategy` (canonical
         teleportation).  When set, each witness is mapped into the
         fundamental domain (``symmetry.apply``) before its cell signature
@@ -248,6 +353,8 @@ class RayShootingExtractor(BaseExtractor):
         refine_l1_threshold: float = 50.0,
         refine_workers: int = 1,
         symmetry: Optional[SymmetryStrategy] = None,
+        workers: Optional[int] = 1,
+        parallel_after_seconds: float = 3.0,
     ):
         if num_rays is not None and num_rays <= 0:
             raise ValueError(f"num_rays must be positive or None, got {num_rays}")
@@ -267,6 +374,10 @@ class RayShootingExtractor(BaseExtractor):
             raise ValueError(f"face_subsets must be positive, got {face_subsets}")
         if face_offsets <= 0:
             raise ValueError(f"face_offsets must be positive, got {face_offsets}")
+        if parallel_after_seconds < 0:
+            raise ValueError(
+                f"parallel_after_seconds must be >= 0, got {parallel_after_seconds}"
+            )
         if refine_l1_threshold < 0:
             raise ValueError(
                 f"refine_l1_threshold must be >= 0, got {refine_l1_threshold}"
@@ -285,6 +396,8 @@ class RayShootingExtractor(BaseExtractor):
         self.refine_l1_threshold = refine_l1_threshold
         self.refine_workers = refine_workers
         self.symmetry = symmetry
+        self.workers = workers
+        self.parallel_after_seconds = parallel_after_seconds
 
     # ------------------------------------------------------------------
     # Public API
@@ -300,7 +413,12 @@ class RayShootingExtractor(BaseExtractor):
             return {}
 
         A, c = self.hyperplanes_to_matrix(hyperplanes)
-        rng = np.random.default_rng(self.seed)
+        # One base seed per extraction; every batch / face subset derives its
+        # own independent stream from (base, phase, index) -- see _batch_rng.
+        base_seed = (
+            int(self.seed) if self.seed is not None
+            else int(np.random.default_rng().integers(0, 2**63 - 1))
+        )
 
         # Each generation strategy is its own phase with a *fresh*
         # Good-Turing counter, so a plateau in generic shooting does not
@@ -313,10 +431,16 @@ class RayShootingExtractor(BaseExtractor):
             max_seconds=self.max_seconds,
             num_rays=self.num_rays,
         )
-
-        self._run_phase(self._generic_batches(A, c, rng), A, c, out, budget)
-        if self.face_aligned:
-            self._run_phase(self._face_aligned_batches(A, c, rng), A, c, out, budget)
+        runner = _ShootRunner(self, A, c, base_seed)
+        # Witness-L1 cache shared by both phases (``out`` is global across them).
+        # A local, not an attribute: the extractor is pickled into the workers.
+        l1_cache: Dict[SignTuple, int] = {}
+        try:
+            self._run_phase(self._generic_batches(A, c, runner), A, c, out, budget, l1_cache)
+            if self.face_aligned:
+                self._run_phase(self._face_aligned_batches(A, c, runner), A, c, out, budget, l1_cache)
+        finally:
+            runner.close()
 
         if budget.cap_hit:
             Logger(
@@ -335,16 +459,21 @@ class RayShootingExtractor(BaseExtractor):
 
     def _run_phase(
         self,
-        batches: Iterable[np.ndarray],
+        batches: Iterable[Tuple[int, Tuple[np.ndarray, np.ndarray, np.ndarray]]],
         A: np.ndarray,
         c: np.ndarray,
         out: ShardMapping,
         budget: _Budget,
+        l1_cache: Optional[Dict[SignTuple, int]] = None,
     ) -> None:
         """
-        Consume witness batches from ``batches`` until this phase's missing
+        Consume batch summaries from ``batches`` until this phase's missing
         mass plateaus or the shared ``budget`` (time / ray cap / deadline)
         is hit.  Mutates ``out`` in place (global, min-L1 witness per cell).
+
+        Each item is ``(n_samples, summary)`` -- the batch's sample count
+        (for the ray budget) and its :meth:`_summarize` result, delivered in
+        batch order.
 
         The Good-Turing state (``counts``, ``stats``, ``low_streak``) is
         local to this call -- that is what makes stopping *per-strategy*:
@@ -353,11 +482,11 @@ class RayShootingExtractor(BaseExtractor):
         counts: Dict[SignTuple, int] = {}
         stats = _GTStats()
         low_streak = 0
-        for V in batches:
+        for n_samples, summary in batches:
             if budget.exhausted():
                 break
-            budget.shot += int(V.shape[0])
-            self._collect_unique_cells_into(V, A, c, out, counts, stats)
+            budget.shot += int(n_samples)
+            self._merge_summary(summary, out, counts, stats, l1_cache)
             if stats.n <= 0:
                 continue
             # Good-Turing missing mass: the fraction of samples that landed
@@ -376,64 +505,73 @@ class RayShootingExtractor(BaseExtractor):
                     low_streak = 0
 
     # ------------------------------------------------------------------
-    # Generation phases -- generators yielding (b, D) witness batches
+    # Generation phases -- per-index seeded units, consumed in order
     # ------------------------------------------------------------------
 
-    def _generic_batches(
-        self, A: np.ndarray, c: np.ndarray, rng: np.random.Generator
-    ):
-        """Infinite generator of generic origin-shot witness batches.
+    @staticmethod
+    def _batch_rng(base_seed: int, phase: int, index: int) -> np.random.Generator:
+        """Independent, reproducible stream for one batch / face subset."""
+        return np.random.default_rng(np.random.SeedSequence([base_seed, phase, index]))
 
-        Lazily yields one ``batch_size``-worth of witnesses per iteration;
-        :meth:`_run_phase` stops pulling once the phase saturates or the
-        budget is hit, so the generator is simply abandoned (no infinite
-        loop runs).
+    def _generic_batch(self, A: np.ndarray, c: np.ndarray, base_seed: int, index: int):
+        """One generic origin-shot batch: ``(n_rays, summary)``."""
+        rng = self._batch_rng(base_seed, _PHASE_GENERIC, index)
+        V = self._sample_rays(rng, A.shape[1], self.batch_size)
+        return int(V.shape[0]), self._summarize(self._shoot(V, A, c), A, c)
+
+    def _face_subset(self, A: np.ndarray, c: np.ndarray, base_seed: int, index: int) -> np.ndarray:
+        """Witnesses of one face-aligned subset (``(m, D)`` int64, in shot order).
+
+        Draws a random hyperplane subset ``S`` (size in ``[1, D-1]``) and, for
+        every integer nullspace direction ``v`` of ``A[S]``, shoots from
+        ``face_offsets`` random integer offsets ``p`` along ``v``.
         """
-        d = A.shape[1]
-        while True:
-            V = self._sample_rays(rng, d, self.batch_size)
-            if V.shape[0] == 0:
-                continue
-            yield self._shoot(V, A, c)
-
-    def _face_aligned_batches(
-        self, A: np.ndarray, c: np.ndarray, rng: np.random.Generator
-    ):
-        """
-        Generator of face-aligned witness batches.
-
-        For each of ``face_subsets`` random hyperplane subsets ``S`` (size
-        in ``[1, D-1]``), shoot from ``face_offsets`` random integer
-        offsets ``p`` along each integer nullspace direction ``v`` of
-        ``A[S]``.  Hyperplanes in ``S`` are parallel to ``v`` (sign fixed
-        by ``p``); the rest fix their sign by ``sign(A_i . v)`` -- so
-        sweeping ``p`` enumerates the slab cells sharing recession
-        direction ``v``.
-
-        Buffers witnesses and yields a ``(b, D)`` array each time it fills
-        a batch (plus a final partial batch).  Terminates naturally when
-        the subsets are exhausted.
-        """
+        rng = self._batch_rng(base_seed, _PHASE_FACE, index)
         N, D = A.shape
-        buf: List[np.ndarray] = []
-        for _ in range(self.face_subsets):
-            k = int(rng.integers(1, D)) if D > 1 else 1
-            S = rng.choice(N, size=min(k, N), replace=False)
-            for v in integer_nullspace(A[S]):
-                if not np.any(v):
-                    continue
-                for _ in range(self.face_offsets):
-                    p = rng.integers(
-                        -self.max_coord, self.max_coord + 1, size=D, dtype=np.int64
-                    )
-                    w = _shoot_from(p, v, A, c)
-                    if w is not None:
-                        buf.append(w)
-                        if len(buf) >= self.batch_size:
-                            yield np.array(buf, dtype=np.int64)
-                            buf = []
-        if buf:
-            yield np.array(buf, dtype=np.int64)
+        k = int(rng.integers(1, D)) if D > 1 else 1
+        S = rng.choice(N, size=min(k, N), replace=False)
+        found: List[np.ndarray] = []
+        for v in integer_nullspace(A[S]):
+            if not np.any(v):
+                continue
+            for _ in range(self.face_offsets):
+                p = rng.integers(
+                    -self.max_coord, self.max_coord + 1, size=D, dtype=np.int64
+                )
+                w = _shoot_from(p, v, A, c)
+                if w is not None:
+                    found.append(w)
+        return np.array(found, dtype=np.int64).reshape(-1, D)
+
+    def _generic_batches(self, A: np.ndarray, c: np.ndarray, runner: "_ShootRunner"):
+        """Infinite stream of generic batch summaries, in batch-index order.
+
+        :meth:`_run_phase` stops pulling once the phase saturates or the
+        budget is hit, so the stream is simply abandoned.
+        """
+        yield from runner.ordered(_PHASE_GENERIC, total=None)
+
+    def _face_aligned_batches(self, A: np.ndarray, c: np.ndarray, runner: "_ShootRunner"):
+        """
+        Stream of face-aligned batch summaries.
+
+        Shoots ``face_subsets`` subsets (each its own seeded stream, see
+        :meth:`_face_subset`), concatenates their witnesses in subset order
+        and cuts them into ``batch_size`` batches (plus a final partial one).
+        For each subset ``S``, hyperplanes in ``S`` are parallel to ``v``
+        (sign fixed by ``p``); the rest fix their sign by ``sign(A_i . v)``
+        -- so sweeping ``p`` enumerates the slab cells sharing recession
+        direction ``v``.  Terminates when the subsets are exhausted.
+        """
+        D = A.shape[1]
+        buf = np.zeros((0, D), dtype=np.int64)
+        for W in runner.ordered(_PHASE_FACE, total=self.face_subsets):
+            buf = np.concatenate([buf, W]) if W.size else buf
+            while buf.shape[0] >= self.batch_size:
+                batch, buf = buf[: self.batch_size], buf[self.batch_size:]
+                yield int(batch.shape[0]), self._summarize(batch, A, c)
+        if buf.shape[0]:
+            yield int(buf.shape[0]), self._summarize(buf, A, c)
 
     def _refine_witnesses(
         self,
@@ -465,11 +603,8 @@ class RayShootingExtractor(BaseExtractor):
         if not to_refine:
             return
 
-        if (
-            self.refine_workers
-            and self.refine_workers > 1
-            and len(to_refine) >= self._PARALLEL_MIN
-        ):
+        refine_workers = _resolve_workers(self.refine_workers)
+        if refine_workers > 1 and len(to_refine) >= self._PARALLEL_MIN:
             self._refine_parallel(A, c, out, to_refine)
             return
 
@@ -489,9 +624,10 @@ class RayShootingExtractor(BaseExtractor):
     ) -> None:
         """Refine ``keys`` across a process pool (each MILP is independent)."""
         tasks = [(A, c, key) for key in keys]
-        chunksize = max(1, len(tasks) // (self.refine_workers * 4))
+        refine_workers = _resolve_workers(self.refine_workers)
+        chunksize = max(1, len(tasks) // (refine_workers * 4))
         ctx = get_context()
-        with ctx.Pool(processes=min(self.refine_workers, len(tasks))) as pool:
+        with ctx.Pool(processes=min(refine_workers, len(tasks))) as pool:
             for key, pt in pool.imap_unordered(
                 _refine_worker, tasks, chunksize=chunksize
             ):
@@ -613,8 +749,32 @@ class RayShootingExtractor(BaseExtractor):
         landing creates a singleton (``f1 += 1``); its second removes it
         (``f1 -= 1``); ``n`` counts every landed sample.
         """
+        self._merge_summary(self._summarize(points, A, c), out, counts, stats)
+
+    def _summarize(
+        self, points: np.ndarray, A: np.ndarray, c: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Vectorised per-batch summary of witness *points*.
+
+        Applies the symmetry (canonical teleportation), drops points lying on a
+        hyperplane, and groups the rest by cell.  Per cell it keeps the witness
+        nearest the origin (smallest L1), the **first** such point in batch order
+        on ties, and the number of points that landed there.  Merging summaries
+        in batch order with :meth:`_merge_summary` is therefore exactly
+        equivalent to feeding every point one by one in order.
+
+        :return: ``(signs, witnesses, counts)`` -- ``(k, N)`` int8 sign rows,
+            ``(k, D)`` int64 witnesses and ``(k,)`` int64 hit counts, one row
+            per distinct cell, in order of each cell's first appearance.
+        """
+        D = A.shape[1]
+        empty = (
+            np.zeros((0, A.shape[0]), dtype=np.int8),
+            np.zeros((0, D), dtype=np.int64),
+            np.zeros(0, dtype=np.int64),
+        )
         if points.shape[0] == 0:
-            return
+            return empty
         # Canonical teleportation: map every witness into the fundamental
         # domain so symmetric witnesses collapse to one canonical cell.
         # ``apply`` preserves integer coordinates (sorting integers), so
@@ -623,22 +783,74 @@ class RayShootingExtractor(BaseExtractor):
         if self.symmetry is not None:
             points = self.symmetry.apply(points).astype(np.int64)
         # (R, N) sign matrix -- +1 above, -1 below, 0 on the hyperplane.
-        vals = points @ A.T + c
-        signs = np.sign(vals).astype(np.int64)
+        signs = np.sign(points @ A.T + c).astype(np.int8)
+        inside = ~(signs == 0).any(axis=1)
+        if not inside.any():
+            return empty
+        points = points[inside].astype(np.int64)
+        signs = signs[inside]
+        _, first_idx, inverse, counts = np.unique(
+            signs, axis=0, return_index=True, return_inverse=True, return_counts=True
+        )
+        inverse = inverse.reshape(-1)
+        l1 = np.abs(points).sum(axis=1)
+        # Per cell: smallest L1, then earliest position (lexsort: last key primary).
+        order = np.lexsort((np.arange(points.shape[0]), l1, inverse))
+        group_start = np.r_[0, np.flatnonzero(np.diff(inverse[order])) + 1]
+        best = order[group_start]                 # best point index per cell id
+        # Emit cells in order of first appearance (deterministic, batch order).
+        by_first = np.argsort(first_idx, kind="stable")
+        return signs[best[by_first]], points[best[by_first]], counts[by_first].astype(np.int64)
 
-        for sign_row, point in zip(signs, points):
-            if np.any(sign_row == 0):
-                continue
-            key: SignTuple = tuple(sign_row.tolist())
-            pt = point.astype(np.int64)
+    @staticmethod
+    def _merge_summary(
+        summary: Tuple[np.ndarray, np.ndarray, np.ndarray],
+        out: ShardMapping,
+        counts: Optional[Dict[SignTuple, int]] = None,
+        stats: Optional[_GTStats] = None,
+        l1_cache: Optional[Dict[SignTuple, int]] = None,
+    ) -> None:
+        """Fold a :meth:`_summarize` result into ``out`` (+ Good-Turing state).
+
+        ``l1_cache`` (optional, kept in sync with ``out``) stores each cell's
+        witness L1 norm so it is not recomputed for every repeated hit.
+
+        A cell's witness is replaced only by a strictly smaller-L1 one (so the
+        earliest witness wins ties).  With ``counts``/``stats``, a cell going
+        from 0 to exactly 1 landing becomes a singleton (``f1 += 1``) and one
+        leaving 1 stops being one (``f1 -= 1``); ``n`` counts every landing.
+        Because ``f1`` depends only on the final per-cell counts, folding a
+        batch's counts at once equals folding its points one by one.
+        """
+        signs, witnesses, hits = summary
+        if signs.shape[0] == 0:
+            return
+        # Bulk conversions (one call each) instead of per-cell numpy reductions:
+        # this loop runs in the main process for every batch.
+        keys = [tuple(row) for row in signs.tolist()]
+        l1s = np.abs(witnesses).sum(axis=1).tolist()
+        track = counts is not None and stats is not None
+        for i, (key, l1, m) in enumerate(zip(keys, l1s, hits.tolist())):
             existing = out.get(key)
-            if existing is None or np.abs(pt).sum() < np.abs(existing).sum():
-                out[key] = pt
-            if counts is not None and stats is not None:
+            if existing is None:
+                better = True
+            elif l1_cache is not None:
+                cur = l1_cache.get(key)
+                if cur is None:
+                    cur = l1_cache[key] = int(np.abs(existing).sum())
+                better = l1 < cur
+            else:
+                better = l1 < int(np.abs(existing).sum())
+            if better:
+                out[key] = witnesses[i]
+                if l1_cache is not None:
+                    l1_cache[key] = l1
+            if track:
                 old = counts.get(key, 0)
-                if old == 0:
-                    stats.f1 += 1      # 0 -> 1 : new singleton
-                elif old == 1:
-                    stats.f1 -= 1      # 1 -> 2 : no longer a singleton
-                counts[key] = old + 1
-                stats.n += 1
+                new = old + m
+                counts[key] = new
+                if old == 1:
+                    stats.f1 -= 1
+                if new == 1:
+                    stats.f1 += 1
+                stats.n += m

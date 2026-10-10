@@ -105,6 +105,8 @@ with its direction.
 | `LOAD_SHARD_CACHE` | Reuse a previously-extracted `…__shards.jsonl` instead of re-extracting. |
 | `IGNORE_DUPLICATE_SEARCHABLES` | Drop symmetry-equivalent shards. |
 | `TRAJECTORY_CONSTRAINTS` | Optional `{var: int}` direction constraint, e.g. `{'x0': 12, 'y1': 28}` — pins the scale-invariant **ratio + sign** of every sampled trajectory and **drops shards** whose cone admits no such direction. Honoured by all samplers + search (see [extraction README](../extraction/README.md)). `None` = unconstrained. |
+| `HEURISTIC_WORKERS` / `HEURISTIC_PARALLEL_AFTER_SECONDS` | Ray-shooting processes (`0` = all cores) and the in-process grace period before the pool starts. Results do not depend on them. |
+| `HEURISTIC_REFINE_WORKERS` | Processes for the optional MILP witness refinement (`0` = all cores). |
 | `HEURISTIC_*`, `EXACT_*` | Fine-tuning of the ray-shooter / reverse-search (see `display()`). |
 
 ## `analysis`

@@ -5,12 +5,12 @@ Last full-suite run: **2026-10-10** (`rama` env, Python 3.12.15, macOS, 18 cores
 | Metric | Value |
 |---|---|
 | Command | `python -m pytest tests -q --ignore=tests/pocs` |
-| Collected | 916 |
-| Passed | 914 |
+| Collected | 932 |
+| Passed | 930 |
 | Failed | 0 |
 | Skipped | 2 |
 | Warnings | 2 |
-| Line+branch coverage (`--cov=dreamer --cov-branch`) | 69% (10517 statements, 3698 branches) |
+| Line+branch coverage (`--cov=dreamer --cov-branch`) | 70% (10625 statements, 3728 branches) |
 
 ## Failing tests
 

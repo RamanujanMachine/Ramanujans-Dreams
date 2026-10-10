@@ -60,6 +60,11 @@ class ExtractionManager:
         -- only witnesses with L1 norm above this are refined.
     :param heuristic_refine_workers: Forwarded as ``refine_workers`` --
         process count for the refinement MILPs.
+    :param heuristic_workers: Forwarded as ``workers`` -- process count for
+        the ray-shooting phases (result is independent of it).
+    :param heuristic_parallel_after_seconds: Forwarded as
+        ``parallel_after_seconds``.
+    :param heuristic_seed: Forwarded as ``seed`` (``None`` = nondeterministic).
     :param heuristic_num_rays: Forwarded as ``num_rays`` (optional sample
         ceiling; ``None`` = unlimited).
     :param heuristic_max_seconds: Forwarded as ``max_seconds`` (wall-clock
@@ -94,6 +99,9 @@ class ExtractionManager:
         heuristic_face_aligned: bool = False,
         heuristic_face_subsets: int = 200,
         heuristic_face_offsets: int = 50,
+        heuristic_workers: Optional[int] = 1,
+        heuristic_parallel_after_seconds: float = 3.0,
+        heuristic_seed: Optional[int] = 0,
         symmetry: Optional[SymmetryStrategy] = None,
     ):
         if strategy not in ("auto", "exact", "heuristic"):
@@ -113,6 +121,9 @@ class ExtractionManager:
         self._heuristic_face_aligned = heuristic_face_aligned
         self._heuristic_face_subsets = heuristic_face_subsets
         self._heuristic_face_offsets = heuristic_face_offsets
+        self._heuristic_workers = heuristic_workers
+        self._heuristic_parallel_after = heuristic_parallel_after_seconds
+        self._heuristic_seed = heuristic_seed
         self._symmetry = symmetry
         self.timeout_seconds = timeout_seconds
         self._exact = exact
@@ -199,5 +210,8 @@ class ExtractionManager:
                 refine_l1_threshold=self._heuristic_refine_threshold,
                 refine_workers=self._heuristic_refine_workers,
                 symmetry=self._symmetry,
+                workers=self._heuristic_workers,
+                parallel_after_seconds=self._heuristic_parallel_after,
+                seed=self._heuristic_seed,
             )
         return self._heuristic
