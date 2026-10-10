@@ -76,3 +76,21 @@ def enforce_test_timeout(request):
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, old_handler)
+
+
+@pytest.fixture(autouse=True)
+def serial_stage_pools():
+    """Run the per-stage trajectory pools (analysis, hedgehog search, Tier-3)
+    serially in-process by default.
+
+    Unit tests monkeypatch module/class attributes that a spawned worker would
+    not see, and spawning a full-machine pool per test is slow.  Tests that
+    exercise the real multi-process path override ``STAGE_POOL_WORKERS``
+    explicitly (see ``tests/test_stage_pool.py``).
+    """
+    from dreamer.configs.system import sys_config
+
+    original = sys_config.STAGE_POOL_WORKERS
+    sys_config.STAGE_POOL_WORKERS = 1
+    yield
+    sys_config.STAGE_POOL_WORKERS = original

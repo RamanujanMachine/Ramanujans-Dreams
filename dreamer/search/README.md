@@ -26,9 +26,11 @@ There are **two families** of searcher, wired interchangeably via
 Re-samples many trajectory directions in the shard (same samplers as analysis,
 but with the search config), computes Tier-1 for each, and computes any
 configured Tier-2 attributes asynchronously in background workers. It re-uses
-records already on disk from analysis, so nothing is walked twice. With an empty
-`config.search.TIER2_ATTRIBUTES` it does no extra work beyond Tier-1 and spawns
-no subprocesses.
+records already on disk from analysis, so nothing is walked twice. The Tier-1
+walks of each shard run on one **stage-wide process pool** created once for all
+shards (sized by the search core budget, capped by
+`config.system.STAGE_POOL_WORKERS`); with an empty
+`config.search.TIER2_ATTRIBUTES` no Tier-2 worker or writer process is spawned.
 
 ### 2. The direction-space optimisers
 

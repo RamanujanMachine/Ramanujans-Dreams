@@ -1,4 +1,56 @@
-# Test Audit Report (2026-04-24)
+# Test Audit Report (2026-10-10)
+
+Bottom line: the analyzer, `SearcherModV1` (Tier-1) and the Tier-3 post-process now
+run their per-trajectory work on one stage-wide process pool
+(`dreamer/utils/stage_pool.py`) with the main process as the single JSONL writer.
+Serial and 2-process runs write byte-identical files. Full suite green:
+`887 passed, 2 skipped, 2 warnings` (baseline before the change: `857 passed, 2 skipped`).
+
+## Touched Modules (Detailed Review)
+
+| Touched module | Changes made | Coverage evidence | Challenge rubric (/5) | Regression evidence |
+|---|---|---|---:|---|
+| `dreamer/utils/stage_pool.py` (new) | `StagePool` (persistent per-stage pool, shards via initializer, shared (p,q) logs, ordered `imap`), `BufferedJsonlWriter`, `run_tier1_task`, budget helpers. | `tests/test_stage_pool.py` (30 tests); 90% line+branch. Uncovered: the worker-side initializer body (runs only in spawned processes, exercised by the 2-process tests but not traced by coverage). | 5 | Ordered-delivery, context-in-worker, error-isolation, terminate-on-exception and batching tests fail on any contract drift. |
+| `dreamer/analysis/analyzers/serial_scan/analyzer_mod.py` | Split into plan → compute (stage pool) → finish; main-process buffered writer. | Existing analyzer tests (11) + equivalence, cache-rerun and failed-walk tests; 92%. | 5 | Serial vs 2-process: identical rows, file order and priorities; fully cached rerun must not create a pool. |
+| `dreamer/search/searchers/hedgehog_scan_mod.py` | One stage-wide Tier-1 pool for all shards; producer plans then dispatches; matrix shipped only when Tier-2 is active. | Existing producer tests + parallel equivalence + failed-walk test; 94%. | 4 | Serial vs 2-process search files byte-identical. |
+| `dreamer/post_process/tier3_post_process_mod.py` | Tier-3 rows planned in main, computed on a stage pool (CMF lookup sent once), patches written by main. | Existing Tier-3 tests + parallel equivalence; 84%. | 4 | Serial vs 2-process patches byte-identical. |
+| `dreamer/configs/system.py` | New `STAGE_POOL_WORKERS`, `STAGE_POOL_CHUNKSIZE`. | 100%; cap resolution parametrised over None/0/negative/below/above budget. | 4 | `TestBudget` fails on cap-semantics drift. |
+| `tests/conftest.py` | Autouse `serial_stage_pools` fixture (stage pools serial by default in unit tests). | Whole suite. | — | Keeps monkeypatch-based tests valid; real multi-process paths are tested explicitly. |
+
+Challenge rubric breakdown (this task):
+- Failure-path coverage: yes (task errors in serial/parallel streams, failing walks in analyzer + search, exception inside the pool context).
+- Boundary stress: yes (empty task list, no writes, cap edge values, single worker).
+- Known-answer / invariant: yes (`run_tier1_task` rows equal the direct serial walk; serial ≡ parallel files).
+- Stochastic robustness: n/a for the pool (sampling stays in the main process, seeded as before).
+- Regression trap: yes (byte-identical equivalence tests for all three stages).
+
+## Non-Touched Modules (Repository-Wide Summary)
+
+| Area | Status from latest run | Risk / follow-up |
+|---|---|---|
+| Optimiser searchers (GA, SA, annealing, gradient, SPSA) | Green; unchanged. | Still limited by per-step batch size and per-shard pools — next iteration. |
+| Tier-2 queue (`worker_pool`, `compute_tier2_for_item`) | Green; unchanged. | Now the search-stage bottleneck (fixed `NUM_BACKGROUND_WORKERS`); worker rebuilds a matrix-only handler at depth 1500. Parked for design discussion. |
+| `examples/search.py`, `examples/analysis.py` | **Fail to import** (pre-existing: use the removed `build_trajectory_dto`). | Fix templates to `build_trajectory_dtos`. |
+| Repository total | 68% line+branch coverage (10426 stmts). | Coverage debt unchanged outside touched modules. |
+
+## Executed Test Evidence
+
+```bash
+python -m pytest tests -q --ignore=tests/pocs                     # 887 passed, 2 skipped
+python -m pytest tests -q --ignore=tests/pocs --cov=dreamer --cov-branch --cov-report=term-missing
+python -m pytest tests/test_stage_pool.py -q                      # 30 passed
+```
+
+Performance evidence (18-core Mac, pFq(2,1) log 2, 12 shards, 300 analysis / 600 search
+trajectories per shard, A/B against commit `dfed794`): analysis 23 s @ 1.0 core → 6 s @
+10.6 cores; Tier-3 13 s @ 3.6 → 4 s @ 12.9; search 12 s → 13 s (Tier-2-bound; 3 s @ 9.6
+cores with Tier-2 off); total 52 s → 26 s.
+
+---
+
+# Previous report
+
+## Test Audit Report (2026-04-24)
 
 Bottom line: DataManager now carries its searchable space context, a new `JSONable` contract was introduced, and Shard/DataManager JSON export-import paths were implemented and validated; full suite and policy coverage runs are green (`173 passed`, `1 warning`).
 

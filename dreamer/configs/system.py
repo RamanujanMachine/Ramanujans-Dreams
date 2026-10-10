@@ -112,6 +112,28 @@ class SystemConfig(Configurable):
         default=4,
         metadata={"description": "Number of background worker processes that compute Tier-2 trajectory attributes during search. When Tier-2 is active these (plus 1 writer/sink) are the cores reserved from TOTAL_CORES."},
     )
+    STAGE_POOL_WORKERS: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Worker cap for the per-stage trajectory pools (analysis, hedgehog "
+                "search, Tier-3 post-process). None/0 = use the full core budget; a "
+                "positive value caps at min(value, budget). A resolved count <= 1 "
+                "runs every task serially in the main process (no subprocess)."
+            )
+        },
+    )
+    STAGE_POOL_CHUNKSIZE: int = field(
+        default=1,
+        metadata={
+            "description": (
+                "Tasks handed to a stage-pool worker at a time (analysis, hedgehog "
+                "search, Tier-3 post-process). 1 gives full dynamic load balancing: "
+                "an idle worker pulls the next trajectory immediately. Raise it only "
+                "when single tasks are so cheap that dispatch overhead dominates."
+            )
+        },
+    )
     WRITER_BATCH_SIZE: int = field(
         default=50,
         metadata={

@@ -11,7 +11,10 @@ handler-based pipeline:
            — cheap; no symbolic work, no trajectory walk.
         2. If the id is already in the JSONL and every configured Tier-2
            attribute is present, skip immediately.
-        3. Otherwise build the handler and push per-constant Tier-1 data.
+        3. Otherwise queue a Tier-1 task (handler build + walk + DTOs).
+      The queued tasks run on one **stage-wide** process pool
+      (:class:`~dreamer.utils.stage_pool.StagePool`, created once for all
+      shards); results come back in task order and are pushed to the sink.
 
   push(item) — provided by the generic ``worker_pool`` context manager:
     * ``TIER2_ATTRIBUTES`` empty (default) → ``push`` is a synchronous
@@ -42,7 +45,6 @@ from dreamer.extraction.shard import Shard
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs import config
 from dreamer.configs.system import sys_config
-from dreamer.configs.logging import logging_config
 from dreamer.utils.logger import Logger
 from dreamer.utils.storage.attribute_registry import attribute_name
 from dreamer.utils.storage.trajectory_attributes import (
@@ -57,9 +59,11 @@ from dreamer.utils.storage.trajectory_attributes import (
 from dreamer.utils.multi_processing import (
     compute_tier2_for_item,
     load_seen_trajectories_for_search,
+    search_worker_budget,
     worker_pool,
     write_jsonl_line,
 )
+from dreamer.utils.stage_pool import StagePool, TaskError, Tier1Task, run_tier1_task
 
 search_config = config.search
 
@@ -109,13 +113,21 @@ class SearcherModV1(SearcherModScheme):
                 shard_by_id[shard_id] = shard
                 shard_identified[shard_id].add(const)
 
-        for shard_id, shard in SmartTQDM(
-            shard_by_id.items(),
-            desc='Searching in shards: ',
-            **sys_config.TQDM_CONFIG,
-        ):
-            identified_consts = list(shard_identified[shard_id])
-            self._run_shard(shard, identified_consts, num_workers, config_overrides)
+        # One persistent Tier-1 pool for the whole stage (shards handed to the
+        # workers once).  Sized by the search budget, which reserves cores for the
+        # Tier-2 queue + writer when Tier-2 is active.
+        shard_idx = {sid: i for i, sid in enumerate(shard_by_id)}
+        with StagePool(list(shard_by_id.values()), workers=search_worker_budget()) as pool:
+            for shard_id, shard in SmartTQDM(
+                shard_by_id.items(),
+                desc='Searching in shards: ',
+                **sys_config.TQDM_CONFIG,
+            ):
+                identified_consts = list(shard_identified[shard_id])
+                self._run_shard(
+                    shard, identified_consts, num_workers, config_overrides,
+                    pool=pool, shard_idx=shard_idx[shard_id],
+                )
 
     # ------------------------------------------------------------------
     # Per-shard pipeline
@@ -127,8 +139,16 @@ class SearcherModV1(SearcherModScheme):
         identified_consts: List[Constant],
         num_workers: int,
         config_overrides: dict,
+        pool: Optional[StagePool] = None,
+        shard_idx: int = 0,
     ) -> None:
-        """Run the search for a single shard using only *identified_consts*."""
+        """Run the search for a single shard using only *identified_consts*.
+
+        :param num_workers: Tier-2 background workers (when Tier-2 is active).
+        :param config_overrides: Config propagated to the Tier-2 workers.
+        :param pool: The stage-wide Tier-1 pool (``None`` → serial in-process).
+        :param shard_idx: This shard's index in *pool*'s shard list.
+        """
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
         Logger(
             f"Starting deep search on shard {shard_id} (cmf={cmf_id})",
@@ -155,6 +175,8 @@ class SearcherModV1(SearcherModScheme):
                 shard_encoding_str=shard_encoding_str,
                 sink=push,
                 seen_trajectories=seen_trajectories,
+                pool=pool,
+                shard_idx=shard_idx,
             )
 
         Logger(
@@ -175,8 +197,15 @@ class SearcherModV1(SearcherModScheme):
         shard_encoding_str: str,
         sink: Callable,
         seen_trajectories: dict,
+        pool: Optional[StagePool] = None,
+        shard_idx: int = 0,
     ) -> None:
         """Iterate over trajectory pairs and hand work to *sink*.
+
+        Classification (cache lookup) runs in the main process; the handler
+        builds / walks of every trajectory that needs work run on *pool* (the
+        stage-wide :class:`StagePool`, in which this shard sits at *shard_idx*).
+        With ``pool=None`` a serial in-process pool over just *shard* is used.
 
         Three cases per trajectory:
 
@@ -202,12 +231,11 @@ class SearcherModV1(SearcherModScheme):
 
         desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
 
-        for traj, start in SmartTQDM(
-            pairs,
-            desc=f"  Shard {shard_id[:8]}… trajectories",
-            leave=False,
-            **sys_config.TQDM_CONFIG,
-        ):
+        # Plan (main process): classify every sampled trajectory against the
+        # cache and queue one Tier-1 task per trajectory that needs work.
+        planned: List[tuple] = []
+        tasks: List[Tier1Task] = []
+        for traj, start in pairs:
             start_t = _position_to_tuple(start)
             dir_t = _position_to_tuple(traj)
             trajectory_id = derive_trajectory_id(
@@ -231,45 +259,85 @@ class SearcherModV1(SearcherModScheme):
             if not new_consts and not partial_consts:
                 continue  # every constant fully covered
 
-            # Build the (shared) handler once for whichever constants need work.
-            try:
-                with Logger.watchdog(
-                    f"Tier-1 trajectory compute (shard {shard_id})",
-                    logging_config.WATCHDOG_TRAJECTORY_SECONDS,
-                    detail=lambda: f"traj_id={trajectory_id} start={start_t} direction={dir_t}",
-                ):
-                    handler = TrajectoryAttributesHandler.from_cmf(
-                        shard.cmf, traj, start, constant=None, searchable=shard,
-                    )
-                    dtos = build_trajectory_dtos(
-                        handler,
-                        cmf_id=cmf_id,
-                        shard_id=shard_id,
-                        cmf_name=shard.cmf_name,
-                        shard_encoding_str=shard_encoding_str,
-                        start=start,
-                        direction=traj,
-                        constants=new_consts,
-                    ) if new_consts else []
-            except Exception as e:
-                Logger(
-                    f"Handler error — shard {shard_id}, traj={traj}, start={start}: {e}",
-                    Logger.Levels.warning,
-                ).log()
-                continue
+            planned.append((trajectory_id, dir_t, start_t, new_consts, partial_consts))
+            tasks.append(Tier1Task(
+                key=trajectory_id, shard_idx=shard_idx, trajectory=traj, start=start,
+                constants=tuple(new_consts), cmf_id=cmf_id, shard_id=shard_id,
+                shard_encoding_str=shard_encoding_str,
+            ))
 
-            # New constants — emit the full flat DTO (Tier-2 filled by the worker).
-            for c, dto in zip(new_consts, dtos):
-                sink((handler.trajectory_matrix, c.value_sympy, dto))
-                seen_trajectories.setdefault(trajectory_id, {})[c.name] = (
-                    json.loads(dto.to_json_line())
-                )
-            # Partial constants — emit a patch; the worker fills missing Tier-2.
-            # Carry the direction / start so the worker can compute
-            # direction-normalised attributes (e.g. convergence_rate).
-            for c in partial_consts:
-                patch = {
-                    "trajectory_id": trajectory_id, "constant": c.name,
-                    "direction": dir_t, "start_point": start_t,
-                }
-                sink((handler.trajectory_matrix, c.value_sympy, patch))
+        if not tasks:
+            return
+
+        # Compute: the shared handler (walk + new-constant DTOs) for each queued
+        # trajectory runs on the stage pool; results arrive in task order and the
+        # main process forwards them to the sink.  The symbolic matrix is shipped
+        # back only when the Tier-2 queue will use it.
+        task_fn = _search_walk_task_with_matrix if desired else _search_walk_task
+        own_pool = None
+        if pool is None:
+            own_pool = StagePool([shard], workers=1)
+            pool = own_pool.__enter__()
+        try:
+            results = pool.imap(task_fn, tasks)
+            for (trajectory_id, dir_t, start_t, new_consts, partial_consts), task, res in zip(
+                planned,
+                tasks,
+                SmartTQDM(
+                    results,
+                    total=len(tasks),
+                    desc=f"  Shard {shard_id[:8]}… trajectories",
+                    leave=False,
+                    **sys_config.TQDM_CONFIG,
+                ),
+            ):
+                if isinstance(res, TaskError):
+                    Logger(
+                        f"Handler error — shard {shard_id}, traj={task.trajectory}, "
+                        f"start={task.start}: {res.message}",
+                        Logger.Levels.warning,
+                    ).log()
+                    continue
+                matrix = res.matrix
+
+                # New constants — emit the full flat DTO (Tier-2 filled by the worker).
+                for c, dto in zip(new_consts, res.dtos):
+                    sink((matrix, c.value_sympy, dto))
+                    seen_trajectories.setdefault(trajectory_id, {})[c.name] = (
+                        json.loads(dto.to_json_line())
+                    )
+                # Partial constants — emit a patch; the worker fills missing Tier-2.
+                # Carry the direction / start so the worker can compute
+                # direction-normalised attributes (e.g. convergence_rate).
+                for c in partial_consts:
+                    patch = {
+                        "trajectory_id": trajectory_id, "constant": c.name,
+                        "direction": dir_t, "start_point": start_t,
+                    }
+                    sink((matrix, c.value_sympy, patch))
+        finally:
+            if own_pool is not None:
+                own_pool.__exit__(None, None, None)
+
+
+def _search_walk_task(task: Tier1Task):
+    """Stage-pool task: handler + new-constant Tier-1 DTOs for one trajectory.
+
+    Module-level (picklable); uses this module's ``TrajectoryAttributesHandler``
+    and ``build_trajectory_dtos`` names, resolved at call time.
+    """
+    return run_tier1_task(
+        task,
+        handler_cls=TrajectoryAttributesHandler,
+        build_dtos=build_trajectory_dtos,
+    )
+
+
+def _search_walk_task_with_matrix(task: Tier1Task):
+    """:func:`_search_walk_task` that also returns the trajectory matrix (Tier-2 input)."""
+    return run_tier1_task(
+        task,
+        handler_cls=TrajectoryAttributesHandler,
+        build_dtos=build_trajectory_dtos,
+        want_matrix=True,
+    )

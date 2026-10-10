@@ -72,6 +72,8 @@ Mostly **where things go** and **how many cores to use**.
 | `EXPORT_GRAPHS` | Where the graphing stage writes figures/tables. |
 | `*_FORMAT` | `'pkl'` or `'json'` for the corresponding export. |
 | `TOTAL_CORES` / `NUM_BACKGROUND_WORKERS` | The core budget (`None` ⇒ `os.cpu_count()`); workers reserved for Tier-2. |
+| `STAGE_POOL_WORKERS` | Cap for the per-stage trajectory pools (analysis, hedgehog search, Tier-3). `None`/`0` ⇒ full core budget; `1` ⇒ serial in-process. |
+| `STAGE_POOL_CHUNKSIZE` | Trajectories handed to a stage-pool worker at a time (default `1` = full dynamic load balancing). |
 | `CONSTANTS` | Default constants to search when `run()` is given none. |
 | `OPTIMIZATION_OBJECTIVE` | The numeric trajectory attribute the **whole pipeline** optimises for — both the analysis-stage shard ranking and the search-stage optimisers. `'delta'` (default) reproduces the historical behaviour exactly. Must be a registered objective (see below); each objective knows whether its optimum is the highest or lowest value, so "smaller is better" metrics work without inverting the search. Identification (LIReC) is always required regardless of the objective. |
 

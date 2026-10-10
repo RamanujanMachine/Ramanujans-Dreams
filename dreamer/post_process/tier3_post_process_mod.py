@@ -8,29 +8,31 @@ any trajectory that lacks them.  Results are appended as patch records;
 the merge-on-read reader transparently folds them into the base records
 on the next load.
 
-Process model — identical pattern to the Search stage:
+Process model:
 
-  Producer (main thread)
-    For each constant → for each shard JSONL:
-      1. Merge existing records (so we know which Tier-3 attrs are present).
-      2. For each trajectory missing some Tier-3 attrs:
-           - Look up the CMF by ``cmf_id`` in the in-memory ``cmf_lookup``
-             (fallback: load from disk under ``sys_config.EXPORT_CMFS``).
-           - Reconstruct ``Position`` objects for start / direction.
-           - Build a ``TrajectoryAttributesHandler``.
-           - Push ``(trajectory_matrix, patch_dict)`` to the worker pool.
+  Plan (main process, cheap)
+    For every prioritised shard JSONL:
+      1. Merge existing records once (so we know which Tier-3 attrs are present).
+      2. For each (trajectory, constant) row missing some Tier-3 attrs (and not
+         pre-skipped by a top-N gate), queue a small ``Tier3Task``: the stored
+         start / direction, the constant, the patch skeleton and the gate context.
 
-  Workers / Writer (via ``worker_pool``)
-    ``compute_tier3_for_item`` fills in the missing attributes, and
-    ``write_jsonl_line`` appends the patch as one JSON line in the same
-    file the searcher produced.
+  Compute (one stage-wide ``StagePool``)
+    The CMF lookup is handed to every worker once.  ``_tier3_task`` rebuilds
+    the positions, computes the trajectory matrix from the CMF and runs
+    ``compute_tier3_for_item``; tasks from all shards share the pool
+    (``chunksize`` 1 → dynamic load balancing over every core).
+
+  Write (main process — single writer)
+    Each returned patch is appended through a ``BufferedJsonlWriter`` with
+    ``write_jsonl_line`` (structural-only patches are dropped).
 
 The whole stage short-circuits when ``post_process.TIER3_ATTRIBUTES`` is
 empty — no JSONL is read, no subprocesses created.
 """
 
 import os
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 from typing import Dict, List, Optional, Set, Tuple
 
 import sympy as sp
@@ -41,8 +43,14 @@ from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.multi_processing import (
     load_seen_trajectories,
-    worker_pool,
     write_jsonl_line,
+)
+from dreamer.utils.stage_pool import (
+    BufferedJsonlWriter,
+    StagePool,
+    TaskError,
+    stage_extra,
+    total_core_budget,
 )
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.schemes.post_process_scheme import PostProcessModScheme
@@ -118,6 +126,36 @@ def compute_tier3_for_item(item):
     return patch
 
 
+#: One Tier-3 unit of work: a stored ``(trajectory, constant)`` row missing a
+#: Tier-3 attribute.  Carries only small, picklable data — the CMF itself is
+#: resolved inside the worker from the stage's ``cmf_lookup``.
+Tier3Task = namedtuple(
+    "Tier3Task", ["jsonl_path", "cmf_name", "positions", "constant", "patch", "context"],
+)
+
+
+def _tier3_task(task: "Tier3Task"):
+    """Stage-pool task: rebuild the trajectory matrix and compute its Tier-3 patch.
+
+    Rebuilds ``(start, direction)`` from the stored row, computes the symbolic
+    trajectory matrix from the CMF (the same ``from_cmf`` the main process used
+    to run serially) and hands it to :func:`compute_tier3_for_item`, which builds
+    the attribute handler exactly as before.
+
+    :return: The filled patch dict, or :class:`TaskError` on a handler failure.
+    """
+    try:
+        cmf = stage_extra("cmf_lookup", {})[task.cmf_name]
+        start, direction = reconstruct_positions(cmf, task.positions)
+        handler = TrajectoryAttributesHandler.from_cmf(
+            cmf, direction, start, constant=task.constant,
+        )
+        matrix = handler.trajectory_matrix
+    except Exception as e:  # noqa: BLE001 — one bad row must not abort the stage
+        return TaskError(task.patch.get("trajectory_id"), str(e))
+    return compute_tier3_for_item((matrix, task.constant, dict(task.patch), task.context))
+
+
 # ---------------------------------------------------------------------------
 # Module
 # ---------------------------------------------------------------------------
@@ -170,8 +208,6 @@ class Tier3PostProcessModV1(PostProcessModScheme):
             Logger.Levels.message,
         ).log()
 
-        num_workers = sys_config.NUM_BACKGROUND_WORKERS
-        config_overrides = config.export_configurations()
 
         dir_path = sys_config.EXPORT_SEARCH_RESULTS
         if not os.path.isdir(dir_path):
@@ -222,19 +258,34 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         selectors = iter_top_n_selectors(post_process_config.TIER3_ATTRIBUTES)
         top_n_sets = self._compute_top_n_sets(selectors) if selectors else {}
 
-        # Phase 2 — compute.  One pass per shard JSONL, gating each trajectory's
-        # attributes with the precomputed top-N membership via ``context``.
-        for shard_jsonl in SmartTQDM(
-            shard_paths,
-            desc='Post-process shards: ',
-            **sys_config.TQDM_CONFIG,
-        ):
-            self._run_jsonl(
-                shard_jsonl,
-                num_workers=num_workers,
-                config_overrides=config_overrides,
-                top_n_sets=top_n_sets,
-            )
+        # Phase 2 — plan (main process, cheap): one task per (trajectory,
+        # constant) row missing a Tier-3 attribute that can actually be computed,
+        # across *all* prioritised shards.
+        tasks: List[Tier3Task] = []
+        for shard_jsonl in shard_paths:
+            tasks.extend(self._plan_jsonl(shard_jsonl, top_n_sets))
+        if not tasks:
+            return
+
+        # Phase 3 — compute on one stage-wide pool (the CMF lookup is handed to the
+        # workers once); the main process is the single writer of the patches.
+        workers = min(total_core_budget(), len(tasks))
+        with StagePool(workers=workers, extra={"cmf_lookup": self._cmf_lookup}) as pool, \
+                BufferedJsonlWriter() as writer:
+            results = pool.imap(_tier3_task, tasks)
+            for task, res in zip(
+                tasks,
+                SmartTQDM(results, total=len(tasks), desc='Tier-3 trajectories: ',
+                          **sys_config.TQDM_CONFIG),
+            ):
+                if isinstance(res, TaskError):
+                    Logger(
+                        f"Tier-3 handler error for trajectory {task.patch['trajectory_id'][:8]}…: "
+                        f"{res.message}",
+                        Logger.Levels.warning,
+                    ).log()
+                    continue
+                write_jsonl_line(res, writer.sink(task.jsonl_path))
 
     def _graphing_stage(self) -> None:
         """Run the configured post-process graphs (no-op when none enabled)."""
@@ -245,141 +296,87 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         Grapher(self.priorities).generate()
 
     # ------------------------------------------------------------------
-    # Per-file pipeline
+    # Per-file planning
     # ------------------------------------------------------------------
 
-    def _run_jsonl(
+    def _plan_jsonl(
         self,
         jsonl_path: str,
-        *,
-        num_workers: int,
-        config_overrides: dict,
         top_n_sets: Optional[Dict[str, Set[str]]] = None,
-    ) -> None:
-        """Run the producer → worker_pool pipeline for one shard JSONL.
+    ) -> List["Tier3Task"]:
+        """Return one :class:`Tier3Task` per row of *jsonl_path* that is missing a
+        Tier-3 attribute *that can actually be computed*.
 
-        Skips entirely if every trajectory is already fully covered (no
-        ``push`` calls → no ``worker_pool`` is created, no subprocess spawn).
+        Reads the shard JSONL once.  Rows whose CMF cannot be resolved are logged
+        and skipped.  Rows whose only-missing attributes are all gated off by a
+        ``top N … in shard|cmf`` selector (this trajectory is not in the
+        qualifying set) are **pre-skipped** — context alone settles them, so no
+        handler is ever built for the (usually large) non-selected majority.
 
-        :param top_n_sets: precomputed ``{selector.key: {trajectory_id}}`` from
-            Phase 1; used to gate (and pre-skip) top-N attributes per trajectory.
+        :param jsonl_path: The shard's per-trajectory JSONL.
+        :param top_n_sets: Phase-1 ``{selector.key: {trajectory_id}}`` membership.
+        :return: Tasks for this shard (empty when everything is covered).
         """
         merged = load_seen_trajectories(jsonl_path)
         if not merged:
-            return
-
+            return []
+        top_n_sets = top_n_sets or {}
         desired = {attribute_name(s) for s in post_process_config.TIER3_ATTRIBUTES}
-        # Quickly scan first — if nothing is missing on any (traj, const) row, skip
-        # spawning the worker pool entirely.  Rows are flat, so a row's computed
-        # attributes are its top-level keys.
-        if not any(
-            desired - set(rec.keys())
-            for by_const in merged.values() for rec in by_const.values()
-        ):
-            return
-
-        with worker_pool(
-            num_workers=num_workers,
-            worker_fn=compute_tier3_for_item,
-            writer_fn=write_jsonl_line,
-            output_path=jsonl_path,
-            config_overrides=config_overrides,
-        ) as push:
-            self._produce(merged, desired, push, top_n_sets or {})
-
-    # ------------------------------------------------------------------
-    # Producer
-    # ------------------------------------------------------------------
-
-    def _produce(
-        self,
-        merged: Dict[str, dict],
-        desired: set,
-        sink,
-        top_n_sets: Dict[str, Set[str]],
-    ) -> None:
-        """Emit ``(traj_matrix, constant, patch, context)`` for every trajectory
-        missing Tier-3 attrs *that can actually be computed*.
-
-        Trajectories whose CMF cannot be resolved are logged and skipped.
-        Trajectories whose only-missing attributes are all gated off by a
-        ``top N … in shard|cmf`` selector (this trajectory is not in the
-        qualifying set) are **pre-skipped** — context alone settles them, so we
-        avoid building a handler for the (usually large) non-selected majority.
-
-        The loop is wrapped in a tqdm bar — Tier-3 attributes (asymptotics,
-        delta_sequence, …) can be minutes-per-trajectory, so without a
-        progress indicator a long shard looks indistinguishable from a hang.
-        """
         resolved_specs = self._resolved_specs()
+
+        tasks: List[Tier3Task] = []
         # One item per (trajectory, constant) row that is missing a Tier-3 attr.
-        items = [
-            (tid, record)
-            for by_const in merged.values()
-            for record in by_const.values()
-            for tid in (record.get("trajectory_id"),)
-            if desired - set(record.keys())
-        ]
-        for tid, record in SmartTQDM(
-            items,
-            desc='Tier-3 trajectories: ',
-            **sys_config.TQDM_CONFIG,
-        ):
-            missing = desired - set(record.keys())
-            if not missing:
-                continue
+        for by_const in merged.values():
+            for record in by_const.values():
+                tid = record.get("trajectory_id")
+                missing = desired - set(record.keys())
+                if not missing:
+                    continue
+                # Cheap pre-skip: if every missing attribute is gated off for this
+                # trajectory by a top-N selector, nothing will be computed.
+                # Handler-only / unconditional specs always survive here (they need
+                # the handler to decide).
+                if not self._survives_top_n(missing, tid, top_n_sets, resolved_specs):
+                    continue
 
-            # Cheap pre-skip: if every missing attribute is gated off for this
-            # trajectory by a top-N selector, nothing will be computed — don't
-            # build the handler.  Handler-only / unconditional specs always
-            # survive here (they need the handler to decide).
-            if not self._survives_top_n(missing, tid, top_n_sets, resolved_specs):
-                continue
+                cmf_name = record.get("cmf_id")
+                if cmf_name not in self._cmf_lookup:
+                    Logger(
+                        f"Tier-3 skip: no CMF found for cmf_id={cmf_name!r} "
+                        f"(trajectory {tid[:8]}…)",
+                        Logger.Levels.warning,
+                    ).log()
+                    continue
 
-            cmf_name = record.get("cmf_id")
-            cmf = self._cmf_lookup.get(cmf_name)
-            if cmf is None:
-                Logger(
-                    f"Tier-3 skip: no CMF found for cmf_id={cmf_name!r} "
-                    f"(trajectory {tid[:8]}…)",
-                    Logger.Levels.warning,
-                ).log()
-                continue
+                tasks.append(Tier3Task(
+                    jsonl_path=jsonl_path,
+                    cmf_name=cmf_name,
+                    positions={k: record.get(k) for k in ("start_point", "direction")},
+                    constant=self._constant_sympy(record),
+                    patch={"trajectory_id": tid, "constant": record.get("constant")},
+                    context=self._build_context(tid, top_n_sets, resolved_specs),
+                ))
+        return tasks
 
-            shard_entry = self._shard_lookup.get(record.get("shard_id"))
-            shard, constant = (shard_entry if shard_entry is not None else (None, None))
+    def _constant_sympy(self, record: dict):
+        """Resolve the sympy constant of a stored row.
 
-            # Resolve the sympy constant for this trajectory.  Prefer the
-            # typed object from the shard lookup; fall back to parsing the
-            # record's ``constant`` string (populated by the searcher) so
-            # post-process can run standalone — without it, attributes that
-            # need the limit (``delta_sequence``) silently error out.
-            constant_sympy = constant.value_sympy if constant is not None else None
-            if constant_sympy is None:
-                const_str = record.get("constant")
-                if const_str:
-                    try:
-                        constant_sympy = sp.sympify(const_str)
-                    except (sp.SympifyError, SyntaxError, TypeError):
-                        constant_sympy = None
-
+        Prefers the typed constant from the shard lookup; falls back to parsing
+        the row's ``constant`` string (populated by the searcher) so post-process
+        can run standalone — without it, attributes that need the limit
+        (``delta_sequence``) silently error out.
+        """
+        shard_entry = self._shard_lookup.get(record.get("shard_id"))
+        constant = shard_entry[1] if shard_entry is not None else None
+        if constant is not None:
+            return constant.value_sympy
+        const_str = record.get("constant")
+        if const_str:
             try:
-                start, direction = self._reconstruct_positions(cmf, record)
-                handler = TrajectoryAttributesHandler.from_cmf(
-                    cmf, direction, start,
-                    constant=constant_sympy,
-                    searchable=shard,
-                )
-            except Exception as e:
-                Logger(
-                    f"Tier-3 handler error for trajectory {tid[:8]}…: {e}",
-                    Logger.Levels.warning,
-                ).log()
-                continue
-
-            patch = {"trajectory_id": tid, "constant": record.get("constant")}
-            context = self._build_context(tid, top_n_sets, resolved_specs)
-            sink((handler.trajectory_matrix, constant_sympy, patch, context))
+                return sp.sympify(const_str)
+            except (sp.SympifyError, SyntaxError, TypeError):
+                return None
+        return None
 
     # ------------------------------------------------------------------
     # Ranking (Phase 1) + predicate context
