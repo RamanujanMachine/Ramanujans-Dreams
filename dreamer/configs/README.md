@@ -133,7 +133,7 @@ The largest category. Shared knobs plus one block per optimiser
 | `ENABLE_MICRO_HILL_CLIMB` | The shared resolution-doubling finalization endgame after every method. |
 | `GA_*` | Genetic-algorithm knobs. |
 | `SA_*` | Small-Angle search knobs. |
-| `ANNEAL_*` | Simulated-Annealing knobs. |
+| `ANNEAL_*` | Simulated-Annealing knobs. `ANNEAL_LOOKAHEAD` (`auto`/`on`/`off`) speculatively pre-walks the next step's candidate neighbourhoods on idle eval workers — same search path and rows, fewer sequential rounds on large machines (`auto` needs ≥ 4·d_flat workers). |
 | `GRAD_*` | Gradient-Ascent knobs. |
 | `SPSA_*` | Hybrid SPSA + Adam knobs. |
 

@@ -32,7 +32,7 @@ from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.search.methods.flatland.seed import resolve_injected_seed
-from dreamer.search.methods.flatland.parallel_eval import evaluate_batch
+from dreamer.search.methods.flatland.parallel_eval import WalkPrefetcher, evaluate_batch
 from dreamer.utils.rand import derive_py_random
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
@@ -219,6 +219,17 @@ class SimulatedAnnealingSearch(SearchMethod):
         # Tabu: bounded recent-position list (reference update_old_list_neighs).
         old_pos_list: List[bytes] = [cur_z.tobytes()]
 
+        # Optional speculative look-ahead (idle eval workers pre-walk the next
+        # step's candidate neighbourhoods; see WalkPrefetcher).  Changes only *when*
+        # walks run, never which ones are committed or the decisions taken.
+        prefetcher = (
+            WalkPrefetcher(pool, eval_ctx)
+            if lookahead_enabled(pool, geom.d_flat) else None
+        )
+        #: Look-ahead counters of the last run (``None`` when disabled) — for
+        #: diagnostics and tests.
+        self.lookahead_stats = prefetcher.stats if prefetcher is not None else None
+
         while iter_left > 0 and T > Tmin:
             total_steps += 1
             if total_steps > max_total_steps:
@@ -272,7 +283,17 @@ class SimulatedAnnealingSearch(SearchMethod):
             # With a pool the batch is walked across worker processes; otherwise
             # each neighbour is walked serially in this process.
             if pool is not None:
-                results = evaluate_batch(neighbours, eval_ctx=eval_ctx, pool=pool)
+                speculate = (
+                    _next_step_groups(
+                        cur_z, neighbours, old_pos_list, geom, max_traj_len, traj_norm_name,
+                        doubling_allowed=doubling_count < max_doublings,
+                    )
+                    if prefetcher is not None else None
+                )
+                results = evaluate_batch(
+                    neighbours, eval_ctx=eval_ctx, pool=pool,
+                    prefetcher=prefetcher, speculate=speculate,
+                )
                 neighbour_deltas = [(d, nb) for (d, _), nb in zip(results, neighbours)]
             else:
                 neighbour_deltas = [
@@ -415,3 +436,83 @@ class SimulatedAnnealingSearch(SearchMethod):
             return self._select_seed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
         except NoInitialIdentification:
             return None
+
+
+# ---------------------------------------------------------------------------
+# Speculative look-ahead helpers
+# ---------------------------------------------------------------------------
+
+def lookahead_enabled(pool, d_flat: int) -> bool:
+    """Decide whether simulated annealing should speculate the next step.
+
+    Policy from ``search.ANNEAL_LOOKAHEAD``:
+
+    * ``"off"`` — never.
+    * ``"on"`` — whenever a multi-process eval pool exists.
+    * ``"auto"`` (default) — when the pool has at least ``2 * (2 * d_flat)``
+      workers: room for one step's ``<= 2·d_flat`` neighbours **plus** one full
+      speculative neighbourhood.  With fewer workers almost nothing fits into the
+      idle capacity, so speculation would only add bookkeeping.  (E.g. ``d_flat =
+      11`` needs 44 workers; ``d_flat = 3`` needs 12.)  Also off while the
+      separate Tier-2 background queue is active (``search.TIER2_ATTRIBUTES``
+      non-empty): those workers are then the bottleneck and speculation would
+      take CPU from them (measured 2026-10-10: +11 % SA time with Tier-2 on,
+      −15 % with it off, 18 cores, d_flat = 3).
+
+    :param pool: The eval pool (``None`` → serial evaluation → ``False``).
+    :param d_flat: Flatland dimension of the shard.
+    :raises ValueError: on an unknown ``ANNEAL_LOOKAHEAD`` value.
+    :return: Whether to create a :class:`WalkPrefetcher`.
+    """
+    mode = str(search_config.ANNEAL_LOOKAHEAD).lower()
+    if mode not in ("auto", "on", "off"):
+        raise ValueError(f"ANNEAL_LOOKAHEAD must be 'auto', 'on' or 'off', got {mode!r}")
+    workers = int(getattr(pool, "_processes", 0) or 0) if pool is not None else 0
+    if mode == "off" or workers <= 1:
+        return False
+    if mode == "on":
+        return True
+    if search_config.TIER2_ATTRIBUTES:
+        return False
+    return workers >= 2 * (2 * int(d_flat))
+
+
+def _next_step_groups(
+    cur_z: np.ndarray,
+    neighbours: List[np.ndarray],
+    old_pos_list: List[bytes],
+    geom: FlatlandGeometry,
+    max_traj_len: float,
+    traj_norm_name: str,
+    *,
+    doubling_allowed: bool,
+) -> List[List[np.ndarray]]:
+    """Candidate neighbourhoods of every possible next SA center.
+
+    After this step the center is either one of *neighbours* (the best one, if
+    accepted) or ``2 · cur_z`` (on rejection, while doubling is still allowed; a
+    reseed is not predicted).  Each candidate's neighbourhood is filtered like the
+    real loop (in-cone, within the length cap, not tabu); the predicted tabu list
+    is the current one plus this step's neighbours and center.  A mismatch with
+    the real next neighbourhood (e.g. tabu truncation) only costs a cache miss.
+
+    :return: One group of directions per candidate center, neighbours first.
+    """
+    tabu = set(old_pos_list)
+    tabu.update(nb.tobytes() for nb in neighbours)
+    tabu.add(cur_z.tobytes())
+    centers = list(neighbours)
+    if doubling_allowed:
+        centers.append(cur_z * 2)
+    groups: List[List[np.ndarray]] = []
+    for center in centers:
+        group = [
+            cand for cand in geom.perturbations(center, reduce=False)
+            if geom.is_inside(cand)
+            and cand.tobytes() not in tabu
+            and geom.traj_norm(cand, traj_norm_name) <= max_traj_len
+        ]
+        if group:
+            groups.append(group)
+    return groups
+

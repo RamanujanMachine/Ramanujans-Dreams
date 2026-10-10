@@ -273,6 +273,22 @@ class SearchConfig(Configurable):
         default=0,
         metadata={"description": "Worker cap for evaluating the neighbour batch in each SA step. 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},
     )
+    ANNEAL_LOOKAHEAD: str = field(
+        default="auto",
+        metadata={"description": (
+            "Speculative one-step look-ahead for simulated annealing. While a step's "
+            "neighbours are walked, idle eval workers already walk the neighbourhoods "
+            "of every possible next center (each neighbour = accept, the doubled "
+            "current = reject); the next step then often finds its walks done. The "
+            "search path and the written rows are identical to the plain loop (results "
+            "are committed only when the loop requests them); only idle capacity is "
+            "used. 'auto' enables it when the eval pool has at least 2 * (2 * d_flat) "
+            "workers (room for one step's neighbours plus one full speculative "
+            "neighbourhood) and the separate Tier-2 background queue is not active "
+            "(TIER2_ATTRIBUTES empty — otherwise speculation steals CPU from the Tier-2 "
+            "bottleneck); 'on' whenever a multi-process pool exists; 'off' disables it."
+        )},
+    )
 
     # ============================== Shared trajectory-length cap (all search methods) ==============================
     SEARCH_MAX_TRAJ_LEN: float = field(

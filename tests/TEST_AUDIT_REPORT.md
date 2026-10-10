@@ -1,4 +1,38 @@
-# Test Audit Report (2026-10-10)
+# Test Audit Report (2026-10-10, b)
+
+Bottom line: simulated annealing gained an asynchronous speculative look-ahead
+(`ANNEAL_LOOKAHEAD`, `WalkPrefetcher`); the stage templates in `examples/` were fixed.
+The look-ahead is proven output-identical (rows, order, `seen`, RNG state, Metropolis
+draws) in-process and through a real 2-process pool. Full suite: `914 passed, 2 skipped`.
+
+## Touched Modules (Detailed Review)
+
+| Touched module | Changes made | Coverage evidence | Challenge rubric (/5) | Regression evidence |
+|---|---|---|---:|---|
+| `dreamer/search/methods/flatland/parallel_eval.py` | `WalkPrefetcher` (idle-capacity, group-wise async speculation; claim/take; age eviction); `evaluate_batch(prefetcher=, speculate=)`. | `tests/test_anneal_lookahead.py` (25 tests); 88%. | 5 | Uncommitted-speculation, capacity, dedup, eviction, claim-before-speculate regression, prefetched ≡ direct commit tests. |
+| `dreamer/search/methods/annealing/annealing_scan.py` | Look-ahead wiring, `lookahead_enabled` policy, `_next_step_groups`. | 85%; policy parametrised (off/on/auto incl. d_flat = 11 → 44 workers, Tier-2 gate, invalid mode). | 5 | Real-walk SA equivalence in accept- and reject-dominated regimes (asserts Metropolis draws happened and the look-ahead served walks); byte-identical JSONL via `SimulatedAnnealingMod` on a real pool. |
+| `dreamer/configs/search.py` | `ANNEAL_LOOKAHEAD` (`auto`). | Policy tests. | 4 | — |
+| `examples/search.py`, `examples/analysis.py` | Fixed to `build_trajectory_dtos`, flat rows, nested cache. | `tests/test_example_templates.py` (2 end-to-end tests). | 4 | Template API drift now fails CI. |
+
+Challenge rubric breakdown: failure path (eviction race regression, invalid mode), boundary
+(capacity edge, empty groups, 1-worker pool, d_flat thresholds), invariant (on ≡ off outputs),
+stochastic robustness (two temperature regimes, RNG-state equality), regression trap (byte-identical files).
+
+Benchmark (18 cores, pFq(2,1) log 2, SA 100 iterations): Tier-2 off — SA 214 s → 181 s (−15 %),
+byte-identical files; Tier-2 on — +11 % (speculation competes with the Tier-2 bottleneck), so
+`auto` stays off while the Tier-2 queue is active.
+
+## Non-Touched Modules (Repository-Wide Summary)
+
+| Area | Status | Risk / follow-up |
+|---|---|---|
+| Tier-2 queue | Green, unchanged. | Bottleneck + Tier-1 redo (design pending). With Tier-2 on, row *order* in search files is nondeterministic (MPMC writer); content identical. |
+| Other optimisers | Green, unchanged. | Look-ahead not applied (micro-climb Phase A is a candidate). |
+| Repository | 69% line+branch coverage. | — |
+
+---
+
+# Test Audit Report (2026-10-10, a)
 
 Bottom line: the analyzer, `SearcherModV1` (Tier-1) and the Tier-3 post-process now
 run their per-trajectory work on one stage-wide process pool

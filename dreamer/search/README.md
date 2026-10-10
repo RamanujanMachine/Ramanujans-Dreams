@@ -42,7 +42,7 @@ point and δ is the landscape:
 |-----------------|--------|------|
 | `SmallAngleSearchMod` | small-angle hill-climb | nudge the direction by the smallest resolvable angle. |
 | `GeneticSearchModV2` | genetic algorithm | evolve a population of directions. |
-| `SimulatedAnnealingMod` | simulated annealing | temperature-controlled random walk over directions. |
+| `SimulatedAnnealingMod` | simulated annealing | temperature-controlled random walk over directions; idle eval workers pre-walk the next step's candidates (`ANNEAL_LOOKAHEAD`) without changing the search path. |
 | `GradientAscentMod` | gradient ascent (Adam) | follow a finite-difference δ-gradient. |
 | `HybridSPSAMod` | SPSA + Adam + discrete fallback | 2-evaluation stochastic gradient, good at high dimension. |
 
