@@ -43,6 +43,7 @@ re-run optimisation (config-fingerprint staleness checks, partial Tier-2
 patches); this template keeps the loop minimal on purpose.
 """
 
+import json
 import os
 from collections import defaultdict
 from typing import Callable, Dict, List, Set
@@ -59,7 +60,7 @@ from dreamer.search.methods.hedgehog_scan import SerialSearcher
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     _position_to_tuple,
-    build_trajectory_dto,
+    build_trajectory_dtos,
     derive_cmf_and_shard_ids,
     derive_trajectory_id,
 )
@@ -129,7 +130,8 @@ class MySearchMethod:
                 shard_id, self.shard.cmf_name, shard_encoding_str,
                 _position_to_tuple(start), _position_to_tuple(traj),
             )
-            if trajectory_id in seen_trajectories:
+            # The cache is nested: {trajectory_id: {constant_name: record}}.
+            if self.constant.name in seen_trajectories.get(trajectory_id, {}):
                 continue  # already evaluated (this or a previous run) — skip.
 
             # 2) EVALUATE: walk the trajectory and compute its Tier-1 attributes.
@@ -139,7 +141,8 @@ class MySearchMethod:
                     constant=None,             # per-constant δ injected below
                     searchable=self.shard,
                 )
-                dto = build_trajectory_dto(
+                # One flat row per requested constant; we ask for one.
+                (dto,) = build_trajectory_dtos(
                     handler,
                     cmf_id=cmf_id,
                     shard_id=shard_id,
@@ -157,7 +160,9 @@ class MySearchMethod:
                 continue
 
             # 3) PERSIST: one JSONL line per trajectory, via the pool's writer.
-            seen_trajectories[trajectory_id] = {"trajectory_id": trajectory_id}
+            seen_trajectories.setdefault(trajectory_id, {})[self.constant.name] = (
+                json.loads(dto.to_json_line())
+            )
             sink((handler.trajectory_matrix, self.constant.value_sympy, dto))
 
 
