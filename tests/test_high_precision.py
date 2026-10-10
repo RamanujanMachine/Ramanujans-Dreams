@@ -184,3 +184,69 @@ def test_constant_swap_resets_high_precision_value(log2_shard):
     fresh = _handler(log2_shard).compute_for_constant(c2)[0]
     assert math.isfinite(fresh)
     assert swapped == fresh
+
+
+# ---------------------------------------------------------------------------
+# δ precision escalation: rounding noise is never taken as the error
+# ---------------------------------------------------------------------------
+
+from dreamer.utils.constants.high_precision import error_is_resolved, resolved_error
+
+
+def _true_error_digits(estimate, constant, digits=5000):
+    """-log10 |estimate - constant| with the constant far beyond the agreement."""
+    return float(-sp.log(abs(estimate - arb_value(constant, digits)), 10).evalf(15))
+
+
+class TestErrorResolution:
+    def test_zero_and_ulp_level_errors_are_noise(self):
+        c = high_precision(sp.zeta(3), 100)
+        ulp = sp.Float(2, c._prec) ** (c._mpf_[2])          # one unit in the last place
+        assert not error_is_resolved(sp.Float(0), c)
+        assert not error_is_resolved(abs(ulp), c)
+        assert not error_is_resolved(abs(ulp) * 2 ** 30, c)
+        assert error_is_resolved(abs(ulp) * 2 ** 45, c)
+
+    def test_escalates_past_the_agreement(self):
+        """An estimate agreeing with ζ(3) to ~300 digits: starting at 50 digits
+        the resolution must climb past 300, and the error must be the true one."""
+        estimate = sp.Rational(sp.zeta(3).evalf(300)) + sp.Rational(1, 10 ** 300)
+        err, digits, ref = resolved_error(estimate, sp.zeta(3), 50, 10_000)
+        assert digits > 300
+        true_digits = _true_error_digits(estimate, sp.zeta(3))
+        assert abs(float(-sp.log(err, 10).evalf(15)) - true_digits) < 1e-9
+
+    def test_gives_up_at_max(self):
+        estimate = sp.Rational(sp.zeta(3).evalf(2000))
+        err, digits, _ = resolved_error(estimate, sp.zeta(3), 50, 400)
+        assert err is None and digits == 400
+
+    def test_old_rule_was_fooled_by_one_ulp(self):
+        """The case seen on 4F3: sympy's evalf rounds twice and can be 1 ulp off;
+        the old rule (escalate only on err == 0) accepted that ulp as the error."""
+        c = sp.zeta(3).evalf(200)
+        ulp = sp.Float(2, c._prec) ** (c._mpf_[2])
+        estimate = sp.Rational(c) + sp.Rational(abs(ulp))   # agrees to ~200 digits
+        old_err = sp.Abs(estimate - c)
+        assert old_err != 0                                  # old rule: "resolved"
+        err, digits, _ = resolved_error(estimate, sp.zeta(3), 200, 10_000)
+        assert digits > 200 and err is not None
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("high_res_digits", [10_000, 20])
+def test_delta_equals_true_delta(monkeypatch, log2_shard, high_res_digits):
+    """δ from the handler equals δ computed from the true error (constant to
+    far more digits than the estimate agrees with)."""
+    from dreamer.configs import config
+
+    monkeypatch.setattr(config.search, "CONSTANT_NO_DIGITS_HIGH_RES", high_res_digits)
+    h = _handler(log2_shard)
+    h._constant = R.log(2).value_sympy
+    delta = h.delta()
+    (p, q), _ = h._pq_vector()
+    col = sp.Matrix(h._effective_walk_values(h.walk_depth())[0])
+    estimate = sp.Abs(sp.Rational(sp.Matrix(p).T.dot(col), sp.Matrix(q).T.dot(col)))
+    digits = _true_error_digits(estimate, R.log(2).value_sympy, 20_000)
+    true_delta = -1 + digits / float(sp.log(estimate.q, 10).evalf(30))
+    assert delta == pytest.approx(true_delta, rel=1e-9)

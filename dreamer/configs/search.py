@@ -492,8 +492,15 @@ class SearchConfig(Configurable):
     )
 
     MAX_CONSTANT_RESOLUTION: int = field(
-        default=200_000,
-        metadata={"description": "Maximum number of digits to use for constant values in delta computation."},
+        default=1_000_000,
+        metadata={"description": (
+            "Maximum number of digits of the constant used in delta computation.  delta "
+            "raises the precision (doubling from CONSTANT_NO_DIGITS_HIGH_RES) until "
+            "|estimate - constant| is resolved beyond the constant's rounding; long "
+            "trajectories need ~2-3x10^5 digits.  Cheap with the arb evaluator (zeta(3) at "
+            "10^6 digits: ~0.4 s, ~20 MB); constants arb cannot evaluate fall back to "
+            "sympy evalf, which is far more expensive at this size."
+        )},
     )
 
 

@@ -161,3 +161,49 @@ def high_precision(expr: sp.Expr, digits: int) -> sp.Float:
         return arb_value(expr, digits)
     except Unsupported:
         return sp.sympify(expr).evalf(int(digits))
+
+
+#: An error |estimate − C| is trusted only when it exceeds the constant's own
+#: rounding (1 ulp of C) by at least this many bits, so δ is accurate to ~12 digits.
+ERROR_MARGIN_BITS = 40
+
+
+def error_is_resolved(err: sp.Expr, reference: sp.Float, margin_bits: int = ERROR_MARGIN_BITS) -> bool:
+    """Whether ``err = |estimate − reference|`` is a real error, not rounding noise.
+
+    *reference* is the constant rounded to ``reference._prec`` bits, so it is
+    within about 1 ulp of the true value (sympy's ``evalf`` rounds twice and can
+    be 1 ulp off; arb is correctly rounded).  An ``err`` within a few ulps of
+    that — in particular exactly 0 — says nothing about the estimate: the
+    estimate agrees with the constant *at least* to the reference's precision.
+    Requiring ``err >= 2**margin_bits`` ulps makes the relative uncertainty of
+    ``err`` at most ~``2**(1 - margin_bits)``.
+    """
+    e = sp.Float(err, reference._prec)._mpf_
+    if e[1] == 0:                                    # exactly zero (Float(0) != 0 in sympy)
+        return False
+    r = reference._mpf_
+    if r[1] == 0:
+        return True                                  # reference 0: any nonzero error is real
+    log2_err = e[2] + e[3]                           # exponent + bit count ~ floor(log2 |err|) + 1
+    log2_ulp = r[2] + r[3] - reference._prec         # log2 of one ulp of the reference
+    return log2_err - log2_ulp >= margin_bits
+
+
+def resolved_error(estimate: sp.Expr, constant: sp.Expr, digits: int, max_digits: int):
+    """``|estimate − constant|`` at the first precision (doubling from *digits*,
+    capped at *max_digits*) where it is a real error (:func:`error_is_resolved`).
+
+    :return: ``(err, digits_used, reference)``; ``err`` is ``None`` when even
+        *max_digits* digits cannot resolve it (the estimate agrees with the
+        constant beyond *max_digits* digits).
+    """
+    digits = int(min(digits, max_digits))
+    while True:
+        reference = high_precision(constant, digits)
+        err = sp.Abs(estimate - reference)
+        if error_is_resolved(err, reference):
+            return err, digits, reference
+        if digits >= max_digits:
+            return None, digits, reference
+        digits = int(min(digits * 2, max_digits))

@@ -11,7 +11,7 @@ from sympy.abc import n
 
 from LIReC.db.access import db
 from ramanujantools import LinearRecurrence, Matrix, Limit, linear_recurrence
-from dreamer.utils.constants.high_precision import high_precision
+from dreamer.utils.constants.high_precision import high_precision, resolved_error
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.configs import config
@@ -1181,31 +1181,26 @@ class TrajectoryAttributesHandler:
                    Logger.Levels.debug).log()
             return False, float('-inf')
 
-        if self._high_res_constant is None:
-            self._high_res_constant = high_precision(constant, self._constant_resolution)
-
-        while self._constant_resolution <= search_config.MAX_CONSTANT_RESOLUTION:
-            err = sp.Abs(estimated - self._high_res_constant)
-            # Match Searchable.calc_delta: use the integer denominator
-            # of the rational estimate for the delta formula, not the
-            # raw symbolic q·walk (which can be a fractional Rational).
-            delta = -1 - sp.log(err) / sp.log(denom_int)
-            if delta == sp.oo or delta == sp.zoo:
-                if self._constant_resolution == search_config.MAX_CONSTANT_RESOLUTION:
-                    Logger(
-                        f'Guardrail reached - could not approximate with constant at resolution: '
-                        f'{search_config.MAX_CONSTANT_RESOLUTION}'
-                        f'\nYou might want to rerun the search with a higher constant resolution to get a better approximation.',
-                        Logger.Levels.warning,
-                    ).log()
-                    break
-                self._constant_resolution = min(
-                    self._constant_resolution * 2, search_config.MAX_CONSTANT_RESOLUTION
-                )
-                self._high_res_constant = high_precision(constant, self._constant_resolution)
-                continue
-            return True, delta
-        return False, float('-inf')
+        # Precision escalation: the error is trusted only once it clearly exceeds
+        # the constant's own rounding (see ``error_is_resolved``); until then the
+        # estimate agrees with the constant beyond the current resolution, so the
+        # resolution doubles.  (Escalating only on err == 0 accepted ±1-ulp
+        # rounding noise as the error and produced spurious δ values.)
+        err, self._constant_resolution, self._high_res_constant = resolved_error(
+            estimated, constant, self._constant_resolution, search_config.MAX_CONSTANT_RESOLUTION,
+        )
+        if err is None:
+            Logger(
+                f'Guardrail reached - the estimate agrees with the constant beyond '
+                f'MAX_CONSTANT_RESOLUTION={search_config.MAX_CONSTANT_RESOLUTION} digits; '
+                f'raise it to compute delta. {self._trajectory_repr()}',
+                Logger.Levels.warning,
+            ).log()
+            return False, float('-inf')
+        # Match Searchable.calc_delta: use the integer denominator of the
+        # rational estimate for the delta formula, not the raw symbolic q·walk
+        # (which can be a fractional Rational).
+        return True, -1 - sp.log(err) / sp.log(denom_int)
 
     def delta_sequence(self, depth: Optional[int | list] = None) -> list:
         """
