@@ -1,0 +1,302 @@
+"""
+A process pool that survives dead workers.
+
+Why
+---
+``multiprocessing.Pool`` silently replaces a worker that dies (e.g. killed by
+the out-of-memory killer while walking a large CMF) but **loses the task it was
+running**, so ``imap`` / ``AsyncResult.get()`` waits forever — a hang with no
+error.  This pool is built on :class:`concurrent.futures.ProcessPoolExecutor`,
+which *notices* a dead worker (``BrokenProcessPool``), and recovers:
+
+1. **Restart with fewer workers.**  The executor is rebuilt with half the
+   workers (never below 1) — if memory pressure killed the worker, fewer
+   concurrent tasks usually fit — and every unfinished task is resubmitted, in
+   submission order.  Nothing is lost.
+2. **Isolate a poison task.**  Each death marks the tasks that were running as
+   suspects.  A task suspected twice is run **alone** in a fresh single-worker
+   process; if it kills that worker too, it is reported through the caller's
+   ``on_death`` hook (e.g. a ``TaskError`` "worker died — probably out of
+   memory") and the run continues.  Without ``on_death`` a
+   :class:`WorkerDeathError` is raised instead of hanging.
+3. **Bounded memory.**  ``imap`` / ``imap_unordered`` keep at most
+   ``window × workers`` tasks in flight (``Pool.imap`` queues *every* task up
+   front), and ``max_tasks_per_child`` can recycle long-lived workers.
+
+Every recovery is logged as a warning naming the worker count and the task.
+
+The API mirrors the subset of ``multiprocessing.Pool`` the pipeline uses
+(``imap``, ``imap_unordered``, ``apply_async(...).get()/.ready()``, ``close``,
+``join``, ``terminate``, ``_processes``), so call sites need no other change.
+Randomness rules are unchanged (tasks must be deterministic functions of their
+arguments — see :mod:`dreamer.utils.rand`).
+"""
+
+from __future__ import annotations
+
+import multiprocessing as mp
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from typing import Any, Callable, Deque, Dict, Iterable, Iterator, List, Optional
+
+
+class WorkerDeathError(RuntimeError):
+    """A task kept killing its worker process (likely out of memory)."""
+
+
+_DEATH_MESSAGE = (
+    "worker process died while computing this task, also when run alone "
+    "(most likely out of memory)"
+)
+
+
+class _Task:
+    """One submitted call and its current executor future."""
+
+    __slots__ = ("fn", "args", "future", "suspicions", "result", "done", "seq")
+
+    def __init__(self, fn: Callable, args: tuple, seq: int):
+        self.fn = fn
+        self.args = args
+        self.future = None
+        self.suspicions = 0
+        self.result = None
+        self.done = False
+        self.seq = seq
+
+
+class ResilientResult:
+    """``AsyncResult``-like handle returned by :meth:`ResilientPool.apply_async`."""
+
+    def __init__(self, pool: "ResilientPool", task: _Task):
+        self._pool = pool
+        self._task = task
+
+    def ready(self) -> bool:
+        """``True`` once the result is available (never blocks)."""
+        t = self._task
+        return t.done or (t.future is not None and t.future.done())
+
+    def get(self, timeout: Optional[float] = None):
+        """Wait for and return the result, recovering from dead workers."""
+        return self._pool._resolve(self._task, timeout)
+
+
+class ResilientPool:
+    """Process pool with dead-worker recovery (see module docstring).
+
+    :param processes: Worker count (>= 1).
+    :param initializer: Optional per-worker initializer.
+    :param initargs: Arguments for *initializer*.
+    :param on_death: Optional ``f(fn, args) -> result`` producing the result of a
+        task that kills its worker even when run alone.  ``None`` raises
+        :class:`WorkerDeathError`.
+    :param max_tasks_per_child: Recycle each worker after this many tasks
+        (``None`` = never).  Bounds slow memory growth of long-lived workers at
+        the cost of re-spawning (a ``dreamer`` import per new worker).
+    :param window: In-flight bound of ``imap`` / ``imap_unordered`` per worker.
+    :param name: Label used in the recovery warnings.
+    """
+
+    def __init__(
+        self,
+        processes: int,
+        initializer: Optional[Callable] = None,
+        initargs: tuple = (),
+        *,
+        on_death: Optional[Callable[[Callable, tuple], Any]] = None,
+        max_tasks_per_child: Optional[int] = None,
+        window: int = 2,
+        name: str = "pool",
+    ):
+        self._processes = max(1, int(processes))
+        self._initializer = initializer
+        self._initargs = initargs
+        self._on_death = on_death
+        self._max_tasks = max_tasks_per_child if max_tasks_per_child else None
+        self._window = max(1, int(window))
+        self._name = name
+        self._seq = 0
+        self._outstanding: Dict[int, _Task] = {}
+        self._closed = False
+        self.deaths = 0
+        self._executor = self._new_executor(self._processes)
+
+    # ------------------------------------------------------------------
+    # Executor management
+    # ------------------------------------------------------------------
+
+    def _new_executor(self, workers: int) -> ProcessPoolExecutor:
+        kwargs = dict(
+            max_workers=workers,
+            mp_context=mp.get_context(),
+            initializer=self._initializer,
+            initargs=self._initargs,
+        )
+        if self._max_tasks and mp.get_start_method() != "fork":
+            kwargs["max_tasks_per_child"] = self._max_tasks
+        return ProcessPoolExecutor(**kwargs)
+
+    def _submit(self, task: _Task) -> None:
+        task.future = self._executor.submit(task.fn, *task.args)
+
+    def _recover(self) -> None:
+        """A worker died: restart smaller and resubmit every unfinished task."""
+        from dreamer.utils.logger import Logger
+
+        self.deaths += 1
+        broken = self._executor
+        running = [t for t in self._outstanding.values()
+                   if not t.done and t.future is not None and t.future.running()]
+        if not running:  # unknown which one: every unfinished task is a suspect
+            running = [t for t in self._outstanding.values() if not t.done]
+        for t in running:
+            t.suspicions += 1
+        broken.shutdown(wait=False, cancel_futures=True)
+        self._processes = max(1, self._processes // 2)
+        Logger(
+            f"[{self._name}] a worker process died (likely out of memory); restarting "
+            f"with {self._processes} worker(s) and resubmitting "
+            f"{sum(1 for t in self._outstanding.values() if not t.done)} unfinished task(s)",
+            Logger.Levels.warning,
+        ).log()
+        self._executor = self._new_executor(self._processes)
+        for t in sorted(self._outstanding.values(), key=lambda t: t.seq):
+            if t.done:
+                continue
+            if t.suspicions >= 2:
+                self._run_isolated(t)
+            else:
+                self._submit(t)
+
+    def _run_isolated(self, task: _Task) -> None:
+        """Run a twice-suspected task alone; a third death marks it as failed."""
+        from dreamer.utils.logger import Logger
+
+        solo = self._new_executor(1)
+        try:
+            task.result = solo.submit(task.fn, *task.args).result()
+        except BrokenProcessPool:
+            Logger(
+                f"[{self._name}] task {task.seq} killed its worker again when run "
+                f"alone — giving up on it ({_DEATH_MESSAGE})",
+                Logger.Levels.warning,
+            ).log()
+            if self._on_death is None:
+                self._outstanding.pop(task.seq, None)
+                raise WorkerDeathError(f"[{self._name}] {_DEATH_MESSAGE}")
+            task.result = self._on_death(task.fn, task.args)
+        finally:
+            solo.shutdown(wait=True, cancel_futures=True)
+        task.done = True
+        task.future = None
+
+    def _resolve(self, task: _Task, timeout: Optional[float]):
+        """Block until *task* has a result, recovering from dead workers."""
+        while not task.done:
+            try:
+                task.result = task.future.result(timeout=timeout)
+                task.done = True
+            except BrokenProcessPool:
+                self._recover()
+        self._outstanding.pop(task.seq, None)
+        task.future = None
+        return task.result
+
+    # ------------------------------------------------------------------
+    # multiprocessing.Pool-compatible API
+    # ------------------------------------------------------------------
+
+    def apply_async(self, fn: Callable, args: tuple = ()) -> ResilientResult:
+        """Submit ``fn(*args)``; returns a handle with ``get()`` / ``ready()``."""
+        if self._closed:
+            raise ValueError("pool is closed")
+        task = _Task(fn, tuple(args), self._seq)
+        self._seq += 1
+        self._outstanding[task.seq] = task
+        try:
+            self._submit(task)
+        except BrokenProcessPool:
+            self._recover()
+        return ResilientResult(self, task)
+
+    def imap(self, fn: Callable, iterable: Iterable, chunksize: int = 1) -> Iterator:
+        """Ordered results of ``fn(x)``, with a bounded in-flight window.
+
+        ``chunksize`` is accepted for compatibility; tasks are dispatched one by
+        one (dynamic load balancing).
+        """
+        it = iter(iterable)
+        pending: Deque[ResilientResult] = deque()
+        exhausted = False
+        while True:
+            while not exhausted and len(pending) < self._window * self._processes:
+                try:
+                    x = next(it)
+                except StopIteration:
+                    exhausted = True
+                    break
+                pending.append(self.apply_async(fn, (x,)))
+            if not pending:
+                return
+            yield pending.popleft().get()
+
+    def imap_unordered(self, fn: Callable, iterable: Iterable, chunksize: int = 1) -> Iterator:
+        """Results of ``fn(x)`` as they complete, with a bounded in-flight window."""
+        from concurrent.futures import FIRST_COMPLETED, wait
+
+        it = iter(iterable)
+        pending: List[ResilientResult] = []
+        exhausted = False
+        while True:
+            while not exhausted and len(pending) < self._window * self._processes:
+                try:
+                    x = next(it)
+                except StopIteration:
+                    exhausted = True
+                    break
+                pending.append(self.apply_async(fn, (x,)))
+            if not pending:
+                return
+            ready = [r for r in pending if r.ready()]
+            if not ready:
+                futures = [r._task.future for r in pending if r._task.future is not None]
+                if futures:
+                    wait(futures, return_when=FIRST_COMPLETED)
+                ready = [r for r in pending if r.ready()] or [pending[0]]
+            for r in ready:
+                pending.remove(r)
+                yield r.get()
+
+    def close(self) -> None:
+        """No new tasks; workers finish what is outstanding."""
+        self._closed = True
+
+    def join(self) -> None:
+        """Wait for the workers to exit (after :meth:`close`)."""
+        self._executor.shutdown(wait=True)
+
+    def terminate(self) -> None:
+        """Stop now, discarding outstanding tasks."""
+        self._closed = True
+        self._outstanding.clear()
+        ex = self._executor
+        procs = list(getattr(ex, "_processes", {}).values() or [])
+        ex.shutdown(wait=False, cancel_futures=True)
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+        for p in procs:
+            p.join(timeout=5)
+
+    def __enter__(self) -> "ResilientPool":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if exc_type is None:
+            self.close()
+            self.join()
+        else:
+            self.terminate()
+        return False

@@ -240,6 +240,21 @@ class TestFingerprints:
             # Spectral / recurrence attributes do not depend on identification knobs.
             assert "eigenvalues" not in changed and "order" not in changed
 
+    def test_dependency_change_propagates_through_a_chain(self, monkeypatch):
+        """If (b)'s inputs change while (a)'s own inputs do not, (a) is still
+        recomputed: fp(a) contains fp(b).  Checked along the full chain
+        tier1 → gcd_slope → delta_prediction → approximated_digits_per_step →
+        convergence_rate, and via stale_attributes on a stored row."""
+        monkeypatch.setattr(config.system, "REUSE_POLICY", "strict")
+        chain = ["gcd_slope", "delta_prediction", "approximated_digits_per_step", "convergence_rate"]
+        row = {n: 1.0 for n in chain}
+        row["fingerprints"] = {n: attribute_fingerprint(n, 1000) for n in chain}
+        assert stale_attributes(row, chain, 1000) == []
+        # convergence_rate declares no knob of its own; only tier1 (at the root) changes.
+        assert ATTRIBUTE_META["convergence_rate"].config == ()
+        _bump(monkeypatch, "search.DEPTH_CONVERGENCE_THRESHOLD")
+        assert stale_attributes(row, chain, 1000) == chain
+
     def test_walk_type_invalidates_spectral(self, monkeypatch):
         before = attribute_fingerprint("eigenvalues", 1000)
         _bump(monkeypatch, af.WALK_TYPE_KNOB)

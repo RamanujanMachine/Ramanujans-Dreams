@@ -41,7 +41,9 @@ import multiprocessing as mp
 import os
 import time
 from collections import namedtuple
-from multiprocessing import Pool
+from multiprocessing import Pool  # noqa: F401  (kept for type references)
+
+from dreamer.utils.resilient_pool import ResilientPool
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
 
 from dreamer.configs import config
@@ -119,6 +121,13 @@ def _stage_pool_init(config_overrides: dict, shards: Sequence, shared_logs, extr
     _install_stage_state(shards, shared_logs, extra)
 
 
+def _task_death_result(fn, args) -> "TaskError":
+    """Result of a stage task whose worker died even when run alone."""
+    task = args[0] if args else None
+    return TaskError(getattr(task, "key", None),
+                     "worker process died while computing this trajectory (likely out of memory)")
+
+
 def stage_shard(idx: int):
     """Return the stage shard at *idx* (call from inside a task function)."""
     return _STAGE_STATE["shards"][idx]
@@ -164,7 +173,7 @@ class StagePool:
         self.workers = resolve_stage_workers(workers)
         self.extra = extra
         self.share_pq_cache = share_pq_cache
-        self._pool: Optional[Pool] = None
+        self._pool: Optional[ResilientPool] = None
         self._manager = None
 
     @property
@@ -180,10 +189,13 @@ class StagePool:
         if self.share_pq_cache and self.shards:
             self._manager = mp.Manager()
             shared_logs = [self._manager.list() for _ in self.shards]
-        self._pool = Pool(
-            processes=self.workers,
+        self._pool = ResilientPool(
+            self.workers,
             initializer=_stage_pool_init,
             initargs=(config.export_configurations(), self.shards, shared_logs, self.extra),
+            on_death=_task_death_result,
+            max_tasks_per_child=getattr(sys_config, "POOL_MAX_TASKS_PER_CHILD", None),
+            name="stage pool",
         )
         return self
 

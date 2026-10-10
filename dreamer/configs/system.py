@@ -141,6 +141,17 @@ class SystemConfig(Configurable):
             )
         },
     )
+    POOL_MAX_TASKS_PER_CHILD: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Recycle each pool worker after this many tasks (None = never). "
+                "Bounds slow memory growth of long-lived workers on large CMFs, at "
+                "the cost of re-spawning workers (each re-imports dreamer). Not "
+                "available with the 'fork' start method (ignored there)."
+            )
+        },
+    )
     STAGE_POOL_CHUNKSIZE: int = field(
         default=1,
         metadata={

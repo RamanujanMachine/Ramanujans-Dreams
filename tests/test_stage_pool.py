@@ -384,10 +384,12 @@ class TestFailurePaths:
         manager down and clears the stage state (no leaked processes)."""
         with pytest.raises(RuntimeError):
             with StagePool(["shard-A"]) as pool:
-                inner = pool._pool
+                assert list(pool.imap(_echo_task, [1, 2]))[0][0] == 1   # workers started
+                procs = list(pool._pool._executor._processes.values())
+                assert procs
                 raise RuntimeError("producer failed")
         assert pool._pool is None and pool._manager is None
-        assert all(not p.is_alive() for p in inner._pool)
+        assert all(not p.is_alive() for p in procs)
         with pytest.raises(KeyError):
             stage_shard(0)
 

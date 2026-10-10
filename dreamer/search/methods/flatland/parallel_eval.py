@@ -41,6 +41,7 @@ from dreamer.search.methods.flatland.evaluator import (
     flatland_trajectory_key,
 )
 from dreamer.utils.logger import Logger
+from dreamer.utils.resilient_pool import ResilientPool
 from dreamer.utils.storage.attribute_fingerprints import tier1_record_fresh
 from dreamer.utils.multi_processing import search_worker_budget
 from dreamer.utils.storage.optimization_objectives import score_record
@@ -156,11 +157,21 @@ def make_eval_pool(shard, start, workers: int) -> Optional[Pool]:
     effective = resolve_eval_workers(workers)
     if effective <= 1:
         return None
-    return Pool(
-        processes=effective,
+    return ResilientPool(
+        effective,
         initializer=_pool_init,
         initargs=(config.export_configurations(), shard, start),
+        on_death=_walk_death_result,
+        max_tasks_per_child=getattr(config.system, "POOL_MAX_TASKS_PER_CHILD", None),
+        name="eval pool",
     )
+
+
+def _walk_death_result(fn, args):
+    """Result of a walk whose worker died even when run alone: a failed walk
+    (δ = −∞), exactly like a walk that raises."""
+    payload = args[0] if args else (None,)
+    return payload[0], WalkError("worker process died during the walk (likely out of memory)")
 
 
 def make_shared_eval_pool(shard, start, workers: int):
