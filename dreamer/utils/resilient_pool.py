@@ -84,7 +84,7 @@ class ResilientResult:
 
 
 class ResilientPool:
-    """Process pool with dead-worker recovery (see module docstring).
+    """Process pool with dead-worker recovery and memory-adaptive size (see module docstring).
 
     :param processes: Worker count (>= 1).
     :param initializer: Optional per-worker initializer.
@@ -110,7 +110,9 @@ class ResilientPool:
         window: int = 2,
         name: str = "pool",
     ):
-        self._processes = max(1, int(processes))
+        from dreamer.utils.memory_budget import memory_worker_cap
+        self._requested = max(1, int(processes))
+        self._processes = memory_worker_cap(self._requested)
         self._initializer = initializer
         self._initargs = initargs
         self._on_death = on_death
@@ -121,11 +123,19 @@ class ResilientPool:
         self._outstanding: Dict[int, _Task] = {}
         self._closed = False
         self.deaths = 0
+        self.shrinks = 0
+        self.grows = 0
+        self._last_resize = 0.0
+        self._completed_since_resize = 0
+        self._submitted_since_check = 0
         self._executor = self._new_executor(self._processes)
 
     # ------------------------------------------------------------------
     # Executor management
     # ------------------------------------------------------------------
+
+    #: Minimum seconds between two memory-driven resizes.
+    _GROW_INTERVAL = 10.0
 
     def _new_executor(self, workers: int) -> ProcessPoolExecutor:
         kwargs = dict(
@@ -140,6 +150,88 @@ class ResilientPool:
 
     def _submit(self, task: _Task) -> None:
         task.future = self._executor.submit(task.fn, *task.args)
+        self._submitted_since_check += 1
+        if self._submitted_since_check >= max(4, 2 * self._processes):
+            self._submitted_since_check = 0
+            self._check_memory()
+
+    def _check_memory(self) -> None:
+        """Adapt the worker count to memory, in both directions, without overlap.
+
+        Called every few submissions.
+
+        * **Shrink** (half) when available memory fell below the reserve: the
+          waiting tasks are taken back, the running ones are **drained** (the old
+          executor finishes them and its workers exit) and only then a smaller
+          executor starts — never more processes than before, so the shrink
+          itself cannot push memory higher.
+        * **Grow** toward the requested (core) count once the workers are warm
+          (``2 x workers`` tasks completed since the last resize): the largest
+          worker's measured RSS x 1.25 is the per-worker cost; if more such
+          workers fit above the reserve, the executor's worker limit is raised
+          **in place** (new processes start lazily on the next submissions — no
+          executor replacement, no overlap).  Only possible where workers can be
+          started dynamically (``spawn`` / ``forkserver``); with ``fork`` the
+          conservative start-up cap stands.  At most one step per
+          ``_GROW_INTERVAL`` seconds.
+        """
+        from dreamer.configs import config
+        if not getattr(config.system, "MEMORY_AWARE_WORKERS", True):
+            return
+        import time
+        from dreamer.utils.memory_budget import available_memory_mb, rss_mb
+        reserve = float(getattr(config.system, "MEMORY_RESERVE_MB", 1024))
+        avail = available_memory_mb()
+        if avail < reserve and self._processes > 1:
+            self.shrinks += 1
+            self._shrink_drain(max(1, self._processes // 2), reserve)
+            return
+        ex = self._executor
+        if (
+            self._processes >= self._requested
+            or not getattr(ex, "_safe_to_dynamically_spawn_children", False)
+            or self._completed_since_resize < 2 * self._processes
+            or time.time() - self._last_resize < self._GROW_INTERVAL
+        ):
+            return
+        pids = list(getattr(ex, "_processes", {}) or {})
+        if len(pids) < self._processes:
+            return                       # not all workers started yet — not warm
+        per_worker = max(rss_mb([p]) for p in pids) * 1.25
+        room = int((avail - reserve) // per_worker) if per_worker > 0 else 0
+        if room < 1:
+            return
+        from dreamer.utils.logger import Logger
+        self.grows += 1
+        self._processes = min(self._requested, self._processes + room)
+        ex._max_workers = self._processes
+        self._last_resize = time.time()
+        self._completed_since_resize = 0
+        Logger(
+            f"[{self._name}] warm workers measure ~{per_worker:.0f} MB each and more fit; "
+            f"growing to {self._processes} worker(s)",
+            Logger.Levels.info,
+        ).log()
+
+    def _shrink_drain(self, workers: int, reserve: float) -> None:
+        """Shrink without ever running more processes than before (see above)."""
+        import time
+        from dreamer.utils.logger import Logger
+        Logger(
+            f"[{self._name}] available memory below the {reserve:.0f} MB reserve; "
+            f"draining running tasks and shrinking to {workers} worker(s)",
+            Logger.Levels.warning,
+        ).log()
+        waiting = [t for t in self._outstanding.values()
+                   if not t.done and t.future is not None and not t.future.running() and t.future.cancel()]
+        old = self._executor
+        old.shutdown(wait=True)          # running tasks complete; their futures keep the results
+        self._processes = workers
+        self._executor = self._new_executor(workers)
+        self._last_resize = time.time()
+        self._completed_since_resize = 0
+        for t in sorted(waiting, key=lambda t: t.seq):
+            t.future = self._executor.submit(t.fn, *t.args)
 
     def _recover(self) -> None:
         """A worker died: restart smaller and resubmit every unfinished task."""
@@ -198,6 +290,7 @@ class ResilientPool:
             try:
                 task.result = task.future.result(timeout=timeout)
                 task.done = True
+                self._completed_since_resize += 1
             except BrokenProcessPool:
                 self._recover()
         self._outstanding.pop(task.seq, None)

@@ -141,6 +141,41 @@ class SystemConfig(Configurable):
             )
         },
     )
+    MEMORY_AWARE_WORKERS: bool = field(
+        default=True,
+        metadata={"description": (
+            "Cap every process pool by available memory, not only by cores: "
+            "workers = min(cores, (available - MEMORY_RESERVE_MB) / per-worker MB), and "
+            "shrink a running pool when available memory drops below the reserve (before "
+            "the OS kills workers). See dreamer.utils.memory_budget."
+        )},
+    )
+    MEMORY_LIMIT_MB: Optional[int] = field(
+        default=None,
+        metadata={"description": (
+            "Memory (MB) this run may use; None = detect (Linux MemAvailable + cgroup/SLURM "
+            "limit, macOS vm_stat). Set it on shared nodes."
+        )},
+    )
+    MEMORY_RESERVE_MB: int = field(
+        default=1024,
+        metadata={"description": "Memory (MB) kept free for the main process and the OS."},
+    )
+    WORKER_MEMORY_MB: Optional[int] = field(
+        default=None,
+        metadata={"description": (
+            "Memory budget per worker (MB). None = measured fresh-worker RSS (~130 MB) + "
+            "WORKER_TASK_HEADROOM_MB."
+        )},
+    )
+    WORKER_TASK_HEADROOM_MB: int = field(
+        default=512,
+        metadata={"description": (
+            "Per-worker allowance (MB) for a task's own data on top of the import baseline "
+            "(walked matrices, symbolic trajectory matrix, caches). Measured warm-up: "
+            "~50 MB (2F1) to ~350 MB (4F3); raise it for very large CMFs."
+        )},
+    )
     POOL_MAX_TASKS_PER_CHILD: Optional[int] = field(
         default=None,
         metadata={
