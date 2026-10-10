@@ -44,6 +44,7 @@ import math
 from typing import List, Set, Tuple
 
 from dreamer.configs import config
+from dreamer.utils.lru import make_handler_cache
 from dreamer.search.methods.flatland.discrete_local_max import (
     evaluate_neighbours,
     parallel_micro_climb,
@@ -164,7 +165,7 @@ def finalize_best_trajectories(
     # climb is a cache hit for the next, so nothing is re-walked — but each climb
     # still explores independently (see below), so the result stays complete and
     # order-independent.
-    handler_cache: dict = {}
+    handler_cache = make_handler_cache()
     objective_name = active_objective()
 
     with worker_pool(

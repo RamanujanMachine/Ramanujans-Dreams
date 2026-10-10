@@ -22,6 +22,7 @@ import numpy as np
 from ramanujantools import Position
 
 from dreamer.configs import config
+from dreamer.utils.lru import make_handler_cache
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
@@ -189,7 +190,7 @@ class GeneticSearch(SearchMethod):
         :raises NoInitialPopulation: if no in-cone seed genome can be built.
         """
         if handler_cache is None:
-            handler_cache = {}
+            handler_cache = make_handler_cache()
 
         # Per-(shard, method, constant) reproducible RNG for every GA operator
         # (selection / crossover / mutation / population top-up).  Same GLOBAL_SEED

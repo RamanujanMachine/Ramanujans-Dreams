@@ -273,6 +273,15 @@ class SearchConfig(Configurable):
         default=0,
         metadata={"description": "Worker cap for evaluating the neighbour batch in each SA step. 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},
     )
+    HANDLER_CACHE_SIZE: int = field(
+        default=64,
+        metadata={"description": (
+            "Maximum number of trajectory handlers (each holding its walked matrices) the "
+            "search methods keep per shard to reuse a walk for another constant. Least "
+            "recently used handlers are evicted; a later request just walks again. Bounds "
+            "the main process' memory on large CMFs. 0 = unbounded."
+        )},
+    )
     ANNEAL_LOOKAHEAD: str = field(
         default="auto",
         metadata={"description": (

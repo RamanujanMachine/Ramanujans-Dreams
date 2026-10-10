@@ -14,6 +14,7 @@ from collections import defaultdict
 from typing import Dict, List, Set
 
 from dreamer.configs import config
+from dreamer.utils.lru import make_handler_cache
 from dreamer.configs.system import sys_config
 from dreamer.configs.logging import logging_config
 from dreamer.extraction.shard import Shard
@@ -100,7 +101,7 @@ class SmallAngleSearchMod(SearcherModScheme):
         # Shared across all constant-runs for this shard so that trajectories
         # evaluated for one constant reuse their walk matrices when a second
         # constant's climb encounters the same trajectory.
-        handler_cache: dict = {}
+        handler_cache = make_handler_cache()
 
         # Flatland geometry (LLL/BKZ) + interior start built once per shard
         # (constant-independent).  The persistent per-shard process pool walks

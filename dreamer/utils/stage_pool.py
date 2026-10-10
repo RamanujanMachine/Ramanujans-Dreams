@@ -96,34 +96,62 @@ def resolve_stage_workers(budget: Optional[int] = None) -> int:
 # Worker-side state
 # ---------------------------------------------------------------------------
 
-def _install_stage_state(shards: Sequence, shared_logs: Optional[Sequence], extra: Optional[dict]) -> None:
+#: Shards a worker keeps (unpickled) for reuse by later tasks of the same shard.
+_WORKER_SHARD_CACHE_SIZE = 256
+
+
+def _install_stage_state(shards: Optional[Sequence], cmfs: Optional[Sequence], extra: Optional[dict]) -> None:
     """Install the stage context in the current process.
 
-    :param shards: The stage's shards, addressed by index in tasks.
-    :param shared_logs: One Manager list per shard (same order), or ``None`` to
-        keep each shard's (p, q) cache process-local.
+    :param shards: Serial mode: the stage's shards (addressed by index).  In a
+        worker this is ``None`` — shards arrive with their tasks (see
+        :class:`_Envelope`) and are kept in a small LRU.
+    :param cmfs: Worker mode: the distinct CMF objects, sent once (shards
+        travel without their CMF and are re-attached to these).
     :param extra: Optional stage-specific payload (e.g. ``{"cmf_lookup": ...}``).
     """
-    if shared_logs is not None:
-        from dreamer.utils.storage.frequency_list import FrequencyList
-        for shard, log in zip(shards, shared_logs):
-            cache = getattr(shard, "cache", None)
-            if cache is not None:
-                shard.cache = FrequencyList(cache.max_size, shared_log=log)
+    from dreamer.utils.lru import LRUDict
+
     _STAGE_STATE.clear()
-    _STAGE_STATE["shards"] = list(shards)
+    if shards is not None:
+        _STAGE_STATE["shards"] = dict(enumerate(shards))
+    else:
+        _STAGE_STATE["shards"] = LRUDict(_WORKER_SHARD_CACHE_SIZE)
+    _STAGE_STATE["cmfs"] = list(cmfs or [])
     _STAGE_STATE["extra"] = dict(extra or {})
 
 
-def _stage_pool_init(config_overrides: dict, shards: Sequence, shared_logs, extra) -> None:
-    """Pool initializer: re-apply the parent's config and install the stage context."""
+def _stage_pool_init(config_overrides: dict, cmfs: Sequence, extra) -> None:
+    """Pool initializer: re-apply the parent's config and install the stage
+    context (only the CMFs — never the whole shard list)."""
     config.configure(**config_overrides)
-    _install_stage_state(shards, shared_logs, extra)
+    _install_stage_state(None, cmfs, extra)
+
+
+#: What actually travels to a worker per task: the user task plus, when it
+#: references a shard, a lightweight copy of that shard (no CMF, no cache) and
+#: its shared (p, q) log proxy.
+_Envelope = namedtuple("_Envelope", ["fn", "task", "shard_idx", "light_shard", "pq_log"])
+
+
+def _run_envelope(env: "_Envelope"):
+    """Worker entry point: make the task's shard available, then run the task."""
+    if env.shard_idx is not None:
+        shards = _STAGE_STATE["shards"]
+        if env.shard_idx not in shards:
+            from dreamer.utils.storage.frequency_list import FrequencyList
+            shard = env.light_shard
+            shard.cmf = _STAGE_STATE["cmfs"][shard._stage_cmf_index]
+            shard.cache = FrequencyList(shard._stage_cache_size, shared_log=env.pq_log)
+            shards[env.shard_idx] = shard
+    return env.fn(env.task)
 
 
 def _task_death_result(fn, args) -> "TaskError":
     """Result of a stage task whose worker died even when run alone."""
     task = args[0] if args else None
+    if isinstance(task, _Envelope):
+        task = task.task
     return TaskError(getattr(task, "key", None),
                      "worker process died while computing this trajectory (likely out of memory)")
 
@@ -158,7 +186,8 @@ class StagePool:
         serially in-process.
     :param extra: Optional picklable payload handed to the workers once
         (read with :func:`stage_extra`).
-    :param share_pq_cache: Attach a shared (p, q) log per shard (multi-worker only).
+    :param share_pq_cache: Attach a shared (p, q) log per shard (multi-worker
+        only; created lazily for shards that get tasks).
     """
 
     def __init__(
@@ -185,31 +214,64 @@ class StagePool:
         if self.workers <= 1:
             _install_stage_state(self.shards, None, self.extra)
             return self
-        shared_logs = None
+        # Only the distinct CMFs go to the workers up front; shards travel with
+        # their tasks (lightweight copies), so worker memory does not grow with
+        # the number of shards (a 9D CMF can have >300k shards).
+        self._cmf_index: dict = {}
+        cmfs: list = []
+        for shard in self.shards:
+            cmf = getattr(shard, "cmf", None)
+            if cmf is not None and id(cmf) not in self._cmf_index:
+                self._cmf_index[id(cmf)] = len(cmfs)
+                cmfs.append(cmf)
+        self._light: dict = {}
+        self._logs: dict = {}
         if self.share_pq_cache and self.shards:
             self._manager = mp.Manager()
-            shared_logs = [self._manager.list() for _ in self.shards]
         self._pool = ResilientPool(
             self.workers,
             initializer=_stage_pool_init,
-            initargs=(config.export_configurations(), self.shards, shared_logs, self.extra),
+            initargs=(config.export_configurations(), cmfs, self.extra),
             on_death=_task_death_result,
             max_tasks_per_child=getattr(sys_config, "POOL_MAX_TASKS_PER_CHILD", None),
             name="stage pool",
         )
         return self
 
+    def _envelope(self, fn: Callable, task) -> "_Envelope":
+        """Wrap *task* with what the worker needs to resolve its shard."""
+        idx = getattr(task, "shard_idx", None)
+        if idx is None or not self.shards:
+            return _Envelope(fn, task, None, None, None)
+        light = self._light.get(idx)
+        if light is None:
+            import copy
+            shard = self.shards[idx]
+            light = copy.copy(shard)
+            light.cmf = None
+            light.cache = None
+            light._stage_cmf_index = self._cmf_index[id(shard.cmf)]
+            light._stage_cache_size = getattr(getattr(shard, "cache", None), "max_size", 100)
+            self._light[idx] = light
+        log = None
+        if self._manager is not None:
+            log = self._logs.get(idx)
+            if log is None:   # created lazily: only shards that actually get tasks
+                log = self._logs[idx] = self._manager.list()
+        return _Envelope(fn, task, idx, light, log)
+
     def imap(self, fn: Callable, tasks: Iterable) -> Iterator:
         """Apply *fn* to every task; yield results in task order.
 
         :param fn: Module-level task function (must not raise; return
             :class:`TaskError` on failure).
-        :param tasks: Iterable of picklable task payloads.
+        :param tasks: Iterable of picklable task payloads; a task with a
+            ``shard_idx`` attribute gets that shard via :func:`stage_shard`.
         """
         if self._pool is None:
             return map(fn, tasks)
         chunksize = max(1, int(getattr(sys_config, "STAGE_POOL_CHUNKSIZE", 1) or 1))
-        return self._pool.imap(fn, tasks, chunksize=chunksize)
+        return self._pool.imap(_run_envelope, (self._envelope(fn, t) for t in tasks), chunksize=chunksize)
 
     def __exit__(self, exc_type, exc, tb) -> bool:
         try:

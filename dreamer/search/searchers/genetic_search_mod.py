@@ -13,6 +13,7 @@ from collections import defaultdict
 from typing import Dict, List, Set
 
 from dreamer.configs import config
+from dreamer.utils.lru import make_handler_cache
 from dreamer.configs.system import sys_config
 from dreamer.configs.logging import logging_config
 from dreamer.extraction.shard import Shard
@@ -96,7 +97,7 @@ class GeneticSearchModV2(SearcherModScheme):
         output_path = os.path.join(sys_config.EXPORT_SEARCH_RESULTS, f"{shard_id}.jsonl")
         seen_trajectories = load_seen_trajectories_for_search(output_path, shard_id)
 
-        handler_cache: dict = {}
+        handler_cache = make_handler_cache()
 
         # Build the flatland geometry (integer nullspace + LLL/BKZ reduction)
         # and interior start point ONCE per shard: both are constant-
