@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 from ramanujantools import Matrix, Position
-import pandas as pd
 from collections import UserDict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -182,7 +181,7 @@ class DataManager(UserDict[SearchVector, SearchData], JSONable):
             manager[sv] = sd
         return manager
 
-    def as_df(self) -> pd.DataFrame:
+    def as_df(self) -> "pd.DataFrame":
         """
         Convert the data into a dataframe
         :return: The pandas dataframe.
@@ -200,4 +199,5 @@ class DataManager(UserDict[SearchVector, SearchData], JSONable):
             }
             for sv, data in self.items()
         ]
+        import pandas as pd  # local: pandas (~30 MB) is only needed here
         return pd.DataFrame(rows)

@@ -1,5 +1,6 @@
-from dreamer.extraction.sampling_orchestrators.sampling_orchestrator import SamplingOrchestrator
-from dreamer.extraction.sampling_orchestrators.shard_sampler_orchestrator import ShardSamplingOrchestrator
+from dreamer._lazy import lazy_exports
 
-__all__ = ["SamplingOrchestrator", "ShardSamplingOrchestrator"]
-
+__getattr__, __dir__, __all__ = lazy_exports(__name__, {
+    "SamplingOrchestrator": "dreamer.extraction.sampling_orchestrators.sampling_orchestrator:SamplingOrchestrator",
+    "ShardSamplingOrchestrator": "dreamer.extraction.sampling_orchestrators.shard_sampler_orchestrator:ShardSamplingOrchestrator",
+})
