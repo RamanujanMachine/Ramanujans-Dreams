@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 from functools import lru_cache, cached_property
-from typing import List, Optional, TYPE_CHECKING, Tuple
+from typing import Dict, List, Optional, TYPE_CHECKING, Tuple
 
 import sympy as sp
 from sympy.abc import n
@@ -207,6 +207,56 @@ def derive_trajectory_id(
 # DTO factory
 # ---------------------------------------------------------------------------
 
+def computed_fingerprints(values: dict, walk_depth: Optional[int]) -> Dict[str, str]:
+    """Fingerprints for the attributes present in a computed *values* dict.
+
+    ``<name>_error`` entries are fingerprinted as ``<name>`` (an error under the
+    same inputs is a final outcome, not a reason to retry).
+
+    :param values: ``{attr or attr_error: value}`` as returned by
+        :func:`compute_attributes`.
+    :param walk_depth: The trajectory's walk depth.
+    :return: ``{attr: fingerprint}``.
+    """
+    from dreamer.utils.storage.attribute_fingerprints import attribute_fingerprint
+    names = {k[: -len("_error")] if k.endswith("_error") else k for k in values if k != "fingerprints"}
+    return {n: attribute_fingerprint(n, walk_depth) for n in sorted(names)}
+
+
+def attributes_patch(
+    handler: "TrajectoryAttributesHandler",
+    constant,
+    record: dict,
+    specs,
+    *,
+    context: Optional[dict] = None,
+) -> dict:
+    """Compute *specs* for a stored row, reusing its Tier-1 values (no LIReC).
+
+    The handler (built from the CMF at the row's ``walk_depth``) is seeded with
+    the row's δ / identified / p,q / projection column inside the constant's
+    scope, so only what the requested attributes genuinely need is computed.
+
+    :param handler: Handler for the row's trajectory (``from_cmf`` at the stored depth).
+    :param constant: :class:`Constant` (or sympy expression) of the row.
+    :param record: The stored flat row (must carry the Tier-1 fields).
+    :param specs: Attribute specs (names or ``(name, predicate)``) to compute.
+    :param context: Optional predicate context (shard-level gates).
+    :return: Flat patch ``{trajectory_id, constant, <attrs...>, fingerprints}``;
+        attributes gated off by their predicate are absent.
+    """
+    from dreamer.utils.constants.constant import Constant as _Constant
+    c_sympy = constant.value_sympy if isinstance(constant, _Constant) else constant
+    *_, values = handler.compute_for_constant(
+        c_sympy, sync_attributes=tuple(specs), seed=record, context=context,
+    )
+    patch = {"trajectory_id": record.get("trajectory_id"), "constant": record.get("constant")}
+    patch.update(values)
+    if values:
+        patch["fingerprints"] = computed_fingerprints(values, handler.walk_depth())
+    return patch
+
+
 def build_trajectory_dtos(
     handler: "TrajectoryAttributesHandler",
     *,
@@ -290,6 +340,8 @@ def build_trajectory_dtos(
         delta, p, q, ided, extra = handler.compute_for_constant(
             c_sympy, sync_attributes=tuple(sync_attrs),
         )
+        if extra:
+            extra["fingerprints"] = computed_fingerprints(extra, walk_depth)
 
         dtos.append(TrajectoryDTO(
             trajectory_id=trajectory_id,
@@ -986,8 +1038,16 @@ class TrajectoryAttributesHandler:
         (:meth:`_effective_walk_values`) so ``Limit.as_rational`` reads the
         identical column.  Returns ``None`` (⇒ ramanujantools default, the last
         column) only when no column has been selected yet.
+
+        When the column is already known (selected during identification, or
+        seeded from a stored row) it is used directly — no full-depth walk just
+        to rediscover it.  Only identified trajectories reach this (``_limits``
+        returns early otherwise), and for those the column is non-degenerate at
+        the walk depth (δ was computed on it), so the result is unchanged.
         """
-        _, col_index = self._effective_walk_values(self._depth)
+        col_index = self._projection_column
+        if col_index is None:
+            _, col_index = self._effective_walk_values(self._depth)
         if col_index is None:
             return None
         N = self.traj_size()
@@ -1736,7 +1796,41 @@ class TrajectoryAttributesHandler:
             if not key.startswith(_CONST_INDEPENDENT_CACHE_KEYS):
                 del self._cache[key]
 
-    def compute_for_constant(self, constant, sync_attributes: tuple = ()) -> tuple:
+    def seed_tier1(self, record: dict) -> None:
+        """Inject a stored row's Tier-1 values into this handler's caches.
+
+        A stored row keeps δ (float64), ``identified``, the **exact** p/q vectors
+        and the projection column, but not the walk.  Seeding lets Tier-2/3
+        attributes that only *read* these values (identification gates,
+        δ-matched eigenvalue selection, p/q projections) run without re-walking
+        to the full depth and without calling LIReC.  Attributes that need the
+        walk itself still compute it (once, at the stored depth).
+
+        Must be called inside a constant scope (``compute_for_constant`` does),
+        after the constant-dependent cache was cleared.
+
+        :param record: Flat stored row (``delta``, ``identified``, ``p_vector``,
+            ``q_vector``, ``projection_column``).
+        """
+        delta = record.get("delta")
+        self._cache[f"delta_{self._depth}"] = float(delta) if delta is not None else float("-inf")
+        p, q = record.get("p_vector"), record.get("q_vector")
+        if record.get("identified") and p is not None and q is not None:
+            pq = ([sp.sympify(x) for x in p], [sp.sympify(x) for x in q])
+            # Second element (walk values) is never read by consumers of the seed.
+            self._utility_cache["pq_vector"] = (pq, None)
+        else:
+            self._utility_cache["pq_vector"] = (None, None)
+        if record.get("projection_column") is not None:
+            self._projection_column = int(record["projection_column"])
+
+    def compute_for_constant(
+        self,
+        constant,
+        sync_attributes: tuple = (),
+        seed: Optional[dict] = None,
+        context: Optional[dict] = None,
+    ) -> tuple:
         """Evaluate delta / p / q / identified (+ optional extra metrics) for *constant*.
 
         Reuses the cached walk matrices from this handler (the walk is
@@ -1753,16 +1847,26 @@ class TrajectoryAttributesHandler:
         is a ``float``, ``extra`` is the (possibly empty) metrics dict, and the
         rest match :meth:`delta` / :meth:`p_vector` / :meth:`q_vector` /
         :meth:`identified`.
+
+        :param seed: Optional stored ``(trajectory, constant)`` row whose Tier-1
+            values (δ, identified, p/q, projection column) are injected instead of
+            recomputed (see :meth:`seed_tier1`) — no walk is primed and LIReC is
+            never called; only what *sync_attributes* genuinely need is computed.
+        :param context: Optional predicate context forwarded to
+            :func:`compute_attributes` (shard-level gates).
         """
-        # Ensure the walk is cached before swapping the constant (walk is
-        # constant-independent, so we prime it here if not already done).
-        _ = self._effective_walk_values(self._depth)
+        if seed is None:
+            # Ensure the walk is cached before swapping the constant (walk is
+            # constant-independent, so we prime it here if not already done).
+            _ = self._effective_walk_values(self._depth)
 
         old_constant = self._constant
         self._constant = constant
         self._clear_constant_dependent_cache()
 
         try:
+            if seed is not None:
+                self.seed_tier1(seed)
             delta = self.delta()
             p = self.p_vector()
             q = self.q_vector()
@@ -1771,7 +1875,7 @@ class TrajectoryAttributesHandler:
             if sync_attributes:
                 # Local import avoids a module-load cycle with attribute_registry.
                 from dreamer.utils.storage.attribute_registry import compute_attributes
-                extra = compute_attributes(self, sync_attributes, on_error="store")
+                extra = compute_attributes(self, sync_attributes, on_error="store", context=context)
         finally:
             # Restore the previous constant regardless of exceptions, and clear
             # again so subsequent calls see the right constant.

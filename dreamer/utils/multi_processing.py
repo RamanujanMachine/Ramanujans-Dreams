@@ -465,7 +465,11 @@ def load_seen_trajectories(jsonl_path: str) -> Dict[str, Dict[str, dict]]:
                 if const not in bucket:
                     bucket[const] = record
                 else:
-                    bucket[const].update(record)   # flat merge, later wins
+                    base = bucket[const]
+                    fps = record.pop("fingerprints", None)
+                    base.update(record)            # flat merge, later wins
+                    if fps:                        # per-attribute fps: deep merge
+                        base.setdefault("fingerprints", {}).update(fps)
     except FileNotFoundError:
         pass
     return merged
