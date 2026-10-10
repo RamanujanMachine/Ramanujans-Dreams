@@ -10,6 +10,7 @@ from ramanujantools.cmf import CMF
 from typing import Tuple, Optional, List, Union
 
 from dreamer.utils.constants.constant import Constant
+from dreamer.utils.constants.high_precision import high_precision
 from dreamer.utils.logger import Logger
 from dreamer.utils.storage.storage_objects import SearchData, SearchVector
 from dreamer.configs import config
@@ -142,7 +143,7 @@ class Searchable(ABC):
         p, q = None, None
         values = [item for item in walk_col]
         with Logger.simple_timer('constant heavy evalf'):
-            high_res_constant = constant.evalf(search_config.CONSTANT_NO_DIGITS_HIGH_RES)
+            high_res_constant = high_precision(constant, search_config.CONSTANT_NO_DIGITS_HIGH_RES)
             low_res_constant = constant.evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES)
         cache_hit = False
         values_vec = sp.Matrix(values)

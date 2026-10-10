@@ -11,6 +11,7 @@ from sympy.abc import n
 
 from LIReC.db.access import db
 from ramanujantools import LinearRecurrence, Matrix, Limit, linear_recurrence
+from dreamer.utils.constants.high_precision import high_precision
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.configs import config
@@ -1181,7 +1182,7 @@ class TrajectoryAttributesHandler:
             return False, float('-inf')
 
         if self._high_res_constant is None:
-            self._high_res_constant = constant.evalf(self._constant_resolution)
+            self._high_res_constant = high_precision(constant, self._constant_resolution)
 
         while self._constant_resolution <= search_config.MAX_CONSTANT_RESOLUTION:
             err = sp.Abs(estimated - self._high_res_constant)
@@ -1201,7 +1202,7 @@ class TrajectoryAttributesHandler:
                 self._constant_resolution = min(
                     self._constant_resolution * 2, search_config.MAX_CONSTANT_RESOLUTION
                 )
-                self._high_res_constant = constant.evalf(self._constant_resolution)
+                self._high_res_constant = high_precision(constant, self._constant_resolution)
                 continue
             return True, delta
         return False, float('-inf')
@@ -1578,7 +1579,7 @@ class TrajectoryAttributesHandler:
             # delta() has populated _high_res_constant at the escalated precision.
             constant = self._high_res_constant
             if constant is None:
-                constant = self.constant().evalf(self._constant_resolution)
+                constant = high_precision(self.constant(), self._constant_resolution)
             err = sp.Abs(estimated - constant)
             if err == 0:
                 return None   # exact within available precision
@@ -1792,6 +1793,10 @@ class TrajectoryAttributesHandler:
         into the next.
         """
         self._utility_cache.pop("pq_vector", None)
+        # The high-precision value (and its escalated resolution) belongs to the
+        # previous constant — δ for the next one must not compare against it.
+        self._high_res_constant = None
+        self._constant_resolution = search_config.CONSTANT_NO_DIGITS_HIGH_RES
         for key in list(self._cache.keys()):
             if not key.startswith(_CONST_INDEPENDENT_CACHE_KEYS):
                 del self._cache[key]
