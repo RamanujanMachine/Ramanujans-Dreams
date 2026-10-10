@@ -81,6 +81,10 @@ class System:
         :param constants: if None, search for constants defined in the configuration file in 'configs.database.py'.
         """
         Logger.start_run()
+        # Fresh run id: REUSE_POLICY='recompute' uses it to ignore earlier runs'
+        # rows (it is part of every attribute fingerprint under that policy).
+        import uuid
+        sys_config.RUN_ID = uuid.uuid4().hex[:12]
 
         constants: List[Constant] = self.__validate_constants(constants)
 

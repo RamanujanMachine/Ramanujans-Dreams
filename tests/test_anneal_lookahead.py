@@ -278,14 +278,13 @@ class TestLookaheadPolicy:
         monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ())
         assert lookahead_enabled(_P(workers), d) is expected
 
-    def test_auto_off_while_tier2_queue_active(self, monkeypatch):
-        """``auto`` must not compete with an active Tier-2 background queue;
-        ``on`` still forces it."""
+    def test_auto_independent_of_tier2(self, monkeypatch):
+        """Tier-2 runs inside the walk tasks now (no separate queue competing for
+        CPU), so ``auto`` no longer depends on ``TIER2_ATTRIBUTES``."""
         monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", (("eigenvalues", "if_identified"),))
         monkeypatch.setattr(config.search, "ANNEAL_LOOKAHEAD", "auto")
-        assert lookahead_enabled(_P(80), 3) is False
-        monkeypatch.setattr(config.search, "ANNEAL_LOOKAHEAD", "on")
         assert lookahead_enabled(_P(80), 3) is True
+        assert lookahead_enabled(_P(11), 3) is False
 
     def test_no_pool_disables(self, monkeypatch):
         monkeypatch.setattr(config.search, "ANNEAL_LOOKAHEAD", "on")

@@ -51,6 +51,7 @@ from dreamer.utils.storage.attribute_registry import (
     register_predicate,
 )
 from dreamer.utils.storage import Exporter, Importer, Formats
+from dreamer.utils.storage.attribute_fingerprints import attribute_fingerprint
 from dreamer.utils.multi_processing import (
     load_seen_shards,
     load_seen_trajectories,
@@ -1525,97 +1526,57 @@ class TestMergeOnRead:
     # Worker: only compute missing attributes
     # ------------------------------------------------------------------
 
-    def test_worker_skips_already_present_t2_attr(self, monkeypatch):
-        """``compute_tier2_for_item`` must not overwrite already-present attrs."""
-        from dreamer.configs import config
-        from dreamer.utils.multi_processing import compute_tier2_for_item
+    def test_sink_item_dto_unwraps_records(self):
+        """The direct-write sinks receive ``(matrix, constant, record)`` tuples
+        and must write only the record (Tier-2 is already inside it)."""
+        from dreamer.utils.multi_processing import sink_item_dto
 
-        monkeypatch.setattr(
-            config.search,
-            "TIER2_ATTRIBUTES",
-            ("eigenvalues", "spectral_gap", "gcd_slope", "approximated_digits_per_step"),
-        )
+        patch = {"trajectory_id": "t1", "constant": "e", "spectral_gap": 0.5}
+        assert sink_item_dto((None, None, patch)) is patch
+        assert sink_item_dto(patch) is patch
 
-        patch = {
-            "trajectory_id": "existing_t1",
-            "constant": "e",
-            "eigenvalues": ["pre-computed"],
-            "spectral_gap": 0.5,
-            "gcd_slope": 0.1,
-            "approximated_digits_per_step": 8.0,
-        }
-        out = compute_tier2_for_item((None, None, patch))
+    def test_stale_attributes_skips_present_fresh_values(self):
+        """Already-present attributes with a matching fingerprint are not
+        recomputed; missing ones are (replaces the old Tier-2 worker check)."""
+        from dreamer.utils.storage.attribute_fingerprints import stale_attributes
 
-        assert out["trajectory_id"] == "existing_t1"
-        # Pre-computed values must not be replaced by error entries.
-        assert out["eigenvalues"] == ["pre-computed"]
-        assert "eigenvalues_error" not in out
-
-    def test_worker_full_dto_input_is_passthrough_when_nothing_missing(
-        self, minimal_handler, symbols, monkeypatch,
-    ):
-        """Full DTO input with no missing TIER2 attrs is returned unchanged."""
-        from dreamer.configs import config
-        from dreamer.utils.multi_processing import compute_tier2_for_item
-
-        # No attrs requested → nothing to compute → DTO untouched.
-        monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ())
-
-        start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
-        direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
-        dto = build_trajectory_dtos(
-            minimal_handler,
-            cmf_id="c", shard_id="s", cmf_name="c",
-            shard_encoding_str="enc", start=start, direction=direction,
-        )[0]
-
-        out = compute_tier2_for_item((None, None, dto))
-        assert out is dto, "Worker must return the same DTO object unchanged"
-        assert out.extra == {}
-
-    def test_worker_with_none_traj_matrix_does_not_crash(self, monkeypatch):
-        """When traj_matrix=None and attrs are missing, the worker is a no-op.
-
-        The producer passes ``None`` to short-circuit work; the worker must
-        forward the patch unchanged without raising.
-        """
-        from dreamer.configs import config
-        from dreamer.utils.multi_processing import compute_tier2_for_item
-
-        monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ("eigenvalues",))
-
-        patch = {"trajectory_id": "t1", "constant": "e"}
-        out = compute_tier2_for_item((None, None, patch))
-        # No computation happened; the flat patch gained no metric columns.
-        assert set(out.keys()) == {"trajectory_id", "constant"}
+        row = {"eigenvalues": ["pre-computed"], "spectral_gap": 0.5,
+               "fingerprints": {"eigenvalues": attribute_fingerprint("eigenvalues", 1000),
+                                "spectral_gap": attribute_fingerprint("spectral_gap", 1000)}}
+        assert stale_attributes(row, ["eigenvalues", "spectral_gap", "gcd_slope"], 1000) == ["gcd_slope"]
 
     def test_tier3_worker_direct_call(self, simple_shard, monkeypatch):
-        """``compute_tier3_for_item`` computes registered attrs into a patch dict."""
+        """``_tier3_task`` computes the requested attributes for a stored row on a
+        seeded handler and returns a flat patch with per-attribute fingerprints."""
         from dreamer.configs import config
-        from dreamer.post_process.tier3_post_process_mod import compute_tier3_for_item
-
-        monkeypatch.setattr(config.post_process, "TIER3_ATTRIBUTES", ("kamidelta",))
-
-        # Build a real handler from simple_shard so the worker has something
-        # symbolic to walk through.
+        from dreamer.post_process.tier3_post_process_mod import Tier3Task, _SEED_FIELDS, _tier3_task
         from dreamer.search.methods.hedgehog_scan import SerialSearcher
+        from dreamer.utils.stage_pool import StagePool
+
         pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs()
         if not pairs:
             pytest.skip("No trajectory pairs available")
         traj_p, start_p = pairs[0]
         handler = TrajectoryAttributesHandler.from_cmf(
-            simple_shard.cmf, traj_p, start_p,
-            constant=e.value_sympy,
-            searchable=simple_shard,
+            simple_shard.cmf, traj_p, start_p, searchable=simple_shard,
         )
-
-        patch = {"trajectory_id": "t1", "constant": "e"}
-        out = compute_tier3_for_item((handler.trajectory_matrix, e.value_sympy, patch, None))
-
-        assert out is patch  # same dict, mutated in place
-        # kamidelta either computed successfully or recorded as an error (flat keys);
-        # either path is acceptable — what matters is that one of them is present.
-        assert "kamidelta" in out or "kamidelta_error" in out
+        cmf_id, shard_id, enc = derive_cmf_and_shard_ids(simple_shard)
+        (dto,) = build_trajectory_dtos(
+            handler, cmf_id=cmf_id, shard_id=shard_id, cmf_name=simple_shard.cmf_name,
+            shard_encoding_str=enc, start=start_p, direction=traj_p, constants=[e],
+        )
+        row = json.loads(dto.to_json_line())
+        task = Tier3Task(
+            jsonl_path="unused", cmf_name=simple_shard.cmf_name,
+            record={k: row.get(k) for k in _SEED_FIELDS}, constant=e.value_sympy,
+            specs=("traj_size", "eigenvalues"), context=None,
+        )
+        with StagePool(workers=1, extra={"cmf_lookup": {simple_shard.cmf_name: simple_shard.cmf}}):
+            out = _tier3_task(task)
+        assert out["trajectory_id"] == row["trajectory_id"] and out["constant"] == e.name
+        assert out["traj_size"] == row.get("traj_size", out["traj_size"])
+        assert "eigenvalues" in out or "eigenvalues_error" in out
+        assert set(out["fingerprints"]) == {"traj_size", "eigenvalues"}
 
     # ------------------------------------------------------------------
     # Writer: handles plain patch dicts
@@ -1695,9 +1656,12 @@ class TestMergeOnRead:
             dir_t = tuple(int(v) for v in traj_p.values())
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
             fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
+            wd = walk_depth_for(simple_shard.cmf, traj_p)
             seen_trajectories[tid] = {
                 c.name: {"trajectory_id": tid, "constant": c.name,
-                         "eigenvalues": "dummy", "config_fingerprint": fp}
+                         "eigenvalues": "dummy", "config_fingerprint": fp,
+                         # per-attribute fingerprint: a value without one is stale
+                         "fingerprints": {"eigenvalues": attribute_fingerprint("eigenvalues", wd)}}
                 for c in simple_shard.consts
             }
 
@@ -1799,9 +1763,9 @@ class TestMergeOnRead:
             assert isinstance(payload, TrajectoryDTO), (
                 f"Expected TrajectoryDTO for a new trajectory, got {type(payload).__name__}"
             )
-            assert traj_matrix is not None, (
-                "New trajectories must ship the trajectory matrix to workers."
-            )
+            # Tier-2 is computed inside the walk task now; the symbolic matrix
+            # is no longer shipped anywhere (it can be a page of math).
+            assert traj_matrix is None
             assert constant is not None, (
                 "Producer must propagate the sympy constant alongside each item."
             )
@@ -1943,9 +1907,11 @@ class TestMergeOnRead:
             dir_t = tuple(int(v) for v in traj_p.values())
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
             fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
+            wd = walk_depth_for(simple_shard.cmf, traj_p)
             seen_trajectories[tid] = {
                 c.name: {"trajectory_id": tid, "constant": c.name,
-                         present_attr: "pre-computed", "config_fingerprint": fp}
+                         present_attr: "pre-computed", "config_fingerprint": fp,
+                         "fingerprints": {present_attr: attribute_fingerprint(present_attr, wd)}}
                 for c in simple_shard.consts
             }
 
@@ -1966,9 +1932,11 @@ class TestMergeOnRead:
                 f"Expected patch dict, got {type(payload).__name__}"
             )
             assert "trajectory_id" in payload and "constant" in payload
-            # The flat patch carries only structural keys (workers fill metrics);
-            # the already-present attr must not be in it.
+            # The patch carries only the missing attribute(s) (computed on a
+            # handler seeded with the stored Tier-1 values) — never the
+            # already-present, still-fresh one.
             assert present_attr not in payload
+            assert "spectral_gap" in payload or "spectral_gap_error" in payload
 
 
 # ---------------------------------------------------------------------------

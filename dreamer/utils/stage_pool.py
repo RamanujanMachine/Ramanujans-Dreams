@@ -302,16 +302,25 @@ class BufferedJsonlWriter:
 # Task functions (module-level so they pickle)
 # ---------------------------------------------------------------------------
 
-#: Tier-1 task payload: ``key`` is echoed back; ``constants`` is the list of
-#: :class:`Constant` objects to emit rows for (empty → matrix only, no DTOs).
+#: Per-trajectory task payload.  ``key`` is echoed back.
+#:
+#: * ``constants`` — :class:`Constant` objects that need the full Tier-1 row
+#:   (walk + identification); ``extra_metrics`` (attribute specs, e.g. the
+#:   configured Tier-2 list) are computed for them **in the same scope**, on the
+#:   same handler, so nothing is computed twice.
+#: * ``seeded`` — ``(constant, stored_row, specs)`` triples whose Tier-1 row is
+#:   still valid: only *specs* are computed, on a handler seeded with the row's
+#:   δ / identified / p,q (no LIReC; see ``attributes_patch``).
 Tier1Task = namedtuple(
     "Tier1Task",
-    ["key", "shard_idx", "trajectory", "start", "constants", "cmf_id", "shard_id", "shard_encoding_str"],
+    ["key", "shard_idx", "trajectory", "start", "constants", "cmf_id", "shard_id",
+     "shard_encoding_str", "extra_metrics", "seeded"],
+    defaults=((), ()),
 )
 
-#: Successful Tier-1 result: the symbolic trajectory matrix (only when
-#: requested) and one DTO per requested constant (same order).
-Tier1Result = namedtuple("Tier1Result", ["key", "matrix", "dtos"])
+#: Successful result: the symbolic trajectory matrix (only when requested), one
+#: DTO per entry of ``constants`` (same order) and one patch per ``seeded`` entry.
+Tier1Result = namedtuple("Tier1Result", ["key", "matrix", "dtos", "patches"], defaults=([],))
 
 
 def run_tier1_task(
@@ -321,19 +330,20 @@ def run_tier1_task(
     build_dtos: Optional[Callable] = None,
     want_matrix: bool = False,
 ):
-    """Build the handler for one trajectory and its Tier-1 DTOs.
+    """Compute one trajectory's attributes: full rows and/or seeded patches.
 
-    Mirrors the serial per-trajectory code path exactly:
-    ``handler_cls.from_cmf`` on the stage shard, then ``build_dtos`` for
-    ``task.constants`` (skipped when empty), wrapped in the trajectory watchdog.
+    Mirrors the serial per-trajectory code path: ``handler_cls.from_cmf`` on the
+    stage shard, then ``build_dtos`` for ``task.constants`` (with
+    ``task.extra_metrics`` computed in the same constant scope), then a seeded
+    :func:`attributes_patch` for every ``task.seeded`` entry (reusing the same
+    handler when the walk depth matches).  Wrapped in the trajectory watchdog.
     Stage modules wrap this in a module-level task function that passes their
     own ``TrajectoryAttributesHandler`` / ``build_trajectory_dtos`` names.
 
     :param task: A :class:`Tier1Task`.
     :param handler_cls: Handler class (default ``TrajectoryAttributesHandler``).
     :param build_dtos: DTO builder (default ``build_trajectory_dtos``).
-    :param want_matrix: Also return the symbolic trajectory matrix (needed by the
-        search stage's Tier-2 queue).
+    :param want_matrix: Also return the symbolic trajectory matrix.
     :return: :class:`Tier1Result`, or :class:`TaskError` on failure.
     """
     from dreamer.configs.logging import logging_config
@@ -345,26 +355,42 @@ def run_tier1_task(
     try:
         shard = stage_shard(task.shard_idx)
         with Logger.watchdog(
-            f"Tier-1 trajectory compute (shard {task.shard_id})",
+            f"Trajectory compute (shard {task.shard_id})",
             logging_config.WATCHDOG_TRAJECTORY_SECONDS,
             detail=lambda: f"start={task.start} direction={task.trajectory}",
         ):
-            handler = handler_cls.from_cmf(
-                shard.cmf, task.trajectory, task.start,
-                constant=None,  # injected per-constant by the DTO builder
-                searchable=shard,
-            )
-            dtos = build_dtos(
-                handler,
-                cmf_id=task.cmf_id,
-                shard_id=task.shard_id,
-                cmf_name=shard.cmf_name,
-                shard_encoding_str=task.shard_encoding_str,
-                start=task.start,
-                direction=task.trajectory,
-                constants=list(task.constants),
-            ) if task.constants else []
+            handler = None
+            dtos: List = []
+            if task.constants:
+                handler = handler_cls.from_cmf(
+                    shard.cmf, task.trajectory, task.start,
+                    constant=None,  # injected per-constant by the DTO builder
+                    searchable=shard,
+                )
+                kwargs = {"extra_metrics": tuple(task.extra_metrics)} if task.extra_metrics else {}
+                dtos = list(build_dtos(
+                    handler,
+                    cmf_id=task.cmf_id,
+                    shard_id=task.shard_id,
+                    cmf_name=shard.cmf_name,
+                    shard_encoding_str=task.shard_encoding_str,
+                    start=task.start,
+                    direction=task.trajectory,
+                    constants=list(task.constants),
+                    **kwargs,
+                ))
+            patches = []
+            for constant, record, specs in task.seeded:
+                depth = record.get("walk_depth")
+                if handler is None or (depth is not None and int(depth) != handler.walk_depth()):
+                    handler = handler_cls.from_cmf(
+                        shard.cmf, task.trajectory, task.start,
+                        walk_depth=depth, searchable=shard,
+                    )
+                patches.append(ta.attributes_patch(handler, constant, record, specs))
+            if want_matrix and handler is None:
+                handler = handler_cls.from_cmf(shard.cmf, task.trajectory, task.start, searchable=shard)
             matrix = handler.trajectory_matrix if want_matrix else None
     except Exception as e:  # noqa: BLE001 — one bad trajectory must not abort the stage
         return TaskError(task.key, str(e))
-    return Tier1Result(task.key, matrix, list(dtos))
+    return Tier1Result(task.key, matrix, dtos, patches)

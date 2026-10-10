@@ -148,7 +148,7 @@ class SearchConfig(Configurable):
             ("convergence_rate", "if_identified"),
             ("digits_computed", "if_identified"), ("avg_computed_digits_per_step", "if_identified"),
         ),
-        metadata={"description": "Background-worker attributes computed asynchronously during search. Empty disables the worker/writer subprocesses entirely."},
+        metadata={"description": "Attributes computed for every trajectory the search stage evaluates, in the same pool task as its Tier-1 walk (rows whose Tier-1 is already stored get only the missing / stale ones, from a handler seeded with the stored values). Reused across runs per attribute fingerprint (system.REUSE_POLICY)."},
     )
 
     USE_DELTA_PREDICTION: bool = field(
@@ -284,9 +284,7 @@ class SearchConfig(Configurable):
             "are committed only when the loop requests them); only idle capacity is "
             "used. 'auto' enables it when the eval pool has at least 2 * (2 * d_flat) "
             "workers (room for one step's neighbours plus one full speculative "
-            "neighbourhood) and the separate Tier-2 background queue is not active "
-            "(TIER2_ATTRIBUTES empty — otherwise speculation steals CPU from the Tier-2 "
-            "bottleneck); 'on' whenever a multi-process pool exists; 'off' disables it."
+            "neighbourhood); 'on' whenever a multi-process pool exists; 'off' disables it."
         )},
     )
 

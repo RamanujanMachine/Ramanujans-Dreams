@@ -37,7 +37,10 @@ Reuse policy (``system.REUSE_POLICY``)
   matches;
 * ``"keep"`` — reuse any stored value, ignoring fingerprints (fast exploratory
   reruns; values may be stale);
-* ``"recompute"`` — ignore stored values.
+* ``"recompute"`` — ignore values from **earlier runs**.  Implemented by
+  folding the run id (``system.RUN_ID``, set by ``System.run``) into every
+  fingerprint: rows from previous runs mismatch everywhere, while rows written
+  during this run (e.g. a trajectory an optimiser revisits) are reused as usual.
 """
 
 from __future__ import annotations
@@ -184,6 +187,8 @@ def attribute_fingerprint(name: str, walk_depth: Optional[int]) -> str:
     else:
         knobs, deps, uses_depth, version = meta.config, meta.deps, meta.uses_depth, meta.version
     values = tuple((k, json.dumps(_canonical(knob_value(k)), sort_keys=True)) for k in sorted(knobs))
+    if reuse_policy() == "recompute":
+        values += (("@run", str(getattr(config.system, "RUN_ID", None))),)
     return _fingerprint_for(
         name, version, values,
         int(walk_depth) if (uses_depth and walk_depth is not None) else None,
@@ -222,16 +227,24 @@ def reuse_policy() -> str:
     return policy
 
 
-def tier1_is_fresh(record: Optional[dict], walk_depth: Optional[int]) -> bool:
-    """Can *record*'s Tier-1 core be reused under the active policy?"""
+def tier1_record_fresh(record: Optional[dict], current_fp: str) -> bool:
+    """Can *record*'s Tier-1 core be reused, given the current Tier-1 fingerprint?
+
+    The single freshness rule for Tier-1 rows (analysis, search, optimisers):
+    ``"keep"`` accepts any row that carries a δ; otherwise the stored
+    ``config_fingerprint`` must equal *current_fp* (which, under
+    ``"recompute"``, embeds the run id — so only this run's rows match).
+    """
     if record is None:
         return False
-    policy = reuse_policy()
-    if policy == "recompute":
-        return False
-    if policy == "keep":
+    if reuse_policy() == "keep":
         return "delta" in record
-    return record.get("config_fingerprint") == tier1_fingerprint(walk_depth)
+    return record.get("config_fingerprint") == current_fp
+
+
+def tier1_is_fresh(record: Optional[dict], walk_depth: Optional[int]) -> bool:
+    """:func:`tier1_record_fresh` for a trajectory of the given walk depth."""
+    return tier1_record_fresh(record, tier1_fingerprint(walk_depth))
 
 
 def stale_attributes(record: Optional[dict], names: Iterable[str], walk_depth: Optional[int]) -> List[str]:
@@ -250,14 +263,12 @@ def stale_attributes(record: Optional[dict], names: Iterable[str], walk_depth: O
     if record is None:
         return names
     policy = reuse_policy()
-    if policy == "recompute":
-        return names
     stored = record.get("fingerprints") or {}
     out = []
     for n in names:
         present = n in record or f"{n}_error" in record
         if not present:
             out.append(n)
-        elif policy == "strict" and stored.get(n) != attribute_fingerprint(n, walk_depth):
+        elif policy != "keep" and stored.get(n) != attribute_fingerprint(n, walk_depth):
             out.append(n)
     return out

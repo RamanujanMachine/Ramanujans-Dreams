@@ -453,11 +453,9 @@ def lookahead_enabled(pool, d_flat: int) -> bool:
       workers: room for one step's ``<= 2·d_flat`` neighbours **plus** one full
       speculative neighbourhood.  With fewer workers almost nothing fits into the
       idle capacity, so speculation would only add bookkeeping.  (E.g. ``d_flat =
-      11`` needs 44 workers; ``d_flat = 3`` needs 12.)  Also off while the
-      separate Tier-2 background queue is active (``search.TIER2_ATTRIBUTES``
-      non-empty): those workers are then the bottleneck and speculation would
-      take CPU from them (measured 2026-10-10: +11 % SA time with Tier-2 on,
-      −15 % with it off, 18 cores, d_flat = 3).
+      11`` needs 44 workers; ``d_flat = 3`` needs 12.)  (Before 2026-10-10 a
+      separate fixed-size Tier-2 queue competed for CPU and ``auto`` stayed off
+      while it was active; Tier-2 now runs inside the walk tasks.)
 
     :param pool: The eval pool (``None`` → serial evaluation → ``False``).
     :param d_flat: Flatland dimension of the shard.
@@ -472,8 +470,6 @@ def lookahead_enabled(pool, d_flat: int) -> bool:
         return False
     if mode == "on":
         return True
-    if search_config.TIER2_ATTRIBUTES:
-        return False
     return workers >= 2 * (2 * int(d_flat))
 
 

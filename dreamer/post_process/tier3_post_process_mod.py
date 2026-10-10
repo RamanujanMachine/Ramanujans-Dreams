@@ -19,8 +19,9 @@ Process model:
 
   Compute (one stage-wide ``StagePool``)
     The CMF lookup is handed to every worker once.  ``_tier3_task`` rebuilds
-    the positions, computes the trajectory matrix from the CMF and runs
-    ``compute_tier3_for_item``; tasks from all shards share the pool
+    the trajectory at the row's own walk depth, seeds the handler with the
+    row's Tier-1 values and computes only the missing / stale attributes
+    (``attributes_patch``); tasks from all shards share the pool
     (``chunksize`` 1 → dynamic load balancing over every core).
 
   Write (main process — single writer)
@@ -67,8 +68,10 @@ from dreamer.utils.storage.predicate_specs import (
     parse_predicate_spec,
 )
 from dreamer.utils.storage.record_metrics import METRIC_EXTRACTORS
+from dreamer.utils.storage.attribute_fingerprints import stale_attributes
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
+    attributes_patch,
     derive_cmf_and_shard_ids,
 )
 from dreamer.utils.ui.tqdm_config import SmartTQDM
@@ -76,84 +79,39 @@ from dreamer.utils.ui.tqdm_config import SmartTQDM
 post_process_config = config.post_process
 
 
-# ---------------------------------------------------------------------------
-# Per-item worker  (module-level so it pickles to subprocesses)
-# ---------------------------------------------------------------------------
-
-def compute_tier3_for_item(item):
-    """Per-item worker for the post-process stage.
-
-    *item* is ``(trajectory_matrix, constant, patch_dict, context)`` where
-    *constant* is the sympy expression for the target constant (e.g.
-    ``sp.log(2)``).  Constant context is required by attributes that compare
-    against the limit (``delta_sequence``, ``limit``); pass ``None`` when none
-    is available — those attributes will then be skipped with an error entry.
-    *context* is the shard/CMF predicate context (``{"trajectory_id": ...,
-    "top_n_sets": {...}}``) threaded into ``compute_attributes`` so shard-level
-    gates (``top N highest <metric> in shard|cmf``) fire; ``None`` for the
-    legacy no-context path.
-
-    Reads ``post_process.TIER3_ATTRIBUTES`` from the (subprocess-local) config and
-    computes every entry not already present as a **top-level** key on the flat
-    *patch* record.  Per-attribute failures are stored as ``<name>_error``; a
-    fatal handler failure is recorded under ``worker_error``.  The patch (a flat
-    dict) is returned for the writer.
-    """
-    from dreamer.configs import config
-
-    traj_matrix, constant, patch, context = item
-    attrs_to_compute = config.post_process.TIER3_ATTRIBUTES
-    # Specs may be bare strings or ``(name, predicate)`` tuples; filter by
-    # resolved name so predicates still fire inside ``compute_attributes``.
-    missing = [
-        spec for spec in attrs_to_compute
-        if attribute_name(spec) not in patch
-    ]
-
-    if missing and traj_matrix is not None:
-        try:
-            handler = TrajectoryAttributesHandler(traj_matrix, constant=constant)
-            patch.update(
-                compute_attributes(handler, missing, on_error="store", context=context)
-            )
-        except Exception as e:
-            tid = patch.get("trajectory_id", "?")
-            Logger(
-                f"compute_tier3_for_item error on trajectory {tid}: {e}",
-                Logger.Levels.warning,
-            ).log()
-            patch["worker_error"] = str(e)
-    return patch
-
-
 #: One Tier-3 unit of work: a stored ``(trajectory, constant)`` row missing a
 #: Tier-3 attribute.  Carries only small, picklable data — the CMF itself is
 #: resolved inside the worker from the stage's ``cmf_lookup``.
 Tier3Task = namedtuple(
-    "Tier3Task", ["jsonl_path", "cmf_name", "positions", "constant", "patch", "context"],
+    "Tier3Task", ["jsonl_path", "cmf_name", "record", "constant", "specs", "context"],
+)
+
+#: Stored-row fields a Tier-3 worker needs (positions + the Tier-1 seed).
+_SEED_FIELDS = (
+    "trajectory_id", "constant", "start_point", "direction", "walk_depth",
+    "delta", "identified", "p_vector", "q_vector", "projection_column",
 )
 
 
 def _tier3_task(task: "Tier3Task"):
-    """Stage-pool task: rebuild the trajectory matrix and compute its Tier-3 patch.
+    """Stage-pool task: compute the stale Tier-3 attributes of one stored row.
 
-    Rebuilds ``(start, direction)`` from the stored row, computes the symbolic
-    trajectory matrix from the CMF (the same ``from_cmf`` the main process used
-    to run serially) and hands it to :func:`compute_tier3_for_item`, which builds
-    the attribute handler exactly as before.
+    Rebuilds the trajectory from the CMF at the row's **own** walk depth and
+    seeds the handler with the row's Tier-1 values (``attributes_patch``), so the
+    Tier-3 attributes see the same δ / p,q / depth as Tier-1 — no LIReC, and no
+    walk beyond what the attributes themselves need.
 
-    :return: The filled patch dict, or :class:`TaskError` on a handler failure.
+    :return: The patch dict (values + fingerprints), or :class:`TaskError`.
     """
     try:
         cmf = stage_extra("cmf_lookup", {})[task.cmf_name]
-        start, direction = reconstruct_positions(cmf, task.positions)
+        start, direction = reconstruct_positions(cmf, task.record)
         handler = TrajectoryAttributesHandler.from_cmf(
-            cmf, direction, start, constant=task.constant,
+            cmf, direction, start, walk_depth=task.record.get("walk_depth"),
         )
-        matrix = handler.trajectory_matrix
+        return attributes_patch(handler, task.constant, task.record, task.specs, context=task.context)
     except Exception as e:  # noqa: BLE001 — one bad row must not abort the stage
-        return TaskError(task.patch.get("trajectory_id"), str(e))
-    return compute_tier3_for_item((matrix, task.constant, dict(task.patch), task.context))
+        return TaskError(task.record.get("trajectory_id"), str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +221,12 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         # across *all* prioritised shards.
         tasks: List[Tier3Task] = []
         for shard_jsonl in shard_paths:
-            tasks.extend(self._plan_jsonl(shard_jsonl, top_n_sets))
+            planned = self._plan_jsonl(shard_jsonl, top_n_sets)
+            Logger(
+                f"Tier-3 {os.path.basename(shard_jsonl)[:28]}…: {len(planned)} rows to (re)compute",
+                Logger.Levels.info,
+            ).log()
+            tasks.extend(planned)
         if not tasks:
             return
 
@@ -321,7 +284,8 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         if not merged:
             return []
         top_n_sets = top_n_sets or {}
-        desired = {attribute_name(s) for s in post_process_config.TIER3_ATTRIBUTES}
+        specs = tuple(post_process_config.TIER3_ATTRIBUTES)
+        names = [attribute_name(s) for s in specs]
         resolved_specs = self._resolved_specs()
 
         tasks: List[Tier3Task] = []
@@ -329,7 +293,8 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         for by_const in merged.values():
             for record in by_const.values():
                 tid = record.get("trajectory_id")
-                missing = desired - set(record.keys())
+                # Missing or stale (per-attribute fingerprint, REUSE_POLICY).
+                missing = set(stale_attributes(record, names, record.get("walk_depth")))
                 if not missing:
                     continue
                 # Cheap pre-skip: if every missing attribute is gated off for this
@@ -351,9 +316,9 @@ class Tier3PostProcessModV1(PostProcessModScheme):
                 tasks.append(Tier3Task(
                     jsonl_path=jsonl_path,
                     cmf_name=cmf_name,
-                    positions={k: record.get(k) for k in ("start_point", "direction")},
+                    record={k: record.get(k) for k in _SEED_FIELDS},
                     constant=self._constant_sympy(record),
-                    patch={"trajectory_id": tid, "constant": record.get("constant")},
+                    specs=tuple(sp_ for sp_ in specs if attribute_name(sp_) in missing),
                     context=self._build_context(tid, top_n_sets, resolved_specs),
                 ))
         return tasks

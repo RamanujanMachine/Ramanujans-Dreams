@@ -26,6 +26,7 @@ from dreamer.utils.storage.trajectory_attributes import (
     walk_depth_for,
 )
 from dreamer.configs import config
+from dreamer.utils.storage.attribute_fingerprints import tier1_record_fresh
 
 search_config = config.search
 
@@ -125,7 +126,7 @@ def evaluate_in_flatland(
     seen_record = bucket.get(constant.name)
 
     # --- Cached: this constant's row is fresh and already scored ---
-    if seen_record is not None and seen_record.get("config_fingerprint") == current_fp:
+    if tier1_record_fresh(seen_record, current_fp):
         cached = score_record(seen_record, objective_name)
         if cached is not None:
             return cached
@@ -148,6 +149,8 @@ def evaluate_in_flatland(
             start=start,
             direction=direction,
             constants=[constant],
+            # Tier-2 in the same scope as the walk (no second walk / LIReC).
+            extra_metrics=tuple(search_config.TIER2_ATTRIBUTES),
         )
     except Exception as exc:
         Logger(
@@ -161,7 +164,7 @@ def evaluate_in_flatland(
         return float("-inf"), False
     dto = dtos[0]
 
-    sink((handler.trajectory_matrix, constant.value_sympy, dto))
+    sink((None, constant.value_sympy, dto))
     handler_cache[trajectory_id] = handler
     record = _dto_record(dto)
     seen_trajectories.setdefault(trajectory_id, {})[constant.name] = record

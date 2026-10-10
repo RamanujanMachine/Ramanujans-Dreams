@@ -65,6 +65,7 @@ from dreamer.utils.stage_pool import (
     total_core_budget,
 )
 from dreamer.utils.storage.atlas_writer import update_shard_found_constants
+from dreamer.utils.storage.attribute_fingerprints import tier1_record_fresh
 from dreamer.utils.storage.optimization_objectives import score_record
 from dreamer.search.methods.hedgehog_scan import SerialSearcher
 import math
@@ -296,6 +297,11 @@ class AnalyzerModV1(AnalyzerModScheme):
                 constants=consts, cmf_id=run.cmf_id, shard_id=run.shard_id,
                 shard_encoding_str=run.encoding_str,
             ))
+        Logger(
+            f"Shard {run.shard_id[:24]}…: {len(processed_tids)} trajectories → "
+            f"{len(processed_tids) - len(tasks)} reused · {len(tasks)} new",
+            Logger.Levels.info,
+        ).log()
         return tasks
 
     @staticmethod
@@ -410,14 +416,11 @@ class AnalyzerModV1(AnalyzerModScheme):
 # ---------------------------------------------------------------------------
 
 def _reusable(rec: Optional[dict], fp: str, objective_name: str) -> bool:
-    """A cached per-constant row is reusable when it is fresh (matching config
-    fingerprint) *and* carries the active objective's column — ``score_record``
-    returns ``None`` only when that column is absent."""
-    return (
-        rec is not None
-        and rec.get("config_fingerprint") == fp
-        and score_record(rec, objective_name) is not None
-    )
+    """A cached per-constant row is reusable when its Tier-1 core is fresh under
+    ``REUSE_POLICY`` (:func:`tier1_record_fresh`) *and* it carries the active
+    objective's column — ``score_record`` returns ``None`` only when that column
+    is absent."""
+    return tier1_record_fresh(rec, fp) and score_record(rec, objective_name) is not None
 
 
 @dataclass

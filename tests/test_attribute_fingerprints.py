@@ -299,11 +299,20 @@ class TestReusePolicy:
         assert tier1_is_fresh(row, 1000)
         assert stale_attributes(row, ["eigenvalues", "gcd_slope", "spectral_gap"], 1000) == ["spectral_gap"]
 
-    def test_recompute(self, monkeypatch):
+    def test_recompute_ignores_earlier_runs_only(self, monkeypatch):
+        """'recompute' folds the run id into every fingerprint: rows written in an
+        earlier run are stale, rows written in this run (same id) are reused."""
+        monkeypatch.setattr(config.system, "REUSE_POLICY", "strict")
+        old_row = _row()                                  # written by an earlier run
         monkeypatch.setattr(config.system, "REUSE_POLICY", "recompute")
-        row = _row()
-        assert not tier1_is_fresh(row, 1000)
-        assert stale_attributes(row, ["eigenvalues"], 1000) == ["eigenvalues"]
+        monkeypatch.setattr(config.system, "RUN_ID", "run-B")
+        assert not tier1_is_fresh(old_row, 1000)
+        assert stale_attributes(old_row, ["eigenvalues"], 1000) == ["eigenvalues"]
+        this_run = _row()                                 # written during run-B
+        assert tier1_is_fresh(this_run, 1000)
+        assert stale_attributes(this_run, ["eigenvalues"], 1000) == []
+        monkeypatch.setattr(config.system, "RUN_ID", "run-C")
+        assert not tier1_is_fresh(this_run, 1000)         # next run: stale again
 
     def test_missing_record_and_error_entries(self, monkeypatch):
         monkeypatch.setattr(config.system, "REUSE_POLICY", "strict")

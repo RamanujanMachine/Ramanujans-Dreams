@@ -41,6 +41,7 @@ from dreamer.search.methods.flatland.evaluator import (
     flatland_trajectory_key,
 )
 from dreamer.utils.logger import Logger
+from dreamer.utils.storage.attribute_fingerprints import tier1_record_fresh
 from dreamer.utils.multi_processing import search_worker_budget
 from dreamer.utils.storage.optimization_objectives import score_record
 
@@ -112,10 +113,13 @@ def _pool_walk(args):
             start=start,
             direction=direction,
             constants=[constant],
+            # Tier-2 in the same scope as the walk (no second walk / LIReC); the
+            # symbolic matrix is no longer shipped back (nothing consumes it).
+            extra_metrics=tuple(config.search.TIER2_ATTRIBUTES),
         )
         if not dtos:
             return idx, WalkError("no DTO produced")
-        return idx, (handler.trajectory_matrix, constant.value_sympy, dtos[0])
+        return idx, (None, constant.value_sympy, dtos[0])
     except Exception as exc:  # noqa: BLE001 — mirror serial evaluator resilience
         return idx, WalkError(str(exc))
 
@@ -283,7 +287,7 @@ class WalkPrefetcher:
                     shard_id=ctx["shard_id"], shard_encoding_str=ctx["shard_encoding_str"],
                 )
                 rec = seen.get(tid, {}).get(constant.name)
-                if rec is not None and rec.get("config_fingerprint") == fp:
+                if tier1_record_fresh(rec, fp):
                     continue
                 if tid in ctx["handler_cache"] or tid in self._entries or tid in new:
                     continue
@@ -379,7 +383,7 @@ def evaluate_batch(
             shard_id=shard_id, shard_encoding_str=shard_encoding_str,
         )
         rec = seen.get(tid, {}).get(constant.name)
-        if rec is not None and rec.get("config_fingerprint") == fp:
+        if tier1_record_fresh(rec, fp):
             cached = score_record(rec, objective_name)
             if cached is not None:  # already scored for this constant
                 results[i] = cached
