@@ -112,6 +112,20 @@ class SystemConfig(Configurable):
         default=4,
         metadata={"description": "Number of background worker processes that compute Tier-2 trajectory attributes during search. When Tier-2 is active these (plus 1 writer/sink) are the cores reserved from TOTAL_CORES."},
     )
+    REUSE_POLICY: str = field(
+        default="strict",
+        metadata={
+            "description": (
+                "How stored trajectory attributes are reused across runs. 'strict' "
+                "(default): reuse a stored value only while its per-attribute "
+                "fingerprint (the knobs it depends on, its dependencies, its code "
+                "version) matches the current config — exactly the affected "
+                "attributes are recomputed. 'keep': reuse any stored value, ignoring "
+                "fingerprints (fast exploratory reruns; values may be stale). "
+                "'recompute': ignore stored values."
+            )
+        },
+    )
     STAGE_POOL_WORKERS: Optional[int] = field(
         default=None,
         metadata={

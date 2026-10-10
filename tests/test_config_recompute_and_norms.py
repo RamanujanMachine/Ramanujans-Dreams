@@ -122,11 +122,12 @@ class TestTier1Fingerprint:
     def test_fingerprint_is_memoised(self):
         """Repeated calls with the same config + depth hit the LRU cache rather
         than re-serialising / re-hashing."""
-        ta._tier1_fingerprint_for_key.cache_clear()
+        from dreamer.utils.storage import attribute_fingerprints as af
+        af._fingerprint_for.cache_clear()
         first = tier1_config_fingerprint(100)
         second = tier1_config_fingerprint(100)
         assert first == second
-        info = ta._tier1_fingerprint_for_key.cache_info()
+        info = af._fingerprint_for.cache_info()
         # Second identical call must be served from the cache.
         assert info.hits >= 1
 
