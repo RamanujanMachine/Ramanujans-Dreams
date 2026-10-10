@@ -72,6 +72,8 @@ Mostly **where things go** and **how many cores to use**.
 | `EXPORT_GRAPHS` | Where the graphing stage writes figures/tables. |
 | `*_FORMAT` | `'pkl'` or `'json'` for the corresponding export. |
 | `TOTAL_CORES` | The core budget for every process pool (`None` ⇒ `os.cpu_count()`); nothing is reserved. |
+| `MEMORY_AWARE_WORKERS` / `MEMORY_LIMIT_MB` / `MEMORY_RESERVE_MB` / `WORKER_TASK_HEADROOM_MB` | Pools also fit available memory: `min(cores, (available − reserve) / per-worker)`, then grow once warm workers measure smaller and shrink (draining) when memory runs low. `MEMORY_LIMIT_MB` sets a budget for the run (shared nodes); available memory is otherwise detected, including cgroup/SLURM limits. |
+| `POOL_MAX_TASKS_PER_CHILD` | Recycle pool workers after N tasks (bounds slow growth on very long runs). |
 | `REUSE_POLICY` | How stored attributes are reused across runs: `'strict'` (default — per-attribute fingerprints decide, so a config change recomputes exactly the affected attributes), `'keep'` (reuse anything stored), `'recompute'` (ignore earlier runs). |
 | `STAGE_POOL_WORKERS` | Cap for the per-stage trajectory pools (analysis, hedgehog search, Tier-3). `None`/`0` ⇒ full core budget; `1` ⇒ serial in-process. |
 | `STAGE_POOL_CHUNKSIZE` | Trajectories handed to a stage-pool worker at a time (default `1` = full dynamic load balancing). |
