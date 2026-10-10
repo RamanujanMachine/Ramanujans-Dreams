@@ -96,7 +96,9 @@ class TestCap:
     @pytest.mark.timeout(180)
     def test_measured_baseline_is_plausible(self):
         base = mb.measured_worker_baseline_mb()
-        assert 40 < base < 400
+        # spawn: ~120 MB of private imports; forkserver: the modules are
+        # pre-imported in the server and shared, so a worker can measure far less.
+        assert 10 < base < 400
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +136,7 @@ class TestPoolIntegration:
         monkeypatch.setattr(config.system, "MEMORY_RESERVE_MB", 200)
         monkeypatch.setattr(config.system, "MEMORY_LIMIT_MB", int(own + 200 + 2 * 150 + 200))
         monkeypatch.setattr(mb, "per_worker_mb", lambda: 1)       # start wide on purpose
+        monkeypatch.setattr(config.system, "POOL_SLOW_START", 0)
         with ResilientPool(4, name="t") as pool:
             assert pool._processes == 4
             out = list(pool.imap(_hog, [(i, 120) for i in range(24)]))
@@ -146,10 +149,10 @@ def test_pool_grows_in_place_after_warm_up(monkeypatch):
     """Started below the core count by a conservative estimate, a pool grows in
     place (no executor replacement) once warm workers measure small — and all
     results stay correct.  Needs dynamically spawned workers (spawn/forkserver)."""
-    import multiprocessing as mp
     from dreamer.utils import resilient_pool as rp
+    from dreamer.utils.mp_context import start_method
 
-    if mp.get_start_method() == "fork":
+    if start_method() == "fork":
         pytest.skip("in-place growth needs spawn/forkserver workers")
     monkeypatch.setattr(config.system, "MEMORY_AWARE_WORKERS", True)
     monkeypatch.setattr(config.system, "MEMORY_RESERVE_MB", 100)

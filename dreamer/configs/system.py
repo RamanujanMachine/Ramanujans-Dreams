@@ -176,6 +176,23 @@ class SystemConfig(Configurable):
             "~50 MB (2F1) to ~350 MB (4F3); raise it for very large CMFs."
         )},
     )
+    POOL_START_METHOD: str = field(
+        default="auto",
+        metadata={"description": (
+            "Process start method for all pools: 'auto' = forkserver on Linux (no "
+            "fork-with-threads deadlocks, workers can be added at any time), spawn on "
+            "macOS; or 'spawn' / 'forkserver' / 'fork' explicitly."
+        )},
+    )
+    POOL_SLOW_START: int = field(
+        default=2,
+        metadata={"description": (
+            "Memory-aware pools that can grow start with at most this many workers, "
+            "measure the real per-task memory peak, then grow to every core that fits. "
+            "Avoids starting all workers on a task that needs gigabytes each (e.g. long "
+            "trajectories on a large CMF). 0 = start at the full memory cap."
+        )},
+    )
     POOL_MAX_TASKS_PER_CHILD: Optional[int] = field(
         default=None,
         metadata={

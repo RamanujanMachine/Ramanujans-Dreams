@@ -23,7 +23,7 @@ import tempfile
 
 import pytest
 
-from dreamer.utils.resilient_pool import ResilientPool, WorkerDeathError
+from dreamer.utils.resilient_pool import ResilientPool, WorkerDeathError, WorkerInitError
 
 pytestmark = pytest.mark.timeout(240)
 
@@ -157,3 +157,100 @@ def _poison_plain(x):
     if x == 3:
         os.kill(os.getpid(), signal.SIGKILL)
     return x
+
+
+# ---------------------------------------------------------------------------
+# Start method, initializer failures, peak memory, slow start
+# ---------------------------------------------------------------------------
+
+def _bad_init():
+    raise RuntimeError("broken initializer")
+
+
+def _allocate(mb):
+    """Touch ``mb`` MB, release it, return the size (peak RSS rises, current falls)."""
+    buf = bytearray(mb * 1024 * 1024)
+    for i in range(0, len(buf), 4096):
+        buf[i] = 1
+    del buf
+    return mb
+
+
+class TestStartMethod:
+    def test_auto_is_forkserver_on_linux_spawn_on_macos(self, monkeypatch):
+        import sys
+        from dreamer.configs.system import sys_config
+        from dreamer.utils.mp_context import start_method
+
+        monkeypatch.setattr(sys_config, "POOL_START_METHOD", "auto")
+        expected = "forkserver" if sys.platform.startswith("linux") else "spawn"
+        assert start_method() == expected
+
+    def test_explicit_override_and_invalid(self, monkeypatch):
+        from dreamer.configs.system import sys_config
+        from dreamer.utils.mp_context import start_method
+
+        monkeypatch.setattr(sys_config, "POOL_START_METHOD", "spawn")
+        assert start_method() == "spawn"
+        monkeypatch.setattr(sys_config, "POOL_START_METHOD", "nonsense")
+        with pytest.raises(ValueError):
+            start_method()
+
+    @pytest.mark.parametrize("method", ["spawn", "forkserver"])
+    def test_pool_runs_under_each_dynamic_method(self, monkeypatch, method):
+        from dreamer.configs.system import sys_config
+
+        monkeypatch.setattr(sys_config, "POOL_START_METHOD", method)
+        with ResilientPool(2, name="t") as pool:
+            assert pool._executor._mp_context.get_start_method() == method
+            assert list(pool.imap(_square, range(6))) == [x * x for x in range(6)]
+
+
+class TestInitializerFailure:
+    def test_initializer_failure_is_not_reported_as_oom(self):
+        with pytest.raises(WorkerInitError, match="broken initializer"):
+            with ResilientPool(2, initializer=_bad_init, name="t") as pool:
+                list(pool.imap(_square, range(4)))
+        assert pool.deaths == 0                      # no OOM-style retries
+
+
+class TestPeakMemory:
+    def test_peak_rss_is_reported_by_workers(self):
+        with ResilientPool(1, name="t") as pool:
+            assert list(pool.imap(_allocate, [200])) == [200]
+        assert pool.peak_worker_mb >= 200            # the released 200 MB still counts
+
+    def test_slow_start_caps_initial_workers(self, monkeypatch):
+        from dreamer.configs.system import sys_config
+
+        monkeypatch.setattr(sys_config, "MEMORY_AWARE_WORKERS", True)
+        monkeypatch.setattr(sys_config, "POOL_SLOW_START", 2)
+        monkeypatch.setattr(sys_config, "WORKER_MEMORY_MB", 1)   # memory is no limit
+        with ResilientPool(6, name="t") as pool:
+            assert pool._processes == 2 and pool._requested == 6
+            assert list(pool.imap(_square, range(4))) == [0, 1, 4, 9]
+
+    def test_growth_counts_peak_not_current_rss(self, monkeypatch):
+        """Workers that peaked at ~1 GB and fell back must not let the pool add
+        workers sized by their (small) current RSS."""
+        from dreamer.configs.system import sys_config
+        from dreamer.utils import memory_budget
+
+        monkeypatch.setattr(sys_config, "MEMORY_AWARE_WORKERS", True)
+        monkeypatch.setattr(sys_config, "POOL_SLOW_START", 2)
+        monkeypatch.setattr(sys_config, "WORKER_MEMORY_MB", 1)
+        monkeypatch.setattr(sys_config, "MEMORY_RESERVE_MB", 0)
+        with ResilientPool(8, name="t") as pool:
+            pool._GROW_INTERVAL = float("inf")               # no automatic growth while warming
+            list(pool.imap(_square, range(8)))       # warm both workers
+            assert pool._processes == 2
+            pool._GROW_INTERVAL = 0.0
+            pool.peak_worker_mb = 1000.0             # as if a task peaked at 1 GB
+            pool._completed_since_resize = 100
+            # 2 live workers need ~2.5 GB to climb back; 3 GB leaves room for 0 more.
+            monkeypatch.setattr(memory_budget, "available_memory_mb", lambda: 3000.0)
+            pool._check_memory()
+            assert pool._processes == 2 and pool.grows == 0
+            monkeypatch.setattr(memory_budget, "available_memory_mb", lambda: 6000.0)
+            pool._check_memory()
+            assert pool._processes > 2 and pool.grows == 1

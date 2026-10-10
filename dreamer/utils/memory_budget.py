@@ -162,7 +162,8 @@ def measured_worker_baseline_mb() -> float:
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor
         try:
-            with ProcessPoolExecutor(1, mp_context=mp.get_context()) as ex:
+            from dreamer.utils.mp_context import pool_context
+            with ProcessPoolExecutor(1, mp_context=pool_context()) as ex:
                 _measured_worker_mb = float(ex.submit(_probe_worker_rss).result(timeout=120))
         except Exception:
             _measured_worker_mb = 250.0   # conservative fallback
