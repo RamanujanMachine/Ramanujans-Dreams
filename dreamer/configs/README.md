@@ -71,7 +71,8 @@ Mostly **where things go** and **how many cores to use**.
 | `EXPORT_ANALYSIS_RESULTS` | Separate analysis store, used only when `analysis.STORE_TRAJECTORIES_SEPARATELY` is on. |
 | `EXPORT_GRAPHS` | Where the graphing stage writes figures/tables. |
 | `*_FORMAT` | `'pkl'` or `'json'` for the corresponding export. |
-| `TOTAL_CORES` / `NUM_BACKGROUND_WORKERS` | The core budget (`None` ⇒ `os.cpu_count()`); workers reserved for Tier-2. |
+| `TOTAL_CORES` | The core budget for every process pool (`None` ⇒ `os.cpu_count()`); nothing is reserved. |
+| `REUSE_POLICY` | How stored attributes are reused across runs: `'strict'` (default — per-attribute fingerprints decide, so a config change recomputes exactly the affected attributes), `'keep'` (reuse anything stored), `'recompute'` (ignore earlier runs). |
 | `STAGE_POOL_WORKERS` | Cap for the per-stage trajectory pools (analysis, hedgehog search, Tier-3). `None`/`0` ⇒ full core budget; `1` ⇒ serial in-process. |
 | `STAGE_POOL_CHUNKSIZE` | Trajectories handed to a stage-pool worker at a time (default `1` = full dynamic load balancing). |
 | `CONSTANTS` | Default constants to search when `run()` is given none. |

@@ -1,3 +1,35 @@
+# Test Audit Report (2026-10-10, d)
+
+Bottom line: attributes are computed once and reused exactly while valid —
+per-attribute fingerprints (with a static **dependency test**), seeded Tier-2/3
+computation from stored rows (no LIReC, no δ recompute), Tier-2 in the same task as
+Tier-1, the fixed Tier-2 queue removed, `REUSE_POLICY`. Full suite under coverage:
+`1017 passed, 2 skipped` (70 % line+branch).
+
+## Touched Modules (Detailed Review)
+
+| Touched module | Changes made | Coverage evidence | Challenge rubric (/5) | Regression evidence |
+|---|---|---|---:|---|
+| `dreamer/utils/storage/attribute_fingerprints.py` (new) | `ATTRIBUTE_META`, `attribute_fingerprint`, `tier1_record_fresh`, `stale_attributes`, `REUSE_POLICY` (run id folded in under `recompute`). | `tests/test_attribute_fingerprints.py` (75); 99 %. | 5 | AST dependency test (found `MAX_CONSTANT_RESOLUTION` + 2 undeclared deps); mutation check (drop a knob → 10 failures); per-knob invalidation; policies. |
+| `dreamer/utils/storage/trajectory_attributes.py` | `seed_tier1`, `compute_for_constant(seed=, context=)`, `attributes_patch`, `computed_fingerprints`; `_final_projection` uses known column. | `tests/test_seeded_attributes.py` (6); 86 %. | 5 | Seeded == fresh for every default Tier-2 attr with LIReC disabled; no walk for spectral attrs; full walk only for walk attrs. |
+| `dreamer/search/searchers/hedgehog_scan_mod.py`, `stage_pool.py` | Classification by fingerprints; Tier-1+Tier-2 in one task; seeded patches; main-process writer; plan line. | 97 % / 92 %; `tests/test_attribute_reuse_pipeline.py` (7). | 5 | Rerun does nothing; adding an attr computes only it (patches, no LIReC); analysis rows seeded; fresh == seeded; keep / recompute. |
+| Optimisers, micro-climb, `parallel_eval`, `evaluator` | Tier-2 in walk task; shared freshness rule; direct-write sinks; no matrix shipping. | Existing optimiser suites + SA look-ahead equivalence. | 4 | Byte-identical SA look-ahead test still green. |
+| `dreamer/post_process/tier3_post_process_mod.py` | Planning by `stale_attributes`; seeded worker at the row's own depth. | 85 %; Tier-3 parallel equivalence + direct worker test. | 4 | Serial ≡ 2-process patches. |
+| `multi_processing.py`, configs | Budget = whole machine; `sink_item_dto`; `REUSE_POLICY`, `RUN_ID`; `NUM_BACKGROUND_WORKERS` removed. | Budget tests updated. | 4 | — |
+
+Benchmarks (18 cores, pFq(2,1) log 2, Tier-2 on, vs `a4c0b39`): search stage 13 s @ 7.6 cores →
+4 s @ 12.2 cores; whole run 30 s → 17 s; SA (100 iters) 519 s → 271 s (SA loop 381 → 233 s,
+micro-climb 78 → 19 s). Seeded Tier-2 per trajectory 0.02 s vs 0.11 s for the old worker.
+
+## Non-Touched Modules (Repository-Wide Summary)
+
+| Area | Status | Risk / follow-up |
+|---|---|---|
+| `multiprocessing.Pool` users (stage / eval pools) | Green. | A killed worker (e.g. OOM) makes `imap` wait forever; one non-reproducible stall seen under coverage. Follow-up: `ProcessPoolExecutor` (raises `BrokenProcessPool`) or a liveness watchdog. |
+| Optimiser cached rows | Unchanged behaviour. | Rows reused by an optimiser are not Tier-2-patched (hedgehog search does that). |
+
+---
+
 # Test Audit Report (2026-10-10, c)
 
 Bottom line: the heuristic ray shooter now uses all cores with a result that is

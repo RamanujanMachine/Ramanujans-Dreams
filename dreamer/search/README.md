@@ -25,12 +25,13 @@ There are **two families** of searcher, wired interchangeably via
 
 Re-samples many trajectory directions in the shard (same samplers as analysis,
 but with the search config), computes Tier-1 for each, and computes any
-configured Tier-2 attributes asynchronously in background workers. It re-uses
-records already on disk from analysis, so nothing is walked twice. The Tier-1
-walks of each shard run on one **stage-wide process pool** created once for all
-shards (sized by the search core budget, capped by
-`config.system.STAGE_POOL_WORKERS`); with an empty
-`config.search.TIER2_ATTRIBUTES` no Tier-2 worker or writer process is spawned.
+configured Tier-2 attributes in the same task as each trajectory's walk. It
+re-uses records already on disk (from analysis or earlier runs): a stored row
+gets only its missing / out-of-date attributes, computed from the stored values
+without re-identifying, so nothing is walked or identified twice. All of it runs
+on one **stage-wide process pool** created once for all shards (every core,
+capped by `config.system.STAGE_POOL_WORKERS`); `config.system.REUSE_POLICY`
+controls how stored values are trusted.
 
 ### 2. The direction-space optimisers
 
@@ -55,8 +56,8 @@ best trajectory is a true lattice local maximum. They are reproducible from
 ### Attribute tiers
 
 - **Tier-1** — always computed (δ, identified, limit, recurrence, p/q).
-- **Tier-2** — `config.search.TIER2_ATTRIBUTES`, computed in background workers
-  during search; land in each record's `extended_metrics`.
+- **Tier-2** — `config.search.TIER2_ATTRIBUTES`, computed during search together with
+  Tier-1 (or from a stored row's Tier-1 values), on every core.
 - **Tier-3** — the most expensive attributes, computed afterwards by the
   optional [post-process stage](../post_process/README.md).
 
