@@ -458,6 +458,11 @@ class TrajectoryAttributesHandler:
         # ``None`` until a column has been selected; geometry-only, so it persists
         # across constants (``compute_for_constant`` does not reset it).
         self._projection_column: Optional[int] = None
+        # Raw walk products W(d) = M(0)·M(1)···M(d-1) by depth d (exact FLINT
+        # matrices; see "Walk checkpoints").  ``_rt_checkpoints`` holds the
+        # sympy conversions actually requested.
+        self._checkpoints: dict = {}
+        self._rt_checkpoints: dict = {}
 
     @classmethod
     def from_cmf(
@@ -511,6 +516,99 @@ class TrajectoryAttributesHandler:
     def clear_utility_cache(self):
         """Drop all cached utility results (walks, p/q vectors)."""
         self._utility_cache.clear()
+        self.release_walks()
+
+    # ------------------------------------------------------------------
+    #  Walk checkpoints
+    # ------------------------------------------------------------------
+    #
+    # Every walk-based value reads raw products W(d) = M(0)···M(d-1) at a few
+    # depths: identification at min(IDENTIFY_DEPTH, D); the convergence check
+    # at round(c·D) and round(c·D) - 1 for c in DEPTH_CONVERGENCE_THRESHOLD; δ
+    # at D.  Instead of one independent walk per request (2-3 full walks per
+    # trajectory before), W(d) is stored per depth and a later depth continues
+    # from the deepest stored one: W(d) = W(c) · M(c)···M(d-1) — exact rational
+    # arithmetic, so the result equals a walk from 0.
+    #
+    # A walk also records, for free, every Tier-1 depth that lies on its way
+    # (no extra steps, only a matrix copy each), so the convergence check after
+    # a depth-D identification needs no walk at all.  An unidentified
+    # trajectory walks exactly the identification depth, as before.
+
+    def _tier1_walk_depths(self) -> set:
+        """Depths the Tier-1 computation reads W at (see section comment)."""
+        depth = int(self._depth)
+        depths = {depth, min(int(search_config.IDENTIFY_DEPTH), depth)}
+        for coef in search_config.DEPTH_CONVERGENCE_THRESHOLD:
+            d = round(coef * depth)
+            depths.update((d, max(d - 1, 0)))
+        return depths
+
+    def _numeric_walk_possible(self) -> bool:
+        return self._traj._is_numeric_walk({n: 1}, {n: 0})
+
+    def _extend_checkpoints(self, targets: list) -> None:
+        """Make W(d) available for every depth in *targets* (sorted, >= 0)."""
+        from ramanujantools import Position
+        from ramanujantools.flint_core import NumericMatrix
+
+        if not self._numeric_walk_possible():
+            # Symbolic leftovers (not expected for CMF trajectories): one plain
+            # walk from 0, no continuation.
+            missing = [d for d in targets if d not in self._rt_checkpoints]
+            if missing:
+                for d, w in zip(missing, self._traj.walk({n: 1}, missing, {n: 0})):
+                    self._rt_checkpoints[d] = w
+            return
+        missing = [d for d in targets if d not in self._checkpoints]
+        if not missing:
+            return
+        if 0 in missing:
+            self._checkpoints[0] = NumericMatrix.eye(self._traj.rows)
+            missing.remove(0)
+            if not missing:
+                return
+        lo, hi = missing[0], missing[-1]
+        base = max((c for c in self._checkpoints if c <= lo), default=0)
+        free = {d for d in self._tier1_walk_depths() if base < d <= hi}
+        depths = sorted((set(missing) | free) - set(self._checkpoints))
+        segment = NumericMatrix.walk(
+            self._traj, Position({n: 1}), [d - base for d in depths], Position({n: base}),
+        )
+        prefix = self._checkpoints.get(base)
+        for d, w in zip(depths, segment):
+            self._checkpoints[d] = w if prefix is None else prefix * w
+
+    def _raw_walks(self, depths) -> dict:
+        """``{d: W(d)}`` (sympy ``Matrix``, before any ``inv().T``) for *depths*.
+
+        Raises whatever the walk raises (e.g. ``ZeroDivisionError`` at a
+        singular step); callers handle it as before.
+        """
+        wanted = sorted({int(d) for d in depths})
+        self._extend_checkpoints(wanted)
+        out = {}
+        for d in wanted:
+            if d not in self._rt_checkpoints:
+                self._rt_checkpoints[d] = self._checkpoints[d].to_rt()
+            out[d] = self._rt_checkpoints[d]
+        return out
+
+    def release_walks(self) -> None:
+        """Drop every stored walk product and walk-derived cache entry.
+
+        Computed attribute values (δ, p/q, eigenvalues, …) are kept; anything
+        that needs a walk again recomputes it.  Call when the handler outlives
+        the computation (e.g. kept in an LRU) — walk products of long
+        trajectories are megabytes each.
+        """
+        self._checkpoints.clear()
+        self._rt_checkpoints.clear()
+        for key in [k for k in self._utility_cache if k.startswith(("walked_", "effective_walk_"))]:
+            del self._utility_cache[key]
+        pq = self._utility_cache.get("pq_vector")
+        if pq is not None and pq[1] is not None:
+            self._utility_cache["pq_vector"] = (pq[0], None)   # drop the walk column
 
     def _trajectory_repr(self) -> str:
         """Human-readable ``start`` / ``direction`` for diagnostic logs.
@@ -572,7 +670,7 @@ class TrajectoryAttributesHandler:
         """
         def compute():
             try:
-                walked = self.trajectory_matrix.walk({n: 1}, depth, {n: 0})
+                walked = self._raw_walks([depth])[depth]
                 return walked if self.walk_type() == 2 else walked.inv().T
             except Exception as e:
                 Logger(
@@ -1070,11 +1168,15 @@ class TrajectoryAttributesHandler:
             return []  # not identified — nothing to compute
         final_projection = self._final_projection()
         try:
-            limits = self.trajectory_matrix.limit(
-                {n: 1}, depths, {n: 0}, initial_values, final_projection,
-            )
-            if isinstance(limits, Limit):
-                limits = [limits]
+            if isinstance(depths, int):
+                depths = [depths]
+            # Same Limit objects as ``Matrix.limit`` (current = W(d),
+            # previous = W(d-1)), built from the walk checkpoints.
+            walks = self._raw_walks(list(depths) + [max(d - 1, 0) for d in depths])
+            limits = [
+                Limit(walks[d], walks[max(d - 1, 0)], initial_values, final_projection)
+                for d in depths
+            ]
 
             if self.walk_type() == 1:
                 for i, l in enumerate(limits):

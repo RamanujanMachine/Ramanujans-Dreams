@@ -10,6 +10,7 @@ trajectory-attributes machinery to walk.
 from collections import namedtuple
 
 from dreamer.configs import config
+from dreamer.utils.task_memory import releases_task_memory
 
 #: Returned by :func:`_pool_walk` when the walk raises, so a single bad
 #: trajectory degrades to δ = −∞ (matching the serial evaluator's try/except)
@@ -44,6 +45,7 @@ def _pool_init(config_overrides: dict, shard, start) -> None:
     _POOL_STATE["start"] = start
 
 
+@releases_task_memory
 def _pool_walk(args):
     """Worker task: perform one Case-C walk and return the sink tuple.
 

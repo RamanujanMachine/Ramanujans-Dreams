@@ -10,6 +10,7 @@ emits the flat per-``(trajectory, constant)`` :class:`TrajectoryDTO` to a
 """
 
 import json
+import time
 from typing import Callable, Dict, Tuple
 
 from dreamer.extraction.shard import Shard
@@ -27,6 +28,7 @@ from dreamer.utils.storage.trajectory_attributes import (
 )
 from dreamer.configs import config
 from dreamer.utils.storage.attribute_fingerprints import tier1_record_fresh
+from dreamer.utils.task_memory import release_task_memory
 
 search_config = config.search
 
@@ -131,8 +133,9 @@ def evaluate_in_flatland(
         if cached is not None:
             return cached
 
-    # --- Compute (reusing the cached walk when available) ---
+    # --- Compute (reusing the cached handler when available) ---
     cached_handler = handler_cache.get(trajectory_id)
+    started = time.perf_counter()
     try:
         if cached_handler is not None:
             handler = cached_handler
@@ -165,7 +168,11 @@ def evaluate_in_flatland(
     dto = dtos[0]
 
     sink((None, constant.value_sympy, dto))
+    # Keep the handler's computed values, not its walk products (megabytes per
+    # long trajectory, x HANDLER_CACHE_SIZE); a later constant re-walks.
+    handler.release_walks()
     handler_cache[trajectory_id] = handler
+    release_task_memory(time.perf_counter() - started)
     record = _dto_record(dto)
     seen_trajectories.setdefault(trajectory_id, {})[constant.name] = record
 

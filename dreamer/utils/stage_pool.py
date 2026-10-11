@@ -47,6 +47,7 @@ from dreamer.utils.resilient_pool import ResilientPool
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
 
 from dreamer.configs import config
+from dreamer.utils.task_memory import releases_task_memory
 
 sys_config = config.system
 
@@ -397,6 +398,7 @@ Tier1Task = namedtuple(
 Tier1Result = namedtuple("Tier1Result", ["key", "matrix", "dtos", "patches"], defaults=([],))
 
 
+@releases_task_memory
 def run_tier1_task(
     task: Tier1Task,
     *,

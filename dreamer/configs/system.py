@@ -193,6 +193,16 @@ class SystemConfig(Configurable):
             "trajectories on a large CMF). 0 = start at the full memory cap."
         )},
     )
+    SYMPY_CACHE_CLEAR_AFTER_SECONDS: Optional[float] = field(
+        default=1.0,
+        metadata={"description": (
+            "After a trajectory task (worker or search evaluation) that took at least "
+            "this many seconds, clear sympy's global cache, which otherwise keeps the "
+            "huge rationals of long walks alive (~20 MB per long trajectory, up to GBs "
+            "per worker). Light tasks skip it (~5 ms re-warm cost). 0 = after every "
+            "task; None or negative = never."
+        )},
+    )
     POOL_MAX_TASKS_PER_CHILD: Optional[int] = field(
         default=None,
         metadata={
