@@ -45,6 +45,23 @@ def out_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
+def _load_example(name):
+    """Import ``examples/<name>.py`` by path.
+
+    ``examples/`` is not an installed package, and bare ``pytest`` (as in CI)
+    does not put the repository root on ``sys.path`` — only ``python -m pytest``
+    does — so ``import examples.<name>`` works locally but fails in CI.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "examples" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_example_{name}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _rows(path):
     with open(path) as f:
         return [json.loads(ln) for ln in f if ln.strip()]
@@ -54,7 +71,7 @@ def _rows(path):
 def test_analysis_template_runs_and_reuses(simple_shard, out_dir):
     """``MyAnalyzerMod`` writes one flat row per (trajectory, constant) and a
     second run appends nothing (cache reuse through the nested cache)."""
-    from examples.analysis import MyAnalyzerMod
+    MyAnalyzerMod = _load_example("analysis").MyAnalyzerMod
 
     result = MyAnalyzerMod({e: [simple_shard]}).execute()
     assert set(result) == {e}
@@ -71,7 +88,7 @@ def test_analysis_template_runs_and_reuses(simple_shard, out_dir):
 @pytest.mark.timeout(180)
 def test_search_template_runs_and_reuses(simple_shard, out_dir):
     """``MySearchMod`` writes flat rows for its constant and skips them on rerun."""
-    from examples.search import MySearchMod
+    MySearchMod = _load_example("search").MySearchMod
 
     MySearchMod({e: [simple_shard]}, use_LIReC=False).execute()
     _, shard_id, _ = derive_cmf_and_shard_ids(simple_shard)
