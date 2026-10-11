@@ -23,7 +23,8 @@ consistently; across a hyperplane the behaviour changes. Those regions are the
 So extraction does two things:
 
 1. **Find the hyperplanes** (`hyperplanes.py`): the canonical set of singular
-   hyperplanes of the CMF (zeros of the matrix determinant + poles of entries),
+   hyperplanes of the CMF (zeros of the matrix determinant + poles of entries;
+   pFq and Meijer-G determinants use closed forms, so 10+ variable Meijer-G CMFs extract in seconds),
    restricted to those that actually touch the integer lattice, and **sorted
    deterministically** so that a shard's sign pattern over the hyperplanes means
    the same thing across runs.

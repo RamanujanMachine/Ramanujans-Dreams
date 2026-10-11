@@ -645,8 +645,9 @@ class System:
             if objective_name != "delta":
                 # Records are flat per-(trajectory, constant): δ is the scalar
                 # ``delta`` column on this constant's row (not a nested dict).
+                # A joint target has no scalar δ (stored as -inf): skip the line.
                 delta_val = best_record.get("delta")
-                if delta_val is not None:
+                if delta_val is not None and math.isfinite(float(delta_val)):
                     extra = f"\n* δ:             {float(delta_val):.6f}"
             Logger(
                 f'Best {label} for "{const.name}" is {best_value:.6f}\n'

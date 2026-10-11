@@ -76,6 +76,22 @@ class ExtractionConfig(Configurable):
             )
         },
     )
+    ON_HYPERPLANE_TRAJECTORY: str = field(
+        default="skip",
+        metadata={
+            "description": (
+                "What to do with a selected (start point, trajectory) pair whose whole "
+                "trajectory lies inside a CMF hyperplane (start on it AND direction parallel "
+                "to it), so it belongs to no single shard.  'skip' (default): such a pair is "
+                "rejected, as before.  'touching_shards': build every shard on whose boundary "
+                "the trajectory lies (one per side of each containing hyperplane) that contains "
+                "lattice points, each with the user's start point and trajectory as its seed; "
+                "analysis then keeps the ones that contain the constant.  A start point that "
+                "is on a hyperplane while the trajectory leaves it is unambiguous and is "
+                "always handled by one step along the trajectory."
+            )
+        },
+    )
     LOAD_SHARD_CACHE: bool = field(
         default=False,
         metadata={

@@ -12,6 +12,7 @@ from sympy.abc import n
 from LIReC.db.access import db
 from ramanujantools import LinearRecurrence, Matrix, Limit, linear_recurrence
 from dreamer.utils.constants.high_precision import high_precision, resolved_error
+from dreamer.utils.constants.constant import is_joint_value
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.configs import config
@@ -337,8 +338,13 @@ def build_trajectory_dtos(
             c_name = str(c)   # backward-compat: raw sympy expression
             c_sympy = c
 
+        row_attrs = tuple(sync_attrs)
+        if is_joint_value(c_sympy):
+            # A joint row must carry its frozen forms (reproducibility) and its
+            # joint δ, whatever the active objective.
+            row_attrs += tuple(a for a in ("joint_forms", "joint_delta") if a not in row_attrs)
         delta, p, q, ided, extra = handler.compute_for_constant(
-            c_sympy, sync_attributes=tuple(sync_attrs),
+            c_sympy, sync_attributes=row_attrs,
         )
         if extra:
             extra["fingerprints"] = computed_fingerprints(extra, walk_depth)
@@ -1226,6 +1232,8 @@ class TrajectoryAttributesHandler:
         non-convergence sentinel.
         """
         depth = depth or self._depth
+        if is_joint_value(self._constant):
+            return float('-inf')   # a joint target is scored by joint_delta, never by LIReC
         def compute() -> float:
             try:
                 converges, _ = self._convergence_sanity_check(depth)
@@ -1715,6 +1723,8 @@ class TrajectoryAttributesHandler:
         :meth:`_effective_walk_values` directly.
         """
         def compute():
+            if is_joint_value(self.constant()):
+                return None, None   # joint targets use joint_forms(), never scalar p/q
             if self.constant() is None:
                 # No target constant ⇒ identification cannot run (it needs the
                 # constant for LIReC).  Matches ``identified()``'s own None guard
@@ -1871,6 +1881,8 @@ class TrajectoryAttributesHandler:
         """
         if self._constant is None:
             return False
+        if is_joint_value(self._constant):
+            return self.joint_forms() is not None
         return math.isfinite(self.delta())
 
     def _clear_constant_dependent_cache(self) -> None:
@@ -1924,6 +1936,12 @@ class TrajectoryAttributesHandler:
             self._utility_cache["pq_vector"] = (None, None)
         if record.get("projection_column") is not None:
             self._projection_column = int(record["projection_column"])
+        if is_joint_value(self._constant):
+            from dreamer.utils.joint.recognition import JointForms
+            raw = record.get("joint_forms")
+            self._cache["joint_forms"] = (
+                JointForms.from_dict(raw) if record.get("identified") and isinstance(raw, dict) else None
+            )
 
     def compute_for_constant(
         self,
@@ -1983,6 +2001,188 @@ class TrajectoryAttributesHandler:
             self._constant = old_constant
             self._clear_constant_dependent_cache()
         return delta, p, q, ided, extra
+
+    # ==================================================================
+    #  JOINT δ — common-denominator approximation of a constant set
+    # ==================================================================
+    #
+    # Active when the handler's constant is a joint target (a ``sympy.Tuple``
+    # of member values, see ``JointConstant``).  Forms are recognised once
+    # (homogeneous PSLQ, verified on a deeper walk), frozen together with
+    # their column, and every depth is read through those same forms
+    # (never a per-depth readout).  The walk is the δ walk: from {n: 0},
+    # with ``inv().T`` after walking for ``walk_type == 1``.  See
+    # ``dreamer/utils/joint`` and context/algorithms/03_delta_and_identification.md.
+
+    def _joint_targets(self) -> Optional[Dict[str, sp.Expr]]:
+        """``{member label: sympy value}`` for a joint constant, else ``None``.
+
+        Labels are the member constant names (e.g. ``"zeta-3"``) of the
+        registered ``JointConstant`` with this value; ``str(value)`` when the
+        handler was given a bare ``sympy.Tuple``.
+        """
+        if not is_joint_value(self._constant):
+            return None
+        from dreamer.utils.constants.constant import Constant, JointConstant
+        for c in Constant.registry.values():
+            if isinstance(c, JointConstant) and c.value_sympy == self._constant:
+                return c.member_values()
+        return {str(v): v for v in self._constant}
+
+    def _oriented_column(self, depth: int, column: int) -> list:
+        """Exact column *column* of the oriented walk S_depth (list of ``fmpq``).
+
+        ``walk_type == 1``: S = W^{-T}, whose column j solves Wᵀ x = e_j (no
+        full inverse).  ``walk_type == 2``: S = W.  Reuses the walk checkpoints.
+        """
+        from flint import fmpq, fmpq_mat
+
+        depth = int(depth)
+        if self._numeric_walk_possible():
+            self._extend_checkpoints([depth])
+            W = self._checkpoints[depth]
+            d = W.nrows()
+            W = fmpq_mat(d, d, [W[i, j] for i in range(d) for j in range(d)])
+        else:
+            Wsym = self._raw_walks([depth])[depth]
+            d = Wsym.rows
+            W = fmpq_mat(d, d, [fmpq(int(sp.Rational(x).p), int(sp.Rational(x).q))
+                                for x in Wsym])
+        if self.walk_type() == 2:
+            return [W[i, column] for i in range(d)]
+        e = fmpq_mat(d, 1, [fmpq(int(i == column)) for i in range(d)])
+        x = W.transpose().solve(e)
+        return [x[i, 0] for i in range(d)]
+
+    def _joint_vector(self, forms, depth: int) -> List[int]:
+        """Primitive joint vector (q, p_1..p_k) at *depth* — one gcd over the whole vector."""
+        from dreamer.utils.joint.approximation import apply_forms, primitive_vector
+
+        names = list(self._joint_targets())
+        col = self._oriented_column(depth, forms.column)
+        return primitive_vector(apply_forms(col, forms.forms(names)))
+
+    def joint_forms(self):
+        """Frozen common-denominator forms for the joint target, or ``None``.
+
+        Tries the shard's cached forms first (``JOINT_REUSE_SHARD_FORMS``) with
+        a cheap check on this trajectory's own column; otherwise recognises
+        them, trying columns in index order and freezing the first column on
+        which **every** member is recognised with proportional denominators.
+        ``None`` for a scalar target or when recognition fails (not evidence of
+        independence).
+        """
+        targets = self._joint_targets()
+        if targets is None:
+            return None
+
+        def compute():
+            from dreamer.utils.joint.recognition import forms_hold, recognise_forms
+
+            depth = int(search_config.JOINT_RECOGNITION_DEPTH)
+            verify_depth = int(search_config.JOINT_VERIFY_DEPTH)
+            dps = int(search_config.JOINT_RECOGNITION_DPS)
+            shard_cache = getattr(self._searchable, "joint_forms_cache", None)
+            key = tuple(targets)
+            try:
+                if search_config.JOINT_REUSE_SHARD_FORMS and shard_cache is not None:
+                    for cached in shard_cache.get(key, []):
+                        if forms_hold(self._oriented_column(depth, cached.column), cached, targets, dps):
+                            return cached
+                for column in range(self.traj_size()):
+                    forms = recognise_forms(
+                        self._oriented_column(depth, column),
+                        self._oriented_column(verify_depth, column),
+                        column, targets, dps, int(search_config.JOINT_PSLQ_MAX_COEFF),
+                        found_depth=depth, verify_depth=verify_depth,
+                    )
+                    if forms is not None:
+                        if shard_cache is not None:
+                            shard_cache.setdefault(key, []).append(forms)
+                        return forms
+            except Exception as e:
+                Logger(
+                    f'joint form recognition failed: {e} {self._trajectory_repr()}',
+                    Logger.Levels.warning,
+                ).log()
+            return None
+
+        return self.__get("joint_forms", compute)
+
+    def joint_delta(self, depth: Optional[int] = None) -> float:
+        """Joint δ at *depth* (default: the walk depth); ``-inf`` when unavailable.
+
+            δ_joint(N) = -log(max_i |ξ_i - p_{i,N}/q_N|) / log q_N - 1
+
+        Errors use independent Arb values of the members and the error balls
+        must exclude 0.  Numerical evidence, not proof.
+        """
+        depth = int(depth or self._depth)
+
+        def compute() -> float:
+            from dreamer.utils.joint.approximation import score_vector
+
+            forms = self.joint_forms()
+            if forms is None:
+                return float('-inf')
+            try:
+                targets = self._joint_targets()
+                row = score_vector(depth, self._joint_vector(forms, depth), list(targets.values()))
+                return float(row.delta)
+            except Exception as e:
+                Logger(
+                    f'joint_delta failed at depth {depth}: {e} {self._trajectory_repr()}',
+                    Logger.Levels.warning,
+                ).log()
+                return float('-inf')
+
+        return self.__get(f"joint_delta_{depth}", compute)
+
+    def joint_series(self) -> Optional[dict]:
+        """Joint δ at the ``JOINT_SERIES_FRACTIONS`` checkpoints of the walk depth.
+
+        :return: JSON-safe dict (depths, δ, per-coordinate E/N, q digits,
+            interval scores, LS slope, evidence label), or ``None``.
+        """
+        def compute():
+            from dreamer.utils.joint.approximation import score_vectors
+
+            forms = self.joint_forms()
+            if forms is None:
+                return None
+            depths = sorted({max(1, round(f * self._depth)) for f in search_config.JOINT_SERIES_FRACTIONS})
+            try:
+                targets = self._joint_targets()
+                vectors = {N: self._joint_vector(forms, N) for N in depths}
+                return score_vectors(vectors, list(targets.values()), list(targets)).as_dict()
+            except Exception as e:
+                Logger(
+                    f'joint_series failed: {e} {self._trajectory_repr()}',
+                    Logger.Levels.warning,
+                ).log()
+                return None
+
+        return self.__get("joint_series", compute)
+
+    def joint_casoratian(self, depths: Tuple[int, ...] = (20, 50)) -> Optional[dict]:
+        """Non-degeneracy check: is det(v_N, …, v_{N+k}) ≠ 0 at each N in *depths*?
+
+        :return: ``{str(N): {"nonzero": bool, "digits": int}}`` or ``None``.
+        """
+        def compute():
+            from dreamer.utils.joint.approximation import casoratian, decimal_digits
+
+            forms = self.joint_forms()
+            if forms is None:
+                return None
+            k1 = len(forms.p_forms) + 1
+            out = {}
+            for N in depths:
+                det = casoratian([self._joint_vector(forms, N + i) for i in range(k1)])
+                out[str(N)] = {"nonzero": det != 0, "digits": decimal_digits(det)}
+            return out
+
+        return self.__get(f"joint_casoratian_{tuple(depths)}", compute)
 
     def companion_coboundary_rank(self) -> int:
         """
