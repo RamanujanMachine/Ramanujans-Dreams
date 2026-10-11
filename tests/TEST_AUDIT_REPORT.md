@@ -1,3 +1,33 @@
+# Test Audit Report (2026-10-11, b)
+
+Bottom line: every analysis and search method now reports how its work was served (reused ·
+revisited · new …), pool terminology is consistent (stage pool vs eval pool), and the system's
+design is documented in six Mermaid diagrams (`docs/ARCHITECTURE.md`). Full suite: `1161 passed,
+2 skipped` (73 % line+branch); the same suite passes on every PR branch when run as CI runs it.
+
+## Touched Modules (Detailed Review)
+
+| Touched module | Changes made | Coverage evidence | Challenge rubric (/5) | Regression evidence |
+|---|---|---|---:|---|
+| `search/methods/flatland/evaluator.py`, `parallel_eval.py` | `EvalStats` (reused / revisited / cached walk / new + stale / failed / outside) counted in the serial and batched paths; `log_eval_stats`. | `tests/test_eval_stats.py` (17); 91 % / 92 %. | 5 | Batch dedupe → 1 new + revisits; later run → all reused; stale fingerprint → new + stale; WalkError → failed per direction; `valid_fn` → outside (both paths); serial ≡ batch classification. Real Small Angle run: 15 new / 24 revisited, then 39 reused / 0 new. |
+| Optimiser methods + search modules (SA, GA, Small Angle, GD, SPSA), micro-climb | `run(stats=…)`; modules create one counter per (shard, constant) and log it in `finally`. | 98 % (SA/GA/SA-angle/GD modules), 89 % micro-climb, 32 % SPSA module (pre-existing). | 4 | Wiring test fails if a method stops accepting `stats` or a module stops creating / passing / logging it. |
+| Terminology (`multi_processing.create_pool(name)`, comments in `stage_pool`, `dtos`, `attribute_registry`, `trajectory_attributes`, `configs/search.py`, search modules) | Stale "Tier-2 queue" / "background workers" / "search pool" removed; generic pools named in warnings. | Existing suites; test doubles updated. | 3 | — |
+| Docs | `docs/ARCHITECTURE.md` (pipeline, processes, one trajectory, reuse, search, resilience); search README glossary + reuse counts; infra spec. | — | — | — |
+
+Delivery fixes found while preparing the PRs: CI installs only declared dependencies
+(`psycopg[binary]` added — LIReC builds its engine at import under SQLAlchemy 2.1) and runs bare
+`pytest` (tests must not import `examples` or other test modules); edit scripts had converted
+CRLF files to LF (whole-file diffs) — the stack was rewritten with line endings preserved.
+
+## Non-Touched Modules (Repository-Wide Summary)
+
+| Area | Status | Risk / follow-up |
+|---|---|---|
+| `worker_pool` (multi_processing) | Used only as a direct writer (`parallel=False`). | Rename and drop its unused multi-process mode (awaiting decision). |
+| `spsa_adam_mod._run_shard` | Untested loop. | Add a module-level test like the other optimisers'. |
+
+---
+
 # Test Audit Report (2026-10-11)
 
 Bottom line: long trajectories on large CMFs no longer exhaust memory or hang, and δ is now

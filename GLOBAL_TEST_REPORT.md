@@ -1,17 +1,17 @@
 # Global Test Report
 
-Last full-suite run: **2026-10-11** (`rama` env, Python 3.12.15, sympy 1.14.0,
+Last full-suite run: **2026-10-11** (branch `feat/reuse-counts-architecture`; also run as CI does — bare `pytest`, only `dreamer` importable — on every PR branch) (`rama` env, Python 3.12.15, sympy 1.14.0,
 python-flint 0.9.0, mpmath 1.3.0, macOS, 18 cores).
 
 | Metric | Value |
 |---|---|
 | Command | `python -m pytest tests -v --ignore=tests/pocs --cov=dreamer --cov-branch --cov-report=term-missing` |
-| Collected | 1146 |
-| Passed | 1144 |
+| Collected | 1163 |
+| Passed | 1161 |
 | Failed | 0 |
 | Skipped | 2 |
 | Warnings | 2 |
-| Line+branch coverage (`--cov=dreamer --cov-branch`) | 72% (11468 statements, 4002 branches) |
+| Line+branch coverage (`--cov=dreamer --cov-branch`) | 73% (11540 statements, 4032 branches) |
 
 ## Failing tests
 
@@ -39,3 +39,6 @@ None.
   exercised by the multi-process tests in `tests/test_stage_pool.py` and
   `tests/test_resilient_pool.py`.
 - The optimiser searchers' multi-process eval pools are exercised only lightly in unit tests.
+- `search/searchers/spsa_adam_mod.py` is at 32%: its shard loop (`_run_shard`) has no test (pre-existing gap;
+  the other four optimiser modules are at 98%). The `EvalStats` wiring there is checked structurally
+  (`tests/test_eval_stats.py::TestWiring`).
