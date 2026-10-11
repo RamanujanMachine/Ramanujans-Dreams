@@ -19,8 +19,6 @@ authors = [
 ]
 
 dependencies = [
-    "psycog2 ; sys_platform == 'darwin'",
-    "psycog ; sys_platform == 'darwin'",
     "peewee",
     "sympy",
     "ramanujantools @ git+https://github.com/RamanujanMachine/ramanujantools.git",
