@@ -5,8 +5,8 @@ A dictionary maps an attribute name (the public, config-facing string) to a
 function that, given a fully constructed ``TrajectoryAttributesHandler``,
 returns a JSON-serialisable value.
 
-The pipeline stages — analysis, search-stage producer, and search-stage
-background workers — read their own ordered list of attribute *specs* from
+The pipeline stages — analysis (Tier-1), search (Tier-2, in the same task as
+Tier-1) and post-process (Tier-3) — read their own ordered list of attribute *specs* from
 config and call ``compute_attributes(handler, specs)``.  Each spec is either
 a bare attribute name (always compute) or a ``(name, predicate)`` tuple where
 ``predicate`` is either a callable on the handler or a string key into
@@ -183,6 +183,11 @@ ATTRIBUTE_REGISTRY: Dict[str, AttributeComputer] = {
     # Eigenvalue-based digit predictions (per-step and at the walk depth).
     "approximated_digits_per_step": lambda h: _opt_float(h.approximated_digits_per_step()),
     "digits_approximation":        lambda h: _opt_float(h.digits_approximation()),
+    # Length-normalised spectral convergence rate: approximated_digits_per_step
+    # divided by the L2 norm of the trajectory direction (see
+    # TrajectoryAttributesHandler.convergence_rate).  The single definition of
+    # "convergence_rate" in the system — record_metrics reads this stored value.
+    "convergence_rate":            lambda h: _opt_float(h.convergence_rate()),
 
     # ----- Tier-3 — symbolic / expensive attributes (post-process). -----
     "precision_at":                lambda h: _opt_int(h.precision_at()),

@@ -406,7 +406,7 @@ cells.append(md_cell("""
 cells.append(code_cell("""
     RUN_LIVE = True  # set True to actually run the pipeline
     
-    print('NOTE: please ignore warnings, these are just side effects of running the system in a standalone notebook')
+    print('>>>> NOTE: ignore warnings, these are side effects of running the system in a standalone notebook <<<<<')
 
     if RUN_LIVE:
         import os, glob, json, tempfile

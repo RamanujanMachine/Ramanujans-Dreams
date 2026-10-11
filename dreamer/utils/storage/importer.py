@@ -42,10 +42,11 @@ class Importer:
     def _read_jsonl(cls, path: str, merge: bool = False) -> list:
         """Read a JSON-Lines file into a list of dicts, skipping blank/malformed lines.
 
-        When *merge* is ``True``, records sharing the same ``trajectory_id``
-        are merged into a single logical record (later lines win for conflicting
-        keys; ``extended_metrics`` is deep-merged).  Records without a
-        ``trajectory_id`` key are appended unchanged after merged records.
+        When *merge* is ``True``, records are merged by the composite
+        ``(trajectory_id, constant)`` key (later lines win for conflicting
+        columns).  Records are **flat**, so this is a plain last-write-wins
+        ``dict.update`` — no special-cased nested merge.  Records without a
+        ``trajectory_id`` key are appended unchanged after the merged rows.
 
         DTO reconstruction is left to the caller (e.g. via ``TrajectoryDTO.from_dict``)
         because a JSONL file may mix records from different DTO classes.
@@ -70,13 +71,11 @@ class Importer:
             if tid is None:
                 unkeyed.append(r)
                 continue
-            if tid not in merged:
-                merged[tid] = r
+            key = (tid, r.get("constant"))
+            if key not in merged:
+                merged[key] = r
             else:
-                existing_metrics = dict(merged[tid].get("extended_metrics") or {})
-                new_metrics = dict(r.get("extended_metrics") or {})
-                merged[tid].update(r)
-                merged[tid]["extended_metrics"] = {**existing_metrics, **new_metrics}
+                merged[key].update(r)   # flat merge, later wins
         return list(merged.values()) + unkeyed
 
     @classmethod

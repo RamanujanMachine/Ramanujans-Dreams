@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, Set
+from typing import Callable, List, Set
 import sympy as sp
 
 from dreamer.extraction.shard import Shard
@@ -75,7 +75,18 @@ class ShardSamplingOrchestrator(SamplingOrchestrator):
         _, shard_id, _ = derive_cmf_and_shard_ids(self.searchable)
         seed = derive_seed(shard_id, method)
 
-        a_matrix = self.searchable.A
+        # Direction constraints (e.g. {'x0': 12, 'y1': 28}) are folded into the cone as
+        # extra homogeneous rows so every sampler honours them with no kernel change; the
+        # strict v_i != 0 / sign part is applied as a post-harvest mask (``self._fixed``).
+        from dreamer.extraction.samplers.constraints import (
+            augment_cone,
+            get_trajectory_constraints,
+        )
+        constraints = get_trajectory_constraints()
+        a_matrix, self._fixed = augment_cone(
+            self.searchable.A, self.searchable.symbols, constraints
+        )
+
         if a_matrix is None:
             self.sampler = PrimitiveSphereSampler(len(self.searchable.symbols), seed=seed)
         else:
@@ -83,7 +94,7 @@ class ShardSamplingOrchestrator(SamplingOrchestrator):
                 np.asarray(a_matrix, dtype=np.float64), sampling_method, seed=seed
             )
 
-    def sample_trajectories(self, compute_n_samples: Callable[[int], int] | int, *, exact: bool = False) -> Set[Position]:
+    def sample_trajectories(self, compute_n_samples: Callable[[int], int] | int, *, exact: bool = False) -> List[Position]:
         # Local imports avoid a circular dependency (logger/trajectory_attributes
         # pull in extraction modules at import time).
         import time
@@ -103,10 +114,33 @@ class ShardSamplingOrchestrator(SamplingOrchestrator):
         else:
             samples = self.sampler.harvest(compute_n_samples, exact=exact)
 
-        result = {
-            Position({sym: sp.sympify(int(v)) for v, sym in zip(p, self.searchable.symbols)})
-            for p in samples
-        }
+        # Enforce the strict fixed-coordinate sign/non-zero rule the closed cone admits on
+        # its facet (no-op when no direction constraints are configured).
+        if self._fixed and len(samples) > 0:
+            from dreamer.extraction.samplers.constraints import fixed_sign_mask
+
+            samples = np.asarray(samples)
+            samples = samples[fixed_sign_mask(samples, self._fixed)]
+
+        # Deduplicate while preserving the sampler's harvest order (which is
+        # deterministic for a fixed seed).  Returning a *list* — not a set — is
+        # essential for reproducibility: ``Position``'s hash is process-dependent
+        # (it hashes through symbol names, which Python salts per process via
+        # PYTHONHASHSEED), so set-iteration order differs every run.  Downstream
+        # seed-vector selection (e.g. the search reservoirs) sorts these and picks
+        # the first match, so a nondeterministic order would silently pick a
+        # different seed each run.  The dedup key is the integer coordinate tuple
+        # (content-based, order-independent), matching the old set's semantics.
+        seen: Set[tuple] = set()
+        result: List[Position] = []
+        for p in samples:
+            key = tuple(int(v) for v in p)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(
+                Position({sym: sp.sympify(int(v)) for v, sym in zip(p, self.searchable.symbols)})
+            )
         Logger(
             f"Finished sampling {len(result)} trajectories in shard {shard_id} "
             f"in {time.perf_counter() - t0:.1f}s",

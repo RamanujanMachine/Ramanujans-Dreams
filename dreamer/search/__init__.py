@@ -1,18 +1,11 @@
-from dreamer.search.searchers.hedgehog_scan_mod import SearcherModV1
-from dreamer.search.searchers.genetic_mod import GeneticSearchMod
-from dreamer.search.searchers.small_angle_mod import SmallAngleSearchMod
-from dreamer.search.searchers.genetic_search_mod import GeneticSearchModV2
-from dreamer.search.searchers.annealing_mod import SimulatedAnnealingMod
-from dreamer.search.searchers.gradient_ascent_mod import GradientAscentMod
-from dreamer.search.searchers.spsa_adam_mod import HybridSPSAMod
+from dreamer._lazy import lazy_exports
 
-
-__all__ = [
-    'SearcherModV1',
-    'GeneticSearchMod',
-    'SmallAngleSearchMod',
-    'GeneticSearchModV2',
-    'SimulatedAnnealingMod',
-    'GradientAscentMod',
-    'HybridSPSAMod',
-]
+__getattr__, __dir__, __all__ = lazy_exports(__name__, {
+    "SearcherModV1": "dreamer.search.searchers.hedgehog_scan_mod:SearcherModV1",
+    "GeneticSearchMod": "dreamer.search.searchers.genetic_mod:GeneticSearchMod",
+    "SmallAngleSearchMod": "dreamer.search.searchers.small_angle_mod:SmallAngleSearchMod",
+    "GeneticSearchModV2": "dreamer.search.searchers.genetic_search_mod:GeneticSearchModV2",
+    "SimulatedAnnealingMod": "dreamer.search.searchers.annealing_mod:SimulatedAnnealingMod",
+    "GradientAscentMod": "dreamer.search.searchers.gradient_ascent_mod:GradientAscentMod",
+    "HybridSPSAMod": "dreamer.search.searchers.spsa_adam_mod:HybridSPSAMod",
+})

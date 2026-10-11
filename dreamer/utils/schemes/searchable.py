@@ -10,6 +10,7 @@ from ramanujantools.cmf import CMF
 from typing import Tuple, Optional, List, Union
 
 from dreamer.utils.constants.constant import Constant
+from dreamer.utils.constants.high_precision import high_precision, resolved_error
 from dreamer.utils.logger import Logger
 from dreamer.utils.storage.storage_objects import SearchData, SearchVector
 from dreamer.configs import config
@@ -142,7 +143,7 @@ class Searchable(ABC):
         p, q = None, None
         values = [item for item in walk_col]
         with Logger.simple_timer('constant heavy evalf'):
-            high_res_constant = constant.evalf(search_config.CONSTANT_NO_DIGITS_HIGH_RES)
+            high_res_constant = high_precision(constant, search_config.CONSTANT_NO_DIGITS_HIGH_RES)
             low_res_constant = constant.evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES)
         cache_hit = False
         values_vec = sp.Matrix(values)
@@ -227,7 +228,19 @@ class Searchable(ABC):
                 numerator = p.dot(values_vec)
                 denom = q.dot(values_vec)
                 estimated = sp.Abs(sp.Rational(numerator, denom))
-                err = sp.Abs(estimated - high_res_constant)
+            # The error must be resolved beyond the constant's own rounding;
+            # raise the precision until it is (see ``resolved_error``).
+            err, _, _ = resolved_error(
+                estimated, constant, search_config.CONSTANT_NO_DIGITS_HIGH_RES,
+                search_config.MAX_CONSTANT_RESOLUTION,
+            )
+            if err is None:
+                Logger(
+                    f'Estimate agrees with the constant beyond MAX_CONSTANT_RESOLUTION='
+                    f'{search_config.MAX_CONSTANT_RESOLUTION} digits; skipping trajectory',
+                    Logger.Levels.warning,
+                ).log()
+                return None, None, None
 
             # check abnormal denominator and compute delta
             denom = sp.denom(estimated)

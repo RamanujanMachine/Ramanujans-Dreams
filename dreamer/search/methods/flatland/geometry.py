@@ -35,20 +35,35 @@ class FlatlandGeometry:
         self.symbols: List[sp.Symbol] = list(shard.symbols)
         d_orig = len(self.symbols)
 
-        if shard.is_whole_space or shard.A is None:
+        # Fold any extraction-stage direction constraints (e.g. {'x0': 12, 'y1': 28})
+        # into the cone so local search stays on the constrained sub-cone, exactly like
+        # the samplers.  ``_fixed`` drives the strict fixed-coordinate sign/non-zero test.
+        from dreamer.extraction.samplers.constraints import (
+            augment_cone,
+            get_trajectory_constraints,
+        )
+        A_aug, self._fixed = augment_cone(
+            shard.A, self.symbols, get_trajectory_constraints()
+        )
+
+        if A_aug is None:
             self.Z_reduced = np.eye(d_orig, dtype=np.int64)
             self.B_reduced = np.empty((0, d_orig))
             # No constraints → every direction is inside the cone.
             self._M = None
         else:
-            conditioner = HyperSpaceConditioner(np.asarray(shard.A, dtype=np.float64))
+            conditioner = HyperSpaceConditioner(np.asarray(A_aug, dtype=np.float64))
             self.Z_reduced, self.B_reduced, _ = conditioner.process()
             # Cone-membership matrix in flatland: a flatland direction ``z`` is
             # inside iff ``A @ (Z_reduced @ z) <= 0`` ⇔ ``M @ z <= 0`` where
             # ``M = A @ Z_reduced``.  Precomputed once so membership is a pure
             # NumPy matmul (no per-call sympy ``Position``).
-            A = np.asarray(shard.A, dtype=np.float64)
+            A = np.asarray(A_aug, dtype=np.float64)
             self._M = A @ self.Z_reduced.astype(np.float64)
+
+        # Rows of Z_reduced for each strictly-fixed coordinate (sign != 0), used to
+        # reject the v_i == 0 / wrong-sign facet the closed cone would otherwise admit.
+        self._fixed_pos = {i: s for i, s in self._fixed.items() if s != 0}
 
         self.d_flat = self.Z_reduced.shape[1]
 
@@ -168,7 +183,14 @@ class FlatlandGeometry:
             return False
         if self._M is None:
             return True
-        return bool(np.all(self._M @ z <= self._CONE_TOL))
+        if not bool(np.all(self._M @ z <= self._CONE_TOL)):
+            return False
+        if self._fixed_pos:
+            v = self.Z_reduced.astype(np.float64) @ z
+            for i, s in self._fixed_pos.items():
+                if v[i] * s <= self._CONE_TOL:
+                    return False
+        return True
 
     def is_inside_many(self, Z: np.ndarray) -> np.ndarray:
         """
@@ -183,7 +205,12 @@ class FlatlandGeometry:
         nonzero = np.any(Z != 0, axis=1)
         if self._M is None:
             return nonzero
-        return nonzero & np.all((self._M @ Z.T) <= self._CONE_TOL, axis=0)
+        inside = nonzero & np.all((self._M @ Z.T) <= self._CONE_TOL, axis=0)
+        if self._fixed_pos:
+            V = (self.Z_reduced.astype(np.float64) @ Z.T)  # (d_orig, k)
+            for i, s in self._fixed_pos.items():
+                inside &= (V[i] * s) > self._CONE_TOL
+        return inside
 
     def perturbations(self, z: np.ndarray, *, reduce: bool = True) -> Iterator[np.ndarray]:
         """

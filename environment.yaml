@@ -1,0 +1,26 @@
+name: env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - git
+  - pip
+  - psycopg2
+  - psycopg
+  - pip:
+      - git+https://github.com/RamanujanMachine/LIReC.git
+      - git+https://github.com/RamanujanMachine/ramanujantools.git
+      - fpylll
+      - matplotlib
+      - mip
+      - mpmath
+      - networkx
+      - numba
+      - numpy
+      - pandas
+      - peewee
+      - pulp
+      - scipy
+      - sympy
+      - tqdm

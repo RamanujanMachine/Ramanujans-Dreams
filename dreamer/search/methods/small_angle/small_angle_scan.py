@@ -33,8 +33,8 @@ shared across all per-constant climbs for the same shard.  This means:
   is called on the already-built handler, and a merged DTO (containing both
   constants' Tier-1 data) is emitted so the JSONL record is complete.
 
-* Across runs (from JSONL): if ``delta_estimate[constant.name]`` is already
-  present in the on-disk record it is returned immediately, no handler built.
+* Across runs (from JSONL): if the flat ``(trajectory, constant)`` row for this
+  constant already carries its ``delta`` it is returned immediately, no handler built.
 """
 
 from typing import Callable, Dict, List, Optional, Tuple
@@ -43,6 +43,7 @@ import numpy as np
 from ramanujantools import Position
 
 from dreamer.configs import config
+from dreamer.utils.lru import make_handler_cache
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
@@ -126,6 +127,7 @@ class SmallAngleSearch(SearchMethod):
         start=None,
         pool=None,
         initial_trajectory: Optional[Position] = None,
+        stats=None,
     ) -> None:
         """Run the hill-climb for a single constant, emitting DTOs to *sink*.
 
@@ -149,9 +151,12 @@ class SmallAngleSearch(SearchMethod):
             falls back to reservoir seeding (see :func:`resolve_injected_seed`).
 
         :raises NoInitialIdentification: if no reservoir seed identifies *constant*.
+        :param stats: Optional :class:`~dreamer.search.methods.flatland.evaluator.EvalStats`
+            counting how evaluations were served (reused / revisited / new …);
+            the calling module logs its summary.
         """
         if handler_cache is None:
-            handler_cache = {}
+            handler_cache = make_handler_cache()
 
         shard: Shard = self.space
         if geom is None:
@@ -170,6 +175,7 @@ class SmallAngleSearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
+            stats=stats,
         )
 
         if initial_trajectory is None:
@@ -284,6 +290,7 @@ class SmallAngleSearch(SearchMethod):
         sink: Callable,
         seen_trajectories: dict,
         handler_cache: Dict[str, "TrajectoryAttributesHandler"],
+        stats=None,
     ) -> Tuple[float, bool]:
         """Compute δ/identified for *constant* and direction *z*, emitting a DTO.
 
@@ -302,4 +309,5 @@ class SmallAngleSearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
+            stats=stats,
         )

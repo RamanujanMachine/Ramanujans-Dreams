@@ -15,6 +15,7 @@ from dreamer.utils.storage.atlas_writer import (
 )
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.configs import config
+from dreamer.utils.rand import derive_seed
 from dreamer.utils.types import CMFData
 from .utils import initial_points as init_points
 from .v2 import ExtractionManager, LrslibExtractor, RayShootingExtractor
@@ -351,13 +352,38 @@ class ShardExtractor(ExtractionScheme):
         # avoids re-running the (sympy) per-hyperplane apply_shift inside
         # every Shard.__init__, which otherwise dominates this loop.
         shifted_hps = [hp.apply_shift(self.cmf_data.shift) for hp in hps]
+
+        # Optional direction-constraint shard filter: when the extraction config pins the
+        # trajectory ratio (e.g. {'x0': 12, 'y1': 28}), keep only shards whose recession
+        # cone actually admits such a direction, so downstream stages never search a shard
+        # that cannot contain a constrained trajectory.
+        from dreamer.extraction.samplers.constraints import (
+            constrained_cone_feasible,
+            get_trajectory_constraints,
+        )
+        constraints = get_trajectory_constraints()
+
         shards = []
+        dropped = 0
         for enc in SmartTQDM(shard_encodings.keys(), desc='Creating shard objects', **sys_config.TQDM_CONFIG):
-            shards.append(Shard.from_cmf_data(
+            shard = Shard.from_cmf_data(
                 self.cmf_data, self._constants, shifted_hps, enc, shard_encodings[enc],
                 hyperplanes_already_shifted=True,
                 selected_trajectory=shard_trajectories.get(enc),
-            ))
+            )
+            if constraints and not shard.is_whole_space and not constrained_cone_feasible(
+                shard.A, shard.symbols, constraints
+            ):
+                dropped += 1
+                continue
+            shards.append(shard)
+
+        if constraints:
+            Logger(
+                f'Trajectory constraints {constraints}: kept {len(shards)} shard(s), '
+                f'dropped {dropped} that admit no such direction.',
+                level=Logger.Levels.info,
+            ).log()
         return shards
 
     def _load_cached_encodings(
@@ -497,6 +523,13 @@ class ShardExtractor(ExtractionScheme):
             heuristic_face_aligned=config.extraction.HEURISTIC_FACE_ALIGNED,
             heuristic_face_subsets=config.extraction.HEURISTIC_FACE_SUBSETS,
             heuristic_face_offsets=config.extraction.HEURISTIC_FACE_OFFSETS,
+            heuristic_workers=config.extraction.HEURISTIC_WORKERS,
+            heuristic_parallel_after_seconds=config.extraction.HEURISTIC_PARALLEL_AFTER_SECONDS,
+            # Reproducible per-CMF seed from GLOBAL_SEED (None => nondeterministic).
+            heuristic_seed=(
+                derive_seed("heuristic-extraction", self.cmf_data.cmf_name)
+                if config.search.GLOBAL_SEED is not None else None
+            ),
             symmetry=symmetry,
         )
         mapping = manager.extract(shifted_hps)

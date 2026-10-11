@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Dict, Optional
 
 from .configurable import Configurable
 
@@ -9,6 +9,23 @@ class ExtractionConfig(Configurable):
     """
     Extraction stage configurations
     """
+    TRAJECTORY_CONSTRAINTS: Optional[Dict[str, int]] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Optional direction constraints fixing the *ratio* (and sign) of "
+                "sampled trajectories, e.g. {'x0': 12, 'y1': 28} means every "
+                "trajectory takes 12 steps in x0 for every 28 in y1 (scale-invariant: "
+                "the literal values matter only through their reduced ratio and sign). "
+                "Keys are CMF variable names; values are integers. Applied at every "
+                "stage that conditions a cone (extraction/analysis sampling + search) "
+                "and used to FILTER shards: a shard is dropped unless its recession "
+                "cone admits such a direction. None/empty = unconstrained. A single "
+                "fixed coordinate degenerates to a sign constraint; >=2 are needed for "
+                "a real ratio. See context/algorithms/06_trajectory_constraints.md."
+            )
+        },
+    )
     PARALLELIZE: bool = field(
         default=True,
         metadata={"description": "Enable parallel shard extraction routines."},
@@ -120,12 +137,35 @@ class ExtractionConfig(Configurable):
         },
     )
     HEURISTIC_REFINE_WORKERS: int = field(
-        default=1,
+        default=0,
         metadata={
             "description": (
                 "Process count for the heuristic's MILP witness refinement "
-                "(the per-shard MILPs are independent).  >1 dispatches them "
-                "across processes; 1 (default) runs serially."
+                "(the per-shard MILPs are independent; only used when "
+                "HEURISTIC_REFINE_WITNESSES is on and >= 200 cells need it). "
+                "0 (default) = all cores (TOTAL_CORES / os.cpu_count()); 1 = serial. "
+                "Results are identical for any value."
+            )
+        },
+    )
+    HEURISTIC_WORKERS: int = field(
+        default=0,
+        metadata={
+            "description": (
+                "Process count for the heuristic ray-shooting phases. 0 (default) = "
+                "all cores; 1 = in-process. Every ray batch / face subset draws "
+                "from its own seeded stream and results merge in order, so the "
+                "found shards and witnesses are identical for any value."
+            )
+        },
+    )
+    HEURISTIC_PARALLEL_AFTER_SECONDS: float = field(
+        default=3.0,
+        metadata={
+            "description": (
+                "Start the heuristic's worker pool only after the shoot has run "
+                "this many seconds in-process, so small arrangements finish "
+                "without paying the pool start-up. Does not change results."
             )
         },
     )

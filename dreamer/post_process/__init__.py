@@ -1,3 +1,5 @@
-from dreamer.post_process.tier3_post_process_mod import Tier3PostProcessModV1
+from dreamer._lazy import lazy_exports
 
-__all__ = ['Tier3PostProcessModV1']
+__getattr__, __dir__, __all__ = lazy_exports(__name__, {
+    "Tier3PostProcessModV1": "dreamer.post_process.tier3_post_process_mod:Tier3PostProcessModV1",
+})

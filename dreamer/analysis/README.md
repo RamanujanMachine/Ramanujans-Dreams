@@ -41,6 +41,15 @@ Set `config.analysis.STORE_TRAJECTORIES_SEPARATELY = True` to keep the analysis
 records in their own store (`EXPORT_ANALYSIS_RESULTS`); the search stage still
 seeds its cache from there, so cross-stage reuse is preserved either way.
 
+### Parallelism
+
+Sampling and cache reuse run in the main process. Every trajectory that needs a
+walk — across **all** shards — is then computed on one stage-wide process pool
+(sized by `config.system.TOTAL_CORES`, capped by `STAGE_POOL_WORKERS`), with
+dynamic load balancing (`STAGE_POOL_CHUNKSIZE`, default 1). Workers never touch
+the JSONL files: they return rows to the main process, which is the single
+writer (buffered appends).
+
 Because analysis and search share the same per-trajectory store and attribute
 machinery, the analyzer is built on top of the search stage's `SerialSearcher`
 rather than a separate engine.

@@ -25,10 +25,13 @@ There are **two families** of searcher, wired interchangeably via
 
 Re-samples many trajectory directions in the shard (same samplers as analysis,
 but with the search config), computes Tier-1 for each, and computes any
-configured Tier-2 attributes asynchronously in background workers. It re-uses
-records already on disk from analysis, so nothing is walked twice. With an empty
-`config.search.TIER2_ATTRIBUTES` it does no extra work beyond Tier-1 and spawns
-no subprocesses.
+configured Tier-2 attributes in the same task as each trajectory's walk. It
+re-uses records already on disk (from analysis or earlier runs): a stored row
+gets only its missing / out-of-date attributes, computed from the stored values
+without re-identifying, so nothing is walked or identified twice. All of it runs
+on one **stage-wide process pool** created once for all shards (every core,
+capped by `config.system.STAGE_POOL_WORKERS`); `config.system.REUSE_POLICY`
+controls how stored values are trusted.
 
 ### 2. The direction-space optimisers
 
@@ -40,7 +43,7 @@ point and δ is the landscape:
 |-----------------|--------|------|
 | `SmallAngleSearchMod` | small-angle hill-climb | nudge the direction by the smallest resolvable angle. |
 | `GeneticSearchModV2` | genetic algorithm | evolve a population of directions. |
-| `SimulatedAnnealingMod` | simulated annealing | temperature-controlled random walk over directions. |
+| `SimulatedAnnealingMod` | simulated annealing | temperature-controlled random walk over directions; idle eval workers pre-walk the next step's candidates (`ANNEAL_LOOKAHEAD`) without changing the search path. |
 | `GradientAscentMod` | gradient ascent (Adam) | follow a finite-difference δ-gradient. |
 | `HybridSPSAMod` | SPSA + Adam + discrete fallback | 2-evaluation stochastic gradient, good at high dimension. |
 
@@ -50,11 +53,44 @@ endgame, `config.search.ENABLE_MICRO_HILL_CLIMB`) that certifies the reported
 best trajectory is a true lattice local maximum. They are reproducible from
 `config.search.GLOBAL_SEED`.
 
+### Process pools: stage pool vs eval pool
+
+Every process pool in the package is a `ResilientPool` (a dead worker does not
+hang the run; worker counts follow cores and memory). Two kinds do the
+trajectory work, and they differ in **what one task is** and **who waits for it**:
+
+| | **Stage pool** (`StagePool`) | **Eval pool** (`make_eval_pool`) |
+|---|---|---|
+| Used by | analysis, the hedgehog searcher, Tier-3 post-process | the five optimisers above and the micro-climb |
+| Lifetime | one per stage, for **all** shards | one per shard, for all constants of that shard |
+| Workers hold | every CMF (each task carries a light copy of its shard) | this shard and its start point |
+| One task | one trajectory (Tier-1 rows + Tier-2/3 for its constants) | one candidate direction of an optimiser step |
+| Scheduling | the whole stage's trajectories stream through it | a batch per step; the optimiser waits for the batch (SA may pre-walk the next step) |
+
+The writer that appends rows to `<shard_id>.jsonl` always runs in the main
+process (`BufferedJsonlWriter` for stage pools, `worker_pool(...)` for the
+optimisers — despite its name, a plain in-process writer).
+
+### Reuse counts
+
+Every searcher logs, per shard (and per constant for the optimisers), how its
+trajectories were served — the same vocabulary as analysis:
+
+```
+Shard pFq_2_1_…: 120 trajectories → 80 reused · 10 Tier-2 only · 30 new
+Simulated Annealing — shard pFq_2_1_…, log-2: 412 evaluations → 150 reused · 190 revisited · 72 new
+```
+
+`reused` = served from a stored row of an earlier run; `revisited` = computed
+earlier in this run (an optimiser came back to the same ray); `new` = walked now
+(`replacing stale rows` when a stored row's configuration fingerprint no longer
+matches); also `on a cached walk`, `failed`, `outside the cone` when non-zero.
+
 ### Attribute tiers
 
 - **Tier-1** — always computed (δ, identified, limit, recurrence, p/q).
-- **Tier-2** — `config.search.TIER2_ATTRIBUTES`, computed in background workers
-  during search; land in each record's `extended_metrics`.
+- **Tier-2** — `config.search.TIER2_ATTRIBUTES`, computed during search together with
+  Tier-1 (or from a stored row's Tier-1 values), on every core.
 - **Tier-3** — the most expensive attributes, computed afterwards by the
   optional [post-process stage](../post_process/README.md).
 

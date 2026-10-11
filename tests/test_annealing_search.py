@@ -627,7 +627,7 @@ class TestSimulatedAnnealingMod:
 
         def fake_run(self_, *, constant, cmf_id, shard_id, shard_encoding_str,
                      sink, seen_trajectories, handler_cache=None,
-                     geom=None, start=None, pool=None):
+                     geom=None, start=None, pool=None, stats=None):
             run_calls.append(constant)
             if constant.name == "pi":
                 raise NoInitialIdentification(shard_id, constant)
@@ -669,7 +669,7 @@ class TestSimulatedAnnealingMod:
 
         def fake_run(self_, *, constant, cmf_id, shard_id, shard_encoding_str,
                      sink, seen_trajectories, handler_cache=None,
-                     geom=None, start=None, pool=None):
+                     geom=None, start=None, pool=None, stats=None):
             received.append(geom)
 
         monkeypatch.setattr(mod_module.SimulatedAnnealingSearch, "run", fake_run)

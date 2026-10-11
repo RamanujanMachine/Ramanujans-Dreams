@@ -106,3 +106,13 @@ class Constant:
 
     def __hash__(self):
         return hash(self.name)
+
+    def __repr__(self):
+        # Stable, content-based identity.  The default ``object.__repr__`` embeds
+        # the memory address (``<Constant object at 0x...>``), which differs every
+        # process — anything deriving state from ``str(constant)`` (e.g. a
+        # reproducible RNG seed) would then be nondeterministic across runs.
+        return self.name
+
+    def __str__(self):
+        return self.name

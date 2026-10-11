@@ -43,6 +43,7 @@ re-run optimisation (config-fingerprint staleness checks, partial Tier-2
 patches); this template keeps the loop minimal on purpose.
 """
 
+import json
 import os
 from collections import defaultdict
 from typing import Callable, Dict, List, Set
@@ -59,12 +60,14 @@ from dreamer.search.methods.hedgehog_scan import SerialSearcher
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     _position_to_tuple,
-    build_trajectory_dto,
+    build_trajectory_dtos,
     derive_cmf_and_shard_ids,
     derive_trajectory_id,
+    walk_depth_for,
 )
+from dreamer.utils.storage.attribute_fingerprints import tier1_is_fresh
 from dreamer.utils.multi_processing import (
-    compute_tier2_for_item,
+    sink_item_dto,
     load_seen_trajectories_for_search,
     worker_pool,
     write_jsonl_line,
@@ -129,7 +132,11 @@ class MySearchMethod:
                 shard_id, self.shard.cmf_name, shard_encoding_str,
                 _position_to_tuple(start), _position_to_tuple(traj),
             )
-            if trajectory_id in seen_trajectories:
+            # The cache is nested: {trajectory_id: {constant_name: record}}.
+            # Reuse a stored row only while it is still valid for the current
+            # config (per-attribute fingerprints, system.REUSE_POLICY).
+            record = seen_trajectories.get(trajectory_id, {}).get(self.constant.name)
+            if tier1_is_fresh(record, walk_depth_for(self.shard.cmf, traj)):
                 continue  # already evaluated (this or a previous run) — skip.
 
             # 2) EVALUATE: walk the trajectory and compute its Tier-1 attributes.
@@ -139,7 +146,8 @@ class MySearchMethod:
                     constant=None,             # per-constant δ injected below
                     searchable=self.shard,
                 )
-                dto = build_trajectory_dto(
+                # One flat row per requested constant; we ask for one.
+                (dto,) = build_trajectory_dtos(
                     handler,
                     cmf_id=cmf_id,
                     shard_id=shard_id,
@@ -148,6 +156,8 @@ class MySearchMethod:
                     start=start,
                     direction=traj,
                     constants=[self.constant],  # Constant objects → keys are c.name
+                    # Tier-2 attributes in the same pass as the walk (no re-walk).
+                    extra_metrics=tuple(search_config.TIER2_ATTRIBUTES),
                 )
             except Exception as e:  # a single bad trajectory must not kill the run
                 Logger(
@@ -157,8 +167,10 @@ class MySearchMethod:
                 continue
 
             # 3) PERSIST: one JSONL line per trajectory, via the pool's writer.
-            seen_trajectories[trajectory_id] = {"trajectory_id": trajectory_id}
-            sink((handler.trajectory_matrix, self.constant.value_sympy, dto))
+            seen_trajectories.setdefault(trajectory_id, {})[self.constant.name] = (
+                json.loads(dto.to_json_line())
+            )
+            sink((None, self.constant.value_sympy, dto))
 
 
 class MySearchMod(SearcherModScheme):
@@ -194,8 +206,6 @@ class MySearchMod(SearcherModScheme):
             return
 
         os.makedirs(sys_config.EXPORT_SEARCH_RESULTS, exist_ok=True)
-        num_workers = sys_config.NUM_BACKGROUND_WORKERS
-        config_overrides = config.export_configurations()
 
         # Deduplicate shards by shard_id (one shard can appear under several
         # constants) and remember which constants each shard was identified for —
@@ -211,16 +221,12 @@ class MySearchMod(SearcherModScheme):
         for shard_id, shard in SmartTQDM(
                 shard_by_id.items(), desc='Searching shards: ', **sys_config.TQDM_CONFIG,
         ):
-            self._run_shard(
-                shard, list(shard_identified[shard_id]), num_workers, config_overrides,
-            )
+            self._run_shard(shard, list(shard_identified[shard_id]))
 
     def _run_shard(
         self,
         shard: Shard,
         identified_consts: List[Constant],
-        num_workers: int,
-        config_overrides: dict,
     ) -> None:
         """Open the shard's JSONL store and run the method for each constant."""
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
@@ -230,16 +236,13 @@ class MySearchMod(SearcherModScheme):
         # recompute them. Returns a dict keyed by trajectory_id.
         seen_trajectories = load_seen_trajectories_for_search(output_path, shard_id)
 
-        # The worker_pool gives us `push`: it serialises each DTO to a JSONL line
-        # (and computes Tier-2 attributes in the background when configured).
-        # With an empty TIER2_ATTRIBUTES no subprocess is spawned — writes are inline.
+        # The worker_pool gives us `push`: it serialises each record to a JSONL
+        # line in this process (Tier-2 attributes are already inside each DTO —
+        # they are computed together with the walk, see MySearchMethod.run).
         with worker_pool(
-            num_workers=num_workers,
-            worker_fn=compute_tier2_for_item,
+            worker_fn=sink_item_dto,
             writer_fn=write_jsonl_line,
             output_path=output_path,
-            config_overrides=config_overrides,
-            parallel=bool(search_config.TIER2_ATTRIBUTES),
         ) as push:
             for const in identified_consts:
                 MySearchMethod(shard, const, use_LIReC=self.use_LIReC).run(

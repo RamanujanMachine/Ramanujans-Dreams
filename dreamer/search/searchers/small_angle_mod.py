@@ -13,7 +13,9 @@ import os
 from collections import defaultdict
 from typing import Dict, List, Set
 
+from dreamer.search.methods.flatland.evaluator import EvalStats, log_eval_stats
 from dreamer.configs import config
+from dreamer.utils.lru import make_handler_cache
 from dreamer.configs.system import sys_config
 from dreamer.configs.logging import logging_config
 from dreamer.extraction.shard import Shard
@@ -28,7 +30,7 @@ from dreamer.search.searchers.micro_climb_finalize import finalize_best_trajecto
 from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.utils.multi_processing import (
-    compute_tier2_for_item,
+    sink_item_dto,
     load_seen_trajectories_for_search,
     worker_pool,
     write_jsonl_line,
@@ -62,8 +64,6 @@ class SmallAngleSearchMod(SearcherModScheme):
 
         os.makedirs(sys_config.EXPORT_SEARCH_RESULTS, exist_ok=True)
 
-        num_workers = sys_config.NUM_BACKGROUND_WORKERS
-        config_overrides = config.export_configurations()
 
         shard_identified: Dict[str, Set[Constant]] = defaultdict(set)
         shard_by_id: Dict[str, Shard] = {}
@@ -79,14 +79,12 @@ class SmallAngleSearchMod(SearcherModScheme):
             **sys_config.TQDM_CONFIG,
         ):
             identified_consts = list(shard_identified[shard_id])
-            self._run_shard(shard, identified_consts, num_workers, config_overrides)
+            self._run_shard(shard, identified_consts)
 
     def _run_shard(
         self,
         shard: Shard,
         identified_consts: List[Constant],
-        num_workers: int,
-        config_overrides: dict,
     ) -> None:
         """Run the hill-climb for each identified constant of a single shard."""
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
@@ -100,7 +98,7 @@ class SmallAngleSearchMod(SearcherModScheme):
         # Shared across all constant-runs for this shard so that trajectories
         # evaluated for one constant reuse their walk matrices when a second
         # constant's climb encounters the same trajectory.
-        handler_cache: dict = {}
+        handler_cache = make_handler_cache()
 
         # Flatland geometry (LLL/BKZ) + interior start built once per shard
         # (constant-independent).  The persistent per-shard process pool walks
@@ -118,15 +116,13 @@ class SmallAngleSearchMod(SearcherModScheme):
                 logging_config.WATCHDOG_TRAJECTORY_SECONDS,
                 detail=lambda: f"shard={shard_id} cmf={cmf_id}",
             ), worker_pool(
-                num_workers=num_workers,
-                worker_fn=compute_tier2_for_item,
+                worker_fn=sink_item_dto,
                 writer_fn=write_jsonl_line,
                 output_path=output_path,
-                config_overrides=config_overrides,
-                parallel=bool(search_config.TIER2_ATTRIBUTES),
             ) as push:
                 for const in identified_consts:
                     method = SmallAngleSearch(shard, const, use_LIReC=self.use_LIReC)
+                    stats = EvalStats(seen_trajectories, const.name)
                     try:
                         method.run(
                             constant=const,
@@ -136,6 +132,7 @@ class SmallAngleSearchMod(SearcherModScheme):
                             sink=push,
                             seen_trajectories=seen_trajectories,
                             handler_cache=handler_cache,
+                            stats=stats,
                             geom=geom,
                             start=start,
                             pool=eval_pool,
@@ -143,9 +140,11 @@ class SmallAngleSearchMod(SearcherModScheme):
                     except NoInitialIdentification as e:
                         Logger(str(e), Logger.Levels.warning).log()
                         continue
+                    finally:
+                        log_eval_stats("Small Angle", shard_id, const.name, stats)
 
             # Assurance endgame on the best-δ trajectory(ies): no-op unless
-            # ENABLE_MICRO_HILL_CLIMB.  Runs after the search pool has flushed the
+            # ENABLE_MICRO_HILL_CLIMB.  Runs after the result writer has flushed the
             # JSONL, while geom / start / eval_pool are still alive.
             finalize_best_trajectories(
                 shard=shard,
@@ -157,8 +156,6 @@ class SmallAngleSearchMod(SearcherModScheme):
                 shard_id=shard_id,
                 shard_encoding_str=shard_encoding_str,
                 output_path=output_path,
-                num_workers=num_workers,
-                config_overrides=config_overrides,
             )
         finally:
             if eval_pool is not None:

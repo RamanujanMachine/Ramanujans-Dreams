@@ -38,6 +38,8 @@ for the full re-run optimisation (config-fingerprint staleness, cached-δ reuse)
 this template keeps the loop minimal on purpose.
 """
 
+import json
+import math
 import os
 from collections import defaultdict
 from typing import Dict, List, Optional, Set
@@ -55,7 +57,7 @@ from dreamer.search.methods.hedgehog_scan import SerialSearcher
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     _position_to_tuple,
-    build_trajectory_dto,
+    build_trajectory_dtos,
     derive_cmf_and_shard_ids,
     derive_trajectory_id,
 )
@@ -120,6 +122,7 @@ class MyAnalyzer:
                     shard_id, self.shard.cmf_name, encoding_str,
                     _position_to_tuple(start), _position_to_tuple(traj),
                 )
+                # The cache is nested: {trajectory_id: {constant_name: record}}.
                 if trajectory_id in seen_trajectories:
                     continue  # already on disk — skip (AnalyzerModV1 reuses its δ)
 
@@ -127,7 +130,8 @@ class MyAnalyzer:
                     handler = TrajectoryAttributesHandler.from_cmf(
                         self.shard.cmf, traj, start, constant=None, searchable=self.shard,
                     )
-                    dto = build_trajectory_dto(
+                    # One walk, one flat row per shard constant.
+                    dtos = build_trajectory_dtos(
                         handler,
                         cmf_id=cmf_id,
                         shard_id=shard_id,
@@ -144,19 +148,18 @@ class MyAnalyzer:
                     ).log()
                     continue
 
-                fout.write(dto.to_json_line() + "\n")
-                fout.flush()
-                seen_trajectories[trajectory_id] = {"trajectory_id": trajectory_id}
-                total += 1
-
-                for c in self.shard.consts:
-                    if bool((dto.identified or {}).get(c.name, False)):
+                for c, dto in zip(self.shard.consts, dtos):
+                    line = dto.to_json_line()
+                    fout.write(line + "\n")
+                    seen_trajectories.setdefault(trajectory_id, {})[c.name] = json.loads(line)
+                    if dto.identified:
                         identified_count[c.name] += 1
-                        delta_val = dto.delta_estimate.get(c.name)
-                        if delta_val is not None and (
-                            best_delta[c.name] is None or delta_val > best_delta[c.name]
+                        if math.isfinite(dto.delta) and (
+                            best_delta[c.name] is None or dto.delta > best_delta[c.name]
                         ):
-                            best_delta[c.name] = delta_val
+                            best_delta[c.name] = dto.delta
+                fout.flush()
+                total += 1
 
         # Keep a constant only if enough of its trajectories identified it.
         result: Dict[Constant, Optional[float]] = {}

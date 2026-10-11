@@ -71,8 +71,30 @@ Mostly **where things go** and **how many cores to use**.
 | `EXPORT_ANALYSIS_RESULTS` | Separate analysis store, used only when `analysis.STORE_TRAJECTORIES_SEPARATELY` is on. |
 | `EXPORT_GRAPHS` | Where the graphing stage writes figures/tables. |
 | `*_FORMAT` | `'pkl'` or `'json'` for the corresponding export. |
-| `TOTAL_CORES` / `NUM_BACKGROUND_WORKERS` | The core budget (`None` ⇒ `os.cpu_count()`); workers reserved for Tier-2. |
+| `TOTAL_CORES` | The core budget for every process pool (`None` ⇒ `os.cpu_count()`); nothing is reserved. |
+| `MEMORY_AWARE_WORKERS` / `MEMORY_LIMIT_MB` / `MEMORY_RESERVE_MB` / `WORKER_TASK_HEADROOM_MB` | Pools also fit available memory: `min(cores, (available − reserve) / per-worker)`, then grow once warm workers measure smaller and shrink (draining) when memory runs low. `MEMORY_LIMIT_MB` sets a budget for the run (shared nodes); available memory is otherwise detected, including cgroup/SLURM limits. |
+| `POOL_MAX_TASKS_PER_CHILD` | Recycle pool workers after N tasks (bounds slow growth on very long runs). |
+| `POOL_START_METHOD` | How pool workers are started: `'auto'` (default) = `forkserver` on Linux (no fork-with-threads deadlocks; pools can add workers mid-run) and `spawn` on macOS; or `'spawn'` / `'forkserver'` / `'fork'`. |
+| `POOL_SLOW_START` | Memory-aware pools that can grow start with this many workers (default 2), measure each task's real peak memory, then grow to every core that fits. `0` = start at the full memory cap. |
+| `SYMPY_CACHE_CLEAR_AFTER_SECONDS` | After a trajectory task that took at least this long (default 1 s), clear sympy's global cache, which otherwise keeps the huge numbers of long walks alive (tens of MB per long trajectory, growing per worker). Light tasks skip it. `0` = after every task; `None` = never. |
+| `REUSE_POLICY` | How stored attributes are reused across runs: `'strict'` (default — per-attribute fingerprints decide, so a config change recomputes exactly the affected attributes), `'keep'` (reuse anything stored), `'recompute'` (ignore earlier runs). |
+| `STAGE_POOL_WORKERS` | Cap for the per-stage trajectory pools (analysis, hedgehog search, Tier-3). `None`/`0` ⇒ full core budget; `1` ⇒ serial in-process. |
+| `STAGE_POOL_CHUNKSIZE` | Trajectories handed to a stage-pool worker at a time (default `1` = full dynamic load balancing). |
 | `CONSTANTS` | Default constants to search when `run()` is given none. |
+| `OPTIMIZATION_OBJECTIVE` | The numeric trajectory attribute the **whole pipeline** optimises for — both the analysis-stage shard ranking and the search-stage optimisers. `'delta'` (default) reproduces the historical behaviour exactly. Must be a registered objective (see below); each objective knows whether its optimum is the highest or lowest value, so "smaller is better" metrics work without inverting the search. Identification (LIReC) is always required regardless of the objective. |
+
+**Optimisation objectives.** `OPTIMIZATION_OBJECTIVE` must name an entry in
+`dreamer.utils.storage.optimization_objectives.OBJECTIVES` — the registry that
+gates which attributes are optimisable (numeric, with a known optimal direction)
+and stores that direction. Shipped objectives: `delta` (max) and
+`convergence_rate` (max, the length-normalised spectral rate
+`approximated_digits_per_step / ‖direction‖₂`). Since a stored result is one flat
+row per `(trajectory, constant)`, the objective is simply a **column** on that row
+(`delta` is the core field; `convergence_rate` etc. are their own key). Ranking
+reads it via `optimization_objectives.score_record`; the objective is **not** part
+of the config hash, so switching it never invalidates δ. To add an objective: add
+a handler method + an `ATTRIBUTE_REGISTRY` entry, then register it in `OBJECTIVES`
+with its direction.
 
 ## `database`
 
@@ -88,6 +110,9 @@ Mostly **where things go** and **how many cores to use**.
 | `EXACT_TIMEOUT_SECONDS` / `HEURISTIC_TIMEOUT_SECONDS` | Per-strategy wall-clock budgets (used by `'auto'` to decide fallback). |
 | `LOAD_SHARD_CACHE` | Reuse a previously-extracted `…__shards.jsonl` instead of re-extracting. |
 | `IGNORE_DUPLICATE_SEARCHABLES` | Drop symmetry-equivalent shards. |
+| `TRAJECTORY_CONSTRAINTS` | Optional `{var: int}` direction constraint, e.g. `{'x0': 12, 'y1': 28}` — pins the scale-invariant **ratio + sign** of every sampled trajectory and **drops shards** whose cone admits no such direction. Honoured by all samplers + search (see [extraction README](../extraction/README.md)). `None` = unconstrained. |
+| `HEURISTIC_WORKERS` / `HEURISTIC_PARALLEL_AFTER_SECONDS` | Ray-shooting processes (`0` = all cores) and the in-process grace period before the pool starts. Results do not depend on them. |
+| `HEURISTIC_REFINE_WORKERS` | Processes for the optional MILP witness refinement (`0` = all cores). |
 | `HEURISTIC_*`, `EXACT_*` | Fine-tuning of the ray-shooter / reverse-search (see `display()`). |
 
 ## `analysis`
@@ -95,7 +120,7 @@ Mostly **where things go** and **how many cores to use**.
 | Field | Meaning |
 |-------|---------|
 | `NUM_TRAJECTORIES_FROM_DIM` | `lambda dim: int(...)` — how many trajectories to sample per shard. |
-| `IDENTIFY_THRESHOLD` | Minimum identified-fraction to keep a shard (`-1` disables filtering). |
+| `IDENTIFY_THRESHOLD` | Minimum identified-fraction to keep a shard (`-1` disables filtering). Independent of the objective — identification is always a prerequisite; the shard is then *ranked* by `system.OPTIMIZATION_OBJECTIVE`. |
 | `SAMPLING_METHOD` | `'pt'` / `'discrete'` / `'raycast'` — sampler for analysis (independent of the search sampler). |
 | `STORE_TRAJECTORIES_SEPARATELY` | Write analysis records to their own store instead of the shared one. |
 | `USE_LIReC` | Use LIReC for identification. |
@@ -109,14 +134,15 @@ The largest category. Shared knobs plus one block per optimiser
 |-------|---------|
 | `GLOBAL_SEED` | Master RNG seed for all samplers + search methods. |
 | `NUM_TRAJECTORIES_FROM_DIM` | Trajectory count per shard during search. |
-| `DEPTH_FROM_TRAJECTORY_LEN` | Walk depth as a function of trajectory length + dimension. |
+| `DEPTH_FROM_TRAJECTORY_LEN` | Walk depth as a function of trajectory length + dimension (default: between 1000 and 1500; shorter trajectories walk deeper). |
+| `CONSTANT_NO_DIGITS_HIGH_RES` / `MAX_CONSTANT_RESOLUTION` | Precision of the constant for δ: starts at `HIGH_RES` digits (10 000) and doubles until the estimate's error is clearly larger than the constant's rounding, up to `MAX_CONSTANT_RESOLUTION` (1 000 000). Long trajectories need ~10⁵ digits; constants are evaluated with FLINT's arb, so this is cheap (ζ(3) at 10⁶ digits ≈ 0.4 s, 20 MB). |
 | `SEARCH_MAX_TRAJ_LEN` / `SEARCH_TRAJ_NORM` | Cap on trajectory length (bounds symbolic cost) and the norm it's measured in. |
 | `SAMPLING_METHOD` | Sampler for the default hedgehog searcher. |
 | `TIER2_ATTRIBUTES` | Background-worker attributes computed during search (empty ⇒ no subprocesses). |
 | `ENABLE_MICRO_HILL_CLIMB` | The shared resolution-doubling finalization endgame after every method. |
 | `GA_*` | Genetic-algorithm knobs. |
 | `SA_*` | Small-Angle search knobs. |
-| `ANNEAL_*` | Simulated-Annealing knobs. |
+| `ANNEAL_*` | Simulated-Annealing knobs. `ANNEAL_LOOKAHEAD` (`auto`/`on`/`off`) speculatively pre-walks the next step's candidate neighbourhoods on idle eval workers — same search path and rows, fewer sequential rounds on large machines (`auto` needs ≥ 4·d_flat workers). |
 | `GRAD_*` | Gradient-Ascent knobs. |
 | `SPSA_*` | Hybrid SPSA + Adam knobs. |
 
@@ -154,9 +180,12 @@ config.configure(post_process={'TIER3_ATTRIBUTES': (
 
 The `<metric>` for a `top N …` selector **must already be stored** in the JSONL
 (the ranking pass only *reads* values — it never re-walks). Available metrics:
-`delta` (always present), `convergence_rate`, `asymptotic_digits_per_step`,
-`spectral_gap`, `gcd_slope`, `precision_at`. To rank on one that isn't stored
-yet, add it to `search.TIER2_ATTRIBUTES` (or as a bare Tier-3 attribute) first.
+`delta` (always present), `convergence_rate` (in the default `TIER2_ATTRIBUTES`),
+`approximated_digits_per_step`, `spectral_gap`, `gcd_slope`, `precision_at`. Each
+reads the handler-computed value straight from the record — `convergence_rate` is
+the single system-wide definition (`approximated_digits_per_step / ‖direction‖₂`),
+not recomputed here. To rank on one that isn't stored yet, add it to
+`search.TIER2_ATTRIBUTES` (or as a bare Tier-3 attribute) first.
 
 ## `graph`
 

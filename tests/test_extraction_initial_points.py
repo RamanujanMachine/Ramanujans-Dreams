@@ -84,7 +84,7 @@ class _DummyPool:
 
 def test_compute_mapping_selects_closest_point_per_signature(monkeypatch):
     """Assumption: all points share one signature; failure mode: first-seen point leaks through instead of nearest."""
-    monkeypatch.setattr(initial_points, "create_pool", lambda: _DummyPool())
+    monkeypatch.setattr(initial_points, "create_pool", lambda *a, **k: _DummyPool())
     monkeypatch.setattr(initial_points.mp, "cpu_count", lambda: 1)
 
     D = 1
@@ -107,7 +107,7 @@ def test_compute_mapping_tie_breaks_lexicographically(monkeypatch):
         result = {(1,): point}
         return filter_func(result) if filter_func else result
 
-    monkeypatch.setattr(initial_points, "create_pool", lambda: _DummyPool())
+    monkeypatch.setattr(initial_points, "create_pool", lambda *a, **k: _DummyPool())
     monkeypatch.setattr(initial_points.mp, "cpu_count", lambda: 1)
     monkeypatch.setattr(initial_points, "__worker_wrapper", fake_worker)
 

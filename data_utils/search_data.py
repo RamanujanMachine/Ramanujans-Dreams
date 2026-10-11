@@ -63,13 +63,16 @@ def _iter_shard_files(root: str) -> Iterator[str]:
             yield os.path.join(root, fname)
 
 
-def _merge_jsonl(path: str) -> Dict[str, dict]:
-    """Read a per-shard JSONL and merge patches into base records.
+def _merge_jsonl(path: str) -> Dict[Tuple[str, str], dict]:
+    """Read a per-shard JSONL and merge patches into base rows.
 
-    Same semantics as ``dreamer.utils.multi_processing.load_seen_trajectories``,
-    duplicated locally so this script doesn't have to import the package.
+    Rows are flat, one per ``(trajectory_id, constant)`` — the same schema as
+    :class:`dreamer.utils.storage.dtos.TrajectoryDTO`.  Keyed by the composite
+    ``(trajectory_id, constant)``; patches fold in with a plain last-write-wins
+    ``dict.update`` (mirrors ``load_seen_trajectories``, duplicated locally so this
+    script needs no package import).
     """
-    merged: Dict[str, dict] = {}
+    merged: Dict[Tuple[str, str], dict] = {}
     with open(path, "r") as f:
         for line in f:
             line = line.strip()
@@ -80,15 +83,14 @@ def _merge_jsonl(path: str) -> Dict[str, dict]:
             except json.JSONDecodeError:
                 continue
             tid = record.get("trajectory_id")
-            if tid is None:
+            const = record.get("constant")
+            if tid is None or const is None:
                 continue
-            if tid not in merged:
-                merged[tid] = record
+            key = (tid, const)
+            if key not in merged:
+                merged[key] = record
             else:
-                existing_em = dict(merged[tid].get("extended_metrics") or {})
-                new_em = dict(record.get("extended_metrics") or {})
-                merged[tid].update(record)
-                merged[tid]["extended_metrics"] = {**existing_em, **new_em}
+                merged[key].update(record)
     return merged
 
 
@@ -97,24 +99,16 @@ def _shard_id_from_filename(fname: str) -> str:
     return fname[:-len(".jsonl")] if fname.endswith(".jsonl") else fname
 
 
-def _constants_in_file(merged: Dict[str, dict]) -> Set[str]:
-    """Collect constant names that appear in any record's ``delta_estimate`` dict."""
-    consts: Set[str] = set()
-    for r in merged.values():
-        d = r.get("delta_estimate")
-        if isinstance(d, dict):
-            consts.update(d.keys())
-    return consts
+def _constants_in_file(merged: Dict[Tuple[str, str], dict]) -> Set[str]:
+    """Collect constant names that appear across the rows."""
+    return {const for (_tid, const) in merged}
 
 
-def _fmt_delta_dict(delta) -> str:
-    """Render ``delta_estimate`` whether it is a dict or a legacy scalar."""
-    if isinstance(delta, dict):
-        parts = [f"{k}={v:.4f}" for k, v in delta.items() if isinstance(v, (int, float))]
-        return "{" + ", ".join(parts) + "}" if parts else str(delta)
-    if isinstance(delta, (int, float)):
-        return f"{delta:.4f}"
-    return str(delta)
+def _fmt_delta(value) -> str:
+    """Render a scalar δ (or ``?``)."""
+    if isinstance(value, (int, float)):
+        return f"{value:.4f}"
+    return str(value)
 
 
 # ---------------------------------------------------------------------------
@@ -172,75 +166,62 @@ def cmd_list_trajectories(args: argparse.Namespace) -> int:
         return 0
 
     consts = sorted(_constants_in_file(merged))
-    print(f"Shard {target}  (constants={consts}, {len(merged)} trajectories)")
+    n_traj = len({tid for (tid, _c) in merged})
     print(
-        f"{'trajectory_id':<86} {'identified':>22}  {'delta':>34}  start -> direction"
+        f"Shard {target}  (constants={consts}, {n_traj} trajectories, "
+        f"{len(merged)} rows)"
+    )
+    print(
+        f"{'trajectory_id':<86} {'constant':>10} {'identified':>11}  "
+        f"{'delta':>12}  start -> direction"
     )
     print("-" * 200)
-    for tid, r in merged.items():
-        identified = r.get("identified", "?")
-        if isinstance(identified, dict):
-            identified_str = "{" + ", ".join(f"{k}={v}" for k, v in identified.items()) + "}"
-        else:
-            identified_str = str(identified)
-        delta = r.get("delta_estimate", "?")
-        delta_str = _fmt_delta_dict(delta)
+    for (tid, const), r in merged.items():
+        identified_str = str(r.get("identified", "?"))
+        delta_str = _fmt_delta(r.get("delta", "?"))
         start = r.get("start_point")
         direction = r.get("direction")
         print(
-            f"{tid:<86} {identified_str:>22}  {delta_str:>34}  "
+            f"{tid:<86} {const:>10} {identified_str:>11}  {delta_str:>12}  "
             f"{start} -> {direction}"
         )
     return 0
 
 
 def cmd_show_trajectory(args: argparse.Namespace) -> int:
-    """Show every merged field for one trajectory."""
+    """Show every merged field for one trajectory — one flat row per constant."""
     target = args.trajectory_id
     # Trajectory id structure: ``<shard_id>__<traj_hash>``.
     shard_id = target.rsplit("__", 1)[0] if "__" in target else None
 
-    record: Optional[dict] = None
+    rows: List[Tuple[str, dict]] = []  # (constant, record)
+
+    def _collect(path: str) -> None:
+        for (tid, const), rec in _merge_jsonl(path).items():
+            if tid == target:
+                rows.append((const, rec))
 
     if shard_id:
         for jsonl_path in _iter_shard_files(args.root):
             if _shard_id_from_filename(os.path.basename(jsonl_path)) == shard_id:
-                merged = _merge_jsonl(jsonl_path)
-                if target in merged:
-                    record = merged[target]
+                _collect(jsonl_path)
                 break
-
-    # Fallback: scan every file.
-    if record is None:
+    if not rows:  # fallback: scan every file
         for jsonl_path in _iter_shard_files(args.root):
-            merged = _merge_jsonl(jsonl_path)
-            if target in merged:
-                record = merged[target]
+            _collect(jsonl_path)
+            if rows:
                 break
 
-    if record is None:
+    if not rows:
         print(f"Trajectory {target!r} not found under {args.root}")
         return 1
 
-    print(f"Trajectory {target}")
+    print(f"Trajectory {target}  ({len(rows)} constant row(s))")
     print("=" * 80)
-    for key, value in record.items():
-        if key == "extended_metrics":
-            continue
-        # Pretty-print dict-valued per-constant fields.
-        if isinstance(value, dict) and key in ("delta_estimate", "p_vector", "q_vector", "identified"):
-            print(f"  {key:<22}")
-            for cname, cval in value.items():
-                print(f"    {cname:<20} {cval}")
-        else:
-            print(f"  {key:<22} {value}")
-
-    em = record.get("extended_metrics") or {}
-    if em:
-        print()
-        print("  extended_metrics:")
-        for k in sorted(em.keys()):
-            print(f"    {k:<32} {em[k]}")
+    for const, record in sorted(rows, key=lambda cr: cr[0]):
+        print(f"\n[constant: {const}]")
+        for key, value in record.items():
+            print(f"  {key:<32} {value}")
     return 0
 
 

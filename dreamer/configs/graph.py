@@ -31,7 +31,7 @@ class GraphConfig(Configurable):
         metadata={
             "description": (
                 "Histogram of δ across trajectories, one per shard and one "
-                "aggregated per CMF. Cheap — reads stored delta_estimate only."
+                "aggregated per CMF. Cheap — reads the stored `delta` column only."
             )
         },
     )

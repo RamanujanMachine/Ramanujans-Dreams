@@ -3,16 +3,13 @@ Multiprocessing utilities for the Ramanujan Agent pipeline.
 
 This module provides two layers:
 
-1. **Generic parallelism abstraction** (``worker_pool``): a context manager
-   that hides all subprocess + queue machinery behind a single ``push(item)``
-   callable.  Callers supply a per-item ``worker_fn`` (transform) and a
-   per-item ``writer_fn`` (sink).  Setting ``worker_fn=None`` collapses to
-   a direct-write loop on the main thread — no subprocesses spawned —
-   without changing the producer code.
+1. **Result writer** (``worker_pool``): a context manager yielding a
+   ``push(item)`` callable that transforms each item (``worker_fn``) and
+   appends it to the shard's JSONL (``writer_fn``) in the calling process.
 
 2. **Stage-specific item functions**: ready-to-use per-item functions
    plugged into ``worker_pool`` by the Search stage:
-     - ``compute_tier2_for_item`` — runs ``TIER2_ATTRIBUTES`` for one item.
+     - ``sink_item_dto``         — unwraps a search sink tuple to its record.
      - ``write_jsonl_line``     — appends one DTO/patch as a JSON line.
 
 3. **Cross-run dedup helpers**: ``load_seen_trajectories`` and
@@ -23,17 +20,13 @@ This module provides two layers:
 
 import json
 import os
-import queue
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Iterator, Optional
 
-import multiprocessing as mp
-from multiprocessing import Pool
 
 from dreamer.configs import config
 from dreamer.configs.system import sys_config
-from dreamer.utils.logger import Logger
 
 
 # ---------------------------------------------------------------------------
@@ -43,21 +36,14 @@ from dreamer.utils.logger import Logger
 def search_worker_budget() -> int:
     """Return the number of cores available to search / analysis pools.
 
-    Single source of truth for sizing every search/eval pool.  Starts from
-    ``sys_config.TOTAL_CORES`` (``None`` → ``os.cpu_count()``) and reserves cores
-    for the Tier-2 background workers **and** their dedicated writer/sink — but
-    only when Tier-2 is actually active (``search.TIER2_ATTRIBUTES`` non-empty).
-    When Tier-2 is inactive, nothing is reserved and the whole machine is given
-    to search/analysis.
+    Single source of truth for sizing every search/eval pool: the whole machine,
+    ``sys_config.TOTAL_CORES`` (``None`` → ``os.cpu_count()``).  Nothing is
+    reserved any more — Tier-2 attributes are computed inside the same pool
+    tasks as Tier-1 (there is no separate background queue).
 
     :return: Worker budget, floored at 1.
     """
-    total = sys_config.TOTAL_CORES or os.cpu_count() or 1
-    if config.search.TIER2_ATTRIBUTES:
-        reserved = sys_config.NUM_BACKGROUND_WORKERS + 1  # +1 dedicated writer/sink
-    else:
-        reserved = 0
-    return max(1, total - reserved)
+    return max(1, sys_config.TOTAL_CORES or os.cpu_count() or 1)
 
 
 # ---------------------------------------------------------------------------
@@ -82,17 +68,25 @@ def create_process_pool_executor() -> ProcessPoolExecutor:
     )
 
 
-def create_pool() -> Pool:
-    """Return a ``multiprocessing.Pool`` whose workers inherit the current config.
+def create_pool(name: str = "pool"):
+    """Return a process pool whose workers inherit the current config.
 
-    Sized by :func:`search_worker_budget` so it never oversubscribes the cores
-    reserved for the Tier-2 queue + sink (and uses the whole machine when Tier-2
-    is inactive).
+    A :class:`~dreamer.utils.resilient_pool.ResilientPool` (survives dead
+    workers instead of hanging), sized by :func:`search_worker_budget`.  Used by
+    the legacy (V1) searchers and shard encoding; the pipeline stages use a
+    stage pool (:class:`~dreamer.utils.stage_pool.StagePool`) and the optimisers
+    an eval pool (:func:`~dreamer.search.methods.flatland.parallel_eval.make_eval_pool`).
+
+    :param name: Label shown in the pool's recovery warnings.
+    :return: The pool (use as a context manager).
     """
-    return Pool(
-        processes=search_worker_budget(),
+    from dreamer.utils.resilient_pool import ResilientPool
+    return ResilientPool(
+        search_worker_budget(),
         initializer=_init_worker,
         initargs=(config.export_configurations(),),
+        max_tasks_per_child=getattr(sys_config, "POOL_MAX_TASKS_PER_CHILD", None),
+        name=name,
     )
 
 
@@ -100,310 +94,87 @@ def create_pool() -> Pool:
 # Generic producer → workers → writer pipeline
 # ---------------------------------------------------------------------------
 
-def _run_worker_loop(
-    worker_id: int,
-    task_queue: mp.Queue,
-    results_queue: mp.Queue,
-    worker_fn: Callable[[Any], Any],
-    config_overrides: dict,
-) -> None:
-    """Subprocess entry point: pull items, apply *worker_fn*, forward results.
-
-    Stops cleanly on the ``None`` sentinel.  An exception inside
-    ``worker_fn`` is logged but does not crash the loop — the original
-    item is forwarded so the writer still sees it.
-    """
-    _init_worker(config_overrides)
-    Logger(f"Worker {worker_id} started.", Logger.Levels.debug).log()
-
-    while True:
-        try:
-            item = task_queue.get(timeout=3)
-        except queue.Empty:
-            continue
-        if item is None:
-            Logger(f"Worker {worker_id} stopping.", Logger.Levels.debug).log()
-            break
-        try:
-            result = worker_fn(item)
-        except Exception as e:
-            Logger(
-                f"Worker {worker_id} error: {e}",
-                Logger.Levels.warning,
-            ).log()
-            result = item
-        results_queue.put(result)
-
-
-def _run_writer_loop(
-    results_queue: mp.Queue,
-    writer_fn: Callable[[Any, Any], None],
-    output_path: str,
-    config_overrides: dict,
-    batch_size: int,
-    flush_timeout: float,
-) -> None:
-    """Subprocess entry point: drain *results_queue* and write each item.
-
-    Opens *output_path* in append mode once and calls ``writer_fn(item, fout)``
-    for every item.  Flushes are batched to reduce fsync overhead — an
-    explicit ``flush`` is issued every *batch_size* records, or after
-    *flush_timeout* seconds of queue inactivity (whichever comes first),
-    and one final flush always runs before the writer exits on the
-    ``None`` sentinel.  Being the sole writer eliminates file-lock races.
-    """
-    _init_worker(config_overrides)
-    Logger("Writer started.", Logger.Levels.debug).log()
-
-    pending = 0
-    with open(output_path, "a") as fout:
-        while True:
-            try:
-                item = results_queue.get(timeout=flush_timeout)
-            except queue.Empty:
-                # Idle period — flush whatever we've buffered so tail data
-                # is durable even if the producer is slow.
-                if pending:
-                    fout.flush()
-                    pending = 0
-                continue
-            if item is None:
-                Logger("Writer stopping.", Logger.Levels.debug).log()
-                break
-            try:
-                writer_fn(item, fout)
-                pending += 1
-            except Exception as e:
-                Logger(f"Writer error: {e}", Logger.Levels.warning).log()
-            if pending >= batch_size:
-                fout.flush()
-                pending = 0
-        if pending:
-            fout.flush()
-
-
 def _identity(item: Any) -> Any:
-    """Default worker_fn — returns its input unchanged.
-
-    Module-level (not a lambda) so it can be pickled to subprocesses if
-    MPMC mode is ever asked for with no explicit transform.
-    """
     return item
 
 
 @contextmanager
 def worker_pool(
     *,
-    num_workers: int,
     worker_fn: Optional[Callable[[Any], Any]],
     writer_fn: Callable[[Any, Any], None],
     output_path: str,
-    config_overrides: dict,
-    queue_maxsize: Optional[int] = None,
-    parallel: Optional[bool] = None,
 ) -> Iterator[Callable[[Any], None]]:
-    """Context manager yielding a ``push(item)`` callable for a producer.
+    """Context manager yielding a ``push(item)`` callable that writes results.
 
-    The user always supplies a per-item ``worker_fn`` (transform) and a
-    per-item ``writer_fn`` (sink).  Items pushed by the producer flow
-    ``push → worker_fn → writer_fn`` in **both** modes — the only thing
-    that changes is *where* the transform runs:
+    Each pushed item flows ``worker_fn → writer_fn`` on the caller's thread and
+    is appended to *output_path*, flushed every ``system.WRITER_BATCH_SIZE``
+    records and on exit.  No subprocesses: trajectory work runs in the stage /
+    eval pools, and this writer — in the main process — is the only writer of
+    the per-shard JSONL.
 
-    * **Direct mode** (``parallel=False``): ``worker_fn`` runs on the
-      producer thread, then ``writer_fn`` writes to the open file.  No
-      subprocess is created.
-    * **MPMC mode** (``parallel=True``): ``num_workers`` subprocess
-      workers apply ``worker_fn`` on items pulled from a bounded task
-      queue; results flow through a results queue to a single dedicated
-      writer subprocess that owns the file.  All sentinels and joins are
-      handled on ``__exit__`` (even when the producer raises).
+    (Until 2026-10-11 it also had a multi-process mode — worker and writer
+    subprocesses behind queues, for the removed Tier-2 queue.  Every caller used
+    the direct mode, so that mode was removed.)
 
-    When ``parallel`` is left as ``None``, it defaults to ``True`` if
-    ``worker_fn`` is provided and ``False`` otherwise — this keeps the
-    common case ergonomic (call sites that need to skip subprocess
-    spin-up just pass ``parallel=False``).
-
-    ``worker_fn=None`` is shorthand for the identity function.
-
-    Parameters
-    ----------
-    num_workers:
-        Number of worker subprocesses to spawn.  Ignored in direct mode.
-    worker_fn:
-        Per-item transform: takes ``item``, returns the (possibly modified)
-        item to be written.  Must be picklable in MPMC mode (typically a
-        module-level function).  ``None`` selects an identity transform.
-    writer_fn:
-        Per-item sink: takes ``(item, fout)`` and writes one record.  Must
-        be picklable in MPMC mode.  ``fout`` is an open append-mode handle.
-    output_path:
-        Destination file path.  Opened on the writer side (or main thread
-        in direct mode).
-    config_overrides:
-        Returned by ``config.export_configurations()`` in the parent;
-        propagated to every subprocess via ``_init_worker``.
-    queue_maxsize:
-        Bounded task-queue capacity.  Defaults to ``max(32, 4 * num_workers)``,
-        large enough that the producer rarely stalls waiting for consumers.
-    parallel:
-        Explicit subprocess on/off.  Defaults to ``True`` when ``worker_fn``
-        is provided, ``False`` otherwise.
-
-    Yields
-    ------
-    A ``push(item)`` callable.  Producer code calls it once per work item.
+    :param worker_fn: Per-item transform (``None`` = identity), e.g.
+        :func:`sink_item_dto`.
+    :param writer_fn: Per-item sink ``(item, fout)``, e.g. :func:`write_jsonl_line`.
+    :param output_path: File to append to (opened once, in append mode).
+    :return: Yields ``push(item)``.
     """
     effective_worker_fn = worker_fn if worker_fn is not None else _identity
-
-    if parallel is None:
-        parallel = worker_fn is not None
-
     batch_size = int(config.system.WRITER_BATCH_SIZE)
-    flush_timeout = float(config.system.WRITER_FLUSH_TIMEOUT_SECONDS)
+    with open(output_path, "a") as fout:
+        pending = 0
 
-    if not parallel:
-        # --- Direct mode: apply worker_fn inline on the main thread -----
-        # Same batch policy as MPMC mode; the file is closed (and therefore
-        # flushed) automatically when the ``with`` block exits, so we don't
-        # need a tail-timer here.
-        with open(output_path, "a") as fout:
-            pending = 0
+        def push(item: Any) -> None:
+            nonlocal pending
+            writer_fn(effective_worker_fn(item), fout)
+            pending += 1
+            if pending >= batch_size:
+                fout.flush()
+                pending = 0
 
-            def push(item: Any) -> None:
-                nonlocal pending
-                result = effective_worker_fn(item)
-                writer_fn(result, fout)
-                pending += 1
-                if pending >= batch_size:
-                    fout.flush()
-                    pending = 0
-            yield push
-        return
-
-    # --- MPMC mode -------------------------------------------------------
-    if queue_maxsize is None:
-        queue_maxsize = max(32, 4 * num_workers)
-
-    task_queue: mp.Queue = mp.Queue(maxsize=queue_maxsize)
-    results_queue: mp.Queue = mp.Queue()
-
-    workers = [
-        mp.Process(
-            target=_run_worker_loop,
-            args=(i, task_queue, results_queue, effective_worker_fn, config_overrides),
-        )
-        for i in range(num_workers)
-    ]
-    writer = mp.Process(
-        target=_run_writer_loop,
-        args=(
-            results_queue, writer_fn, output_path, config_overrides,
-            batch_size, flush_timeout,
-        ),
-    )
-
-    for w in workers:
-        w.start()
-    writer.start()
-
-    try:
-        yield task_queue.put
-    finally:
-        # Send one sentinel per worker, then signal the writer.  Guaranteed
-        # even if the producer raised — prevents hanging subprocesses.
-        for _ in workers:
-            task_queue.put(None)
-        for w in workers:
-            w.join()
-        results_queue.put(None)
-        writer.join()
+        yield push
 
 
-# ---------------------------------------------------------------------------
-# Search-stage per-item worker / writer
-# ---------------------------------------------------------------------------
+def sink_item_dto(item):
+    """Per-item ``worker_fn`` of the direct-write sinks: unwrap the record.
 
-def compute_tier2_for_item(item):
-    """Per-item worker: compute the configured Tier-2 attributes.
+    Search methods push ``(trajectory_matrix, constant_sympy, dto_or_patch)``
+    tuples (Tier-2 attributes are already inside the DTO — they are computed in
+    the walk task); the writer only needs the record.
 
-    *item* is ``(trajectory_matrix, constant, dto_or_patch)`` where
-    *dto_or_patch* is either a ``TrajectoryDTO`` (new trajectory) or a patch
-    ``dict`` (partial coverage), and *constant* is the sympy expression for
-    the target constant (e.g. ``sp.log(2)``) — required by attributes that
-    need to compare against the limit (``delta_sequence``, ``limit``, p/q
-    identification).  Pass ``None`` when no constant context is available.
-
-    Only attributes listed in ``search.TIER2_ATTRIBUTES`` and **not already
-    present** in ``extended_metrics`` are computed.  Per-attribute failures
-    are stored as ``<name>_error``; a fatal handler failure is recorded
-    under ``worker_error``.  The same dto/patch is returned for the writer.
+    :param item: A sink tuple, or a bare DTO / patch dict.
+    :return: The DTO or patch dict to write.
     """
-    from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
-    from dreamer.utils.storage.attribute_registry import compute_attributes, attribute_name
-    from dreamer.configs import config
+    if isinstance(item, tuple) and len(item) == 3:
+        return item[2]
+    return item
 
-    traj_matrix, constant, dto_or_patch = item
-    is_patch = isinstance(dto_or_patch, dict)
-    extended_metrics = (
-        dto_or_patch["extended_metrics"]
-        if is_patch
-        else dto_or_patch.extended_metrics
-    )
-    tid = (
-        dto_or_patch.get("trajectory_id", "?")
-        if is_patch
-        else dto_or_patch.trajectory_id
-    )
 
-    attrs_to_compute = config.search.TIER2_ATTRIBUTES
-    # Specs may be bare strings or ``(name, predicate)`` tuples; filter on
-    # the resolved attribute name so the predicate-skip path still runs
-    # inside ``compute_attributes``.
-    missing = [
-        spec for spec in attrs_to_compute
-        if attribute_name(spec) not in extended_metrics
-    ]
-    if missing and traj_matrix is not None:
-        try:
-            # Descriptor for the per-attribute watchdog so a stuck heavy
-            # attribute (e.g. asymptotics) can be traced to its trajectory.
-            if is_patch:
-                wd_detail = f"traj_id={tid}"
-            else:
-                wd_detail = (
-                    f"traj_id={tid} start={dto_or_patch.start_point} "
-                    f"direction={dto_or_patch.direction}"
-                )
-            handler = TrajectoryAttributesHandler(traj_matrix, constant=constant)
-            extended_metrics.update(
-                compute_attributes(
-                    handler, missing, on_error="store", watchdog_detail=wd_detail
-                )
-            )
-        except Exception as e:
-            Logger(
-                f"compute_tier2_for_item error on trajectory {tid}: {e}",
-                Logger.Levels.warning,
-            ).log()
-            extended_metrics["worker_error"] = str(e)
-    return dto_or_patch
+#: Structural keys a patch dict may carry for identity / handler reconstruction; a
+#: patch with *only* these adds no new metric and is dropped instead of bloating
+#: the JSONL with a no-op line.
+_PATCH_STRUCTURAL_KEYS = frozenset(
+    {"trajectory_id", "constant", "direction", "start_point"}
+)
 
 
 def write_jsonl_line(item, fout) -> None:
-    """Per-item writer: serialise *item* as one JSON line.
+    """Per-item writer: serialise *item* as one **flat** JSON line.
 
     Dicts (patches) go through ``json.dumps``; DTO objects use their
-    ``to_json_line()`` method.  The caller's open file handle does the
-    actual ``write``.
+    ``to_json_line()`` method.  The caller's open file handle does the actual
+    ``write``.
 
-    A patch with an empty ``extended_metrics`` carries no new information
-    (every attribute was either already present or skipped by its predicate)
-    — silently drop it instead of bloating the JSONL with no-op lines.
-    Full ``TrajectoryDTO`` objects always go through, including when their
-    ``extended_metrics`` is empty: that's the base record for a trajectory.
+    A patch carrying only its structural keys (``trajectory_id`` / ``constant``)
+    has no new metric — silently drop it.  Full ``TrajectoryDTO`` objects always
+    go through: that's the base row for a ``(trajectory, constant)`` pair.
     """
     if isinstance(item, dict):
-        if not (item.get("extended_metrics") or {}):
+        if not (set(item.keys()) - _PATCH_STRUCTURAL_KEYS):
             return
         line = json.dumps(item)
     else:
@@ -415,18 +186,19 @@ def write_jsonl_line(item, fout) -> None:
 # Deduplication helpers
 # ---------------------------------------------------------------------------
 
-def load_seen_trajectories(jsonl_path: str) -> Dict[str, dict]:
-    """Read and merge all trajectory records from an existing JSONL file.
+def load_seen_trajectories(jsonl_path: str) -> Dict[str, Dict[str, dict]]:
+    """Read and merge all ``(trajectory, constant)`` rows from a JSONL file.
 
-    Records sharing the same ``trajectory_id`` are merged left-to-right so
-    that patch records (which contain only ``trajectory_id`` and a partial
-    ``extended_metrics`` dict) are folded into the base record.
-    ``extended_metrics`` is deep-merged; all other top-level keys are
-    shallow-merged with later records winning.
+    Each line is a **flat** record (see :class:`TrajectoryDTO`).  Rows are keyed by
+    the composite ``(trajectory_id, constant)`` and folded into a nested
+    ``{trajectory_id: {constant: record}}`` map — the natural shape for the reuse
+    decision "have I computed this walk, for this constant, under the current
+    config?".  Because the schema is flat, merging a patch into its base row is a
+    plain last-write-wins ``dict.update`` (no special-cased nested dict).
 
     Returns an empty dict if the file does not exist.
     """
-    merged: Dict[str, dict] = {}
+    merged: Dict[str, Dict[str, dict]] = {}
     try:
         with open(jsonl_path, "r") as f:
             for line in f:
@@ -435,18 +207,21 @@ def load_seen_trajectories(jsonl_path: str) -> Dict[str, dict]:
                     continue
                 try:
                     record = json.loads(line)
-                    tid = record.get("trajectory_id")
-                    if tid is None:
-                        continue
-                    if tid not in merged:
-                        merged[tid] = record
-                    else:
-                        existing_metrics = dict(merged[tid].get("extended_metrics") or {})
-                        new_metrics = dict(record.get("extended_metrics") or {})
-                        merged[tid].update(record)
-                        merged[tid]["extended_metrics"] = {**existing_metrics, **new_metrics}
-                except (json.JSONDecodeError, KeyError):
+                except json.JSONDecodeError:
                     continue
+                tid = record.get("trajectory_id")
+                const = record.get("constant")
+                if tid is None or const is None:
+                    continue
+                bucket = merged.setdefault(tid, {})
+                if const not in bucket:
+                    bucket[const] = record
+                else:
+                    base = bucket[const]
+                    fps = record.pop("fingerprints", None)
+                    base.update(record)            # flat merge, later wins
+                    if fps:                        # per-attribute fps: deep merge
+                        base.setdefault("fingerprints", {}).update(fps)
     except FileNotFoundError:
         pass
     return merged
@@ -474,7 +249,7 @@ def load_seen_trajectories_for_search(output_path: str, shard_id: str) -> Dict[s
     :param output_path: ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` path the
         search stage reads and writes.
     :param shard_id: Structural shard id; names the analysis-store file.
-    :return: Merged ``{trajectory_id: record}`` cache for the shard.
+    :return: Merged ``{trajectory_id: {constant: record}}`` cache for the shard.
     """
     seen = load_seen_trajectories(output_path)
 
@@ -490,13 +265,18 @@ def load_seen_trajectories_for_search(output_path: str, shard_id: str) -> Dict[s
         return seen
 
     analysis_seen = load_seen_trajectories(analysis_path)
-    carryover = {tid: rec for tid, rec in analysis_seen.items() if tid not in seen}
+    # Carry over each (trajectory, constant) row the search file doesn't yet have.
+    carryover: list = []
+    for tid, by_const in analysis_seen.items():
+        for const, rec in by_const.items():
+            if const not in seen.get(tid, {}):
+                carryover.append(rec)
     if carryover:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         with open(output_path, "a") as fout:
-            for rec in carryover.values():
+            for rec in carryover:
                 fout.write(json.dumps(rec) + "\n")
-        seen.update(carryover)
+                seen.setdefault(rec["trajectory_id"], {})[rec["constant"]] = rec
     return seen
 
 
@@ -532,7 +312,23 @@ def load_seen_shards(jsonl_path: str) -> Dict[str, dict]:
 def load_seen_trajectory_ids(jsonl_path: str) -> set:
     """Return the set of ``trajectory_id`` values in an existing JSONL file.
 
-    Thin wrapper around :func:`load_seen_trajectories` kept for backward
-    compatibility with any call site that only needs the id set.
+    Reads ids directly (independent of the ``constant`` column, unlike
+    :func:`load_seen_trajectories`) since callers here only need the id set.
     """
-    return set(load_seen_trajectories(jsonl_path).keys())
+    ids: set = set()
+    try:
+        with open(jsonl_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                tid = record.get("trajectory_id")
+                if tid is not None:
+                    ids.add(tid)
+    except FileNotFoundError:
+        pass
+    return ids

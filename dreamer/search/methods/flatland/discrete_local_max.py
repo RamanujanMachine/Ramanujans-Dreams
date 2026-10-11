@@ -339,3 +339,117 @@ def discrete_micro_climb(
     if on_local_max is not None:
         on_local_max(cur_z, cur_delta)
     return cur_z, cur_delta
+
+
+# ---------------------------------------------------------------------------
+# Concurrent (breadth-first) micro-climb of several anchors
+# ---------------------------------------------------------------------------
+
+class _Climb:
+    """Mutable per-anchor state for :func:`parallel_micro_climb`.
+
+    Advanced one *round* at a time so many climbs can share a single evaluation
+    batch.  Mirrors :func:`discrete_micro_climb`: phase ``"A"`` is the greedy ±1
+    ascent, phase ``"B"`` the resolution-doubling fan; ``visited`` is per-climb
+    (matching the fresh ``visited`` the sequential version gets per anchor) and
+    prunes only that climb's Phase-B re-probes.
+    """
+
+    __slots__ = ("center", "delta", "phase", "visited", "done")
+
+    def __init__(self, center: np.ndarray, delta: float):
+        self.center = center
+        self.delta = delta
+        self.phase = "A"
+        self.visited: Set[Tuple[int, ...]] = set()
+        self.done = False
+
+
+def _advance_climb(
+    c: _Climb,
+    cands: List[np.ndarray],
+    results: List[Tuple[float, bool]],
+    geom: FlatlandGeometry,
+    improve_threshold: float,
+) -> None:
+    """Advance one climb by a single round from its candidates' ``(δ, identified)``.
+
+    Exactly the per-step logic of :func:`discrete_hill_climb` (phase A) and the
+    Phase-B body of :func:`discrete_micro_climb` (phase B), applied to one round's
+    worth of already-evaluated candidates.
+    """
+    if c.phase == "A":
+        best_z, best_delta = c.center, c.delta
+        for z_n, (delta_n, identified_n) in zip(cands, results):
+            if identified_n and delta_n > best_delta + improve_threshold:
+                best_z, best_delta = z_n, delta_n
+        if best_delta > c.delta + improve_threshold:
+            c.center, c.delta = best_z, best_delta          # moved; stay in phase A
+        else:
+            c.visited.add(primitive_ray_key(c.center, geom))  # ±1 local max → phase B
+            c.phase = "B"
+    else:  # phase "B"
+        best_z, best_delta = c.center, c.delta
+        for ray, (delta_n, identified_n) in zip(cands, results):
+            c.visited.add(primitive_ray_key(ray, geom))
+            if identified_n and delta_n > best_delta + improve_threshold:
+                best_z, best_delta = ray, delta_n
+        if not cands or best_delta <= c.delta + improve_threshold:
+            c.done = True                                    # resolution exhausted
+        else:
+            c.center, c.delta = best_z, best_delta
+            c.phase = "A"                                    # re-certify the improver
+
+
+def parallel_micro_climb(
+    anchors,
+    *,
+    geom: FlatlandGeometry,
+    eval_ctx: dict,
+    max_norm: float,
+    traj_norm: str,
+    improve_threshold: float,
+    pool=None,
+) -> List[Tuple[np.ndarray, float]]:
+    """Micro-climb many anchors concurrently — one saturated batch per round.
+
+    Semantically identical to calling :func:`discrete_micro_climb` on each anchor
+    with its own fresh ``visited`` set: every climb's move depends only on its own
+    candidates' δ (read from the shared walk cache ``eval_ctx['seen_trajectories']``),
+    so interleaving the climbs changes only *scheduling*, not the result.
+
+    The win is core utilisation.  Each round unions the candidate rays of **all**
+    still-active climbs — their Phase-A ±1 neighbours or their Phase-B fans — into a
+    single :func:`evaluate_neighbours` call, so a shard with *N* tied bests dispatches
+    a few ~N×-wider batches instead of *N* separate thin ones (``2·d_flat`` at a
+    time), keeping every core busy.  :func:`evaluate_batch` de-duplicates shared rays
+    by trajectory id, so a ray on several climbs' frontiers is still walked once.
+
+    :param anchors: iterable of ``(z, delta)`` start points (identified, in-cone).
+    :param geom: flatland geometry (cone filter + norm + real mapping).
+    :param eval_ctx: evaluation context for :func:`evaluate_neighbours`.
+    :param max_norm: trajectory norm cap (lattice resolution radius).
+    :param traj_norm: norm used for the length cap (``SEARCH_TRAJ_NORM``).
+    :param improve_threshold: minimum δ gain for a move/ray to count as better.
+    :param pool: optional per-shard process pool for the batched walks.
+    :return: refined ``(z, delta)`` per anchor, aligned with *anchors*.
+    """
+    climbs = [_Climb(z, delta) for z, delta in anchors]
+    while True:
+        batch: List[np.ndarray] = []
+        plan: List[Tuple[_Climb, int, List[np.ndarray]]] = []
+        for c in climbs:
+            if c.done:
+                continue
+            if c.phase == "A":
+                cands = orthogonal_neighbours(c.center, geom, max_norm, traj_norm)
+            else:
+                cands = resolution_probe_rays(c.center, geom, max_norm, traj_norm, c.visited)
+            plan.append((c, len(batch), cands))
+            batch.extend(cands)
+        if not plan:                       # every climb has converged
+            break
+        results = evaluate_neighbours(batch, eval_ctx, pool) if batch else []
+        for c, start, cands in plan:
+            _advance_climb(c, cands, results[start:start + len(cands)], geom, improve_threshold)
+    return [(c.center, c.delta) for c in climbs]

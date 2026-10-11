@@ -28,90 +28,37 @@ genuinely-new Case-C walks, de-duplicating directions that share a primitive
 ray.  ``pool=None`` evaluates serially in-process.
 """
 
+import json
 import multiprocessing as mp
 from collections import namedtuple
 from multiprocessing import Pool
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from dreamer.configs import config
 from dreamer.search.methods.flatland.evaluator import (
+    active_objective,
     evaluate_in_flatland,
     flatland_trajectory_key,
 )
 from dreamer.utils.logger import Logger
+from dreamer.utils.resilient_pool import ResilientPool
+from dreamer.utils.storage.attribute_fingerprints import tier1_record_fresh
 from dreamer.utils.multi_processing import search_worker_budget
-from dreamer.utils.storage.attribute_registry import attribute_name
+from dreamer.utils.storage.optimization_objectives import score_record
 
 search_config = config.search
 
 
-#: Returned by :func:`_pool_walk` when the walk raises, so a single bad
-#: trajectory degrades to δ = −∞ (matching the serial evaluator's try/except)
-#: instead of propagating through ``pool.map`` and aborting the whole batch.
-WalkError = namedtuple("WalkError", ["message"])
-
-
-# Per-worker context, populated once by the pool initializer.
-_POOL_STATE: dict = {}
-
-
-def _pool_init(config_overrides: dict, shard, start) -> None:
-    """Pool initializer: re-apply config and stash the per-shard walk context.
-
-    :param config_overrides: ``config.export_configurations()`` from the parent.
-    :param shard: The shard being searched (constant-independent).
-    :param start: Interior start :class:`Position` (constant-independent).
-    """
-    config.configure(**config_overrides)
-    # Rebind this worker's per-shard (p, q) cache onto the shared append-log (if
-    # one was attached by the deep-search module before the pool was built), so
-    # relations identified by any worker are reused by all of them instead of
-    # each worker re-deriving them via LIReC.  ``shared_pq_log`` is a Manager
-    # list proxy that survives pickling into the worker and reconnects to the
-    # parent's manager process; absent it, the cache stays process-local.
-    from dreamer.utils.storage.frequency_list import FrequencyList
-    shard.cache = FrequencyList(
-        shard.cache.max_size,
-        shared_log=getattr(shard, "shared_pq_log", None),
-    )
-    _POOL_STATE["shard"] = shard
-    _POOL_STATE["start"] = start
-
-
-def _pool_walk(args):
-    """Worker task: perform one Case-C walk and return the sink tuple.
-
-    :param args: ``(direction, constant, cmf_id, shard_id, shard_encoding_str)``.
-    :return: ``(trajectory_matrix, value_sympy, dto)`` on success — identical to
-        what the serial Case-C path passes to the sink — or a :class:`WalkError`
-        if the walk raised (so the main process can map it to δ = −∞ without the
-        exception aborting the whole batch).
-    """
-    from dreamer.utils.storage.trajectory_attributes import (
-        TrajectoryAttributesHandler,
-        build_trajectory_dto,
-    )
-
-    direction, constant, cmf_id, shard_id, shard_encoding_str = args
-    shard = _POOL_STATE["shard"]
-    start = _POOL_STATE["start"]
-    try:
-        handler = TrajectoryAttributesHandler.from_cmf(
-            shard.cmf, direction, start, constant=None, searchable=shard
-        )
-        dto = build_trajectory_dto(
-            handler,
-            cmf_id=cmf_id,
-            shard_id=shard_id,
-            cmf_name=shard.cmf_name,
-            shard_encoding_str=shard_encoding_str,
-            start=start,
-            direction=direction,
-            constants=[constant],
-        )
-        return (handler.trajectory_matrix, constant.value_sympy, dto)
-    except Exception as exc:  # noqa: BLE001 — mirror serial evaluator resilience
-        return WalkError(str(exc))
+# Worker-side entry points live in the light ``parallel_eval_worker`` module so a
+# spawned eval worker does not import the flatland geometry / samplers (numba,
+# scipy.optimize) just to walk trajectories.  Re-exported here for callers/tests.
+from dreamer.search.methods.flatland.parallel_eval_worker import (  # noqa: E402
+    _POOL_STATE,
+    WalkError,
+    _pool_init,
+    _pool_walk,
+    _walk_death_result,
+)
 
 
 def resolve_eval_workers(cap: Optional[int]) -> int:
@@ -122,7 +69,7 @@ def resolve_eval_workers(cap: Optional[int]) -> int:
     (:func:`dreamer.utils.multi_processing.search_worker_budget`), while a
     positive value caps the worker count at ``min(cap, budget)``.  This is what
     lets the eval pools scale to a large machine without per-method tuning while
-    still honouring the cores reserved for the Tier-2 queue + sink.
+    still letting a method cap its own pool.
 
     :param cap: The configured per-method worker cap (knob value).
     :return: Effective worker count (>= 1).
@@ -134,7 +81,7 @@ def resolve_eval_workers(cap: Optional[int]) -> int:
 
 
 def make_eval_pool(shard, start, workers: int) -> Optional[Pool]:
-    """Create a persistent per-shard evaluation pool, or ``None`` if disabled.
+    """Create a shard's **eval pool**, or ``None`` if disabled.
 
     :param shard: The shard being searched (handed to workers once).
     :param start: Interior start :class:`Position`.
@@ -146,10 +93,13 @@ def make_eval_pool(shard, start, workers: int) -> Optional[Pool]:
     effective = resolve_eval_workers(workers)
     if effective <= 1:
         return None
-    return Pool(
-        processes=effective,
+    return ResilientPool(
+        effective,
         initializer=_pool_init,
         initargs=(config.export_configurations(), shard, start),
+        on_death=_walk_death_result,
+        max_tasks_per_child=getattr(config.system, "POOL_MAX_TASKS_PER_CHILD", None),
+        name="eval pool",
     )
 
 
@@ -185,12 +135,130 @@ def make_shared_eval_pool(shard, start, workers: int):
     return pool, manager
 
 
+class WalkPrefetcher:
+    """Asynchronous speculative walks on an eval pool, using idle workers only.
+
+    A sequential optimiser (simulated annealing) needs the walks of step *k*
+    before it can choose step *k + 1*, so each step's small batch leaves most
+    workers idle.  The prefetcher uses that idle capacity to **start** the walks
+    a later step is likely to need (e.g. the neighbourhood of every possible next
+    center) while the current step's walks run.  When a later
+    :func:`evaluate_batch` asks for one of them it is taken from here — already
+    finished, or still running and awaited — instead of being dispatched again.
+
+    Speculative results are parked in memory and **never** sunk / recorded here:
+    :func:`evaluate_batch` commits a parked walk exactly like a fresh one, at the
+    moment (and in the order) it is requested, so the optimiser's decisions, the
+    JSONL rows and the ``seen`` cache are the same as without speculation.
+    Speculation that is never requested is simply discarded.
+
+    Capacity: a group is submitted only when all of its new walks fit into
+    ``workers - outstanding`` (outstanding = submitted, not yet finished), so the
+    pool's FIFO queue never holds speculation ahead of a step's own walks.
+
+    :param pool: The per-shard eval pool (its workers hold the shard / start).
+    :param eval_ctx: The evaluation context of the run (same dict passed to
+        :func:`evaluate_batch`).
+    :param workers: Worker count of *pool* (default: ``pool._processes``).
+    :param max_age: Finished, unclaimed results are dropped after this many
+        :meth:`speculate` calls (bounds memory; matrices can be large).
+    """
+
+    def __init__(self, pool, eval_ctx: dict, *, workers: Optional[int] = None, max_age: int = 2):
+        self.pool = pool
+        self.ctx = eval_ctx
+        self.workers = int(workers or getattr(pool, "_processes", 1) or 1)
+        self.max_age = max_age
+        # tid -> [AsyncResult, generation]
+        self._entries: Dict[str, list] = {}
+        self._gen = 0
+        self.stats = {"submitted": 0, "taken": 0, "dropped": 0}
+
+    def outstanding(self) -> int:
+        """Number of speculative walks submitted and not yet finished."""
+        return sum(1 for res, _gen in self._entries.values() if not res.ready())
+
+    def has(self, tid: str) -> bool:
+        """``True`` if a walk for trajectory *tid* was started (finished or not)."""
+        return tid in self._entries
+
+    def claim(self, tid: str):
+        """Remove the entry for *tid* and return its handle without waiting.
+
+        Claim first, wait later: a claimed walk can no longer be evicted by a
+        :meth:`speculate` call made before its result is read.
+
+        :return: The ``AsyncResult`` of the walk (``.get()[1]`` is the payload).
+        """
+        res, _gen = self._entries.pop(tid)
+        self.stats["taken"] += 1
+        return res
+
+    def take(self, tid: str):
+        """Remove and return the walk result for *tid* (blocks until it is done).
+
+        :return: The ``_pool_walk`` payload — ``(matrix, value_sympy, dto)`` or
+            :class:`WalkError`.
+        """
+        return self.claim(tid).get()[1]
+
+    def speculate(self, groups: Sequence[Sequence]) -> None:
+        """Start the walks of *groups* (in order) that fit into idle capacity.
+
+        A group is all-or-nothing: speculating half a neighbourhood rarely saves
+        a step.  Directions already scored (fresh ``seen`` row), walk-cached this
+        run, or already started are skipped.
+
+        :param groups: Sequence of direction groups (flatland vectors).
+        """
+        self._gen += 1
+        self._evict()
+        ctx = self.ctx
+        constant = ctx["constant"]
+        seen = ctx["seen_trajectories"]
+        free = self.workers - self.outstanding()
+        for group in groups:
+            if free <= 0:
+                break
+            new: Dict[str, Tuple] = {}
+            for z in group:
+                direction, tid, fp = flatland_trajectory_key(
+                    z, geom=ctx["geom"], shard=ctx["shard"], start=ctx["start"],
+                    shard_id=ctx["shard_id"], shard_encoding_str=ctx["shard_encoding_str"],
+                )
+                rec = seen.get(tid, {}).get(constant.name)
+                if tier1_record_fresh(rec, fp):
+                    continue
+                if tid in ctx["handler_cache"] or tid in self._entries or tid in new:
+                    continue
+                new[tid] = direction
+            if not new or len(new) > free:
+                continue
+            for tid, direction in new.items():
+                args = (0, direction, constant, ctx["cmf_id"], ctx["shard_id"], ctx["shard_encoding_str"])
+                self._entries[tid] = [self.pool.apply_async(_pool_walk, (args,)), self._gen]
+            self.stats["submitted"] += len(new)
+            free -= len(new)
+
+    def _evict(self) -> None:
+        """Drop finished, unclaimed results older than ``max_age`` generations."""
+        stale = [
+            tid for tid, (res, gen) in self._entries.items()
+            if gen < self._gen - self.max_age and res.ready()
+        ]
+        for tid in stale:
+            del self._entries[tid]
+        self.stats["dropped"] += len(stale)
+
+
 def evaluate_batch(
     z_list: List,
     *,
     eval_ctx: dict,
     pool=None,
     valid_fn: Optional[Callable] = None,
+    prefetcher: Optional["WalkPrefetcher"] = None,
+    speculate: Optional[Sequence[Sequence]] = None,
 ) -> List[Tuple[float, bool]]:
     """Evaluate a batch of flatland directions, optionally via a process *pool*.
 
@@ -204,6 +272,15 @@ def evaluate_batch(
     :param valid_fn: Optional ``z -> bool`` predicate; directions for which it
         returns ``False`` get ``(-inf, False)`` without a walk.  ``None`` treats
         every direction as valid.
+    :param prefetcher: Optional :class:`WalkPrefetcher` bound to *pool* and this
+        *eval_ctx*.  Walks it already started (speculatively, in an earlier call)
+        are taken from it instead of being dispatched again; new walks are
+        dispatched asynchronously so *speculate* can be queued behind them.
+        Results are committed exactly as freshly-walked ones, in the same order.
+    :param speculate: Optional groups of directions a *later* call is likely to
+        request (e.g. the next annealing step's candidate neighbourhoods).  Handed
+        to ``prefetcher.speculate`` after this batch's own walks are queued; they
+        only use idle workers and are **not** committed here.
     :return: List of ``(delta, identified)`` aligned with *z_list*.
     """
     n = len(z_list)
@@ -211,11 +288,13 @@ def evaluate_batch(
         return []
 
     # --- Serial path ---------------------------------------------------
-    if pool is None or n <= 1:
+    if pool is None or (n <= 1 and prefetcher is None):
         out: List[Tuple[float, bool]] = []
         for z in z_list:
             if valid_fn is not None and not valid_fn(z):
                 out.append((float("-inf"), False))
+                if eval_ctx.get("stats") is not None:
+                    eval_ctx["stats"].add("outside")
             else:
                 out.append(evaluate_in_flatland(z, **eval_ctx))
         return out
@@ -231,32 +310,35 @@ def evaluate_batch(
     cmf_id: str = eval_ctx["cmf_id"]
     shard_id: str = eval_ctx["shard_id"]
     shard_encoding_str: str = eval_ctx["shard_encoding_str"]
-    desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
+    stats = eval_ctx.get("stats")
+    objective_name = active_objective()
 
     results: List[Optional[Tuple[float, bool]]] = [None] * n
-    # trajectory_id -> (direction, fingerprint, [batch indices]) for Case C.
+    # trajectory_id -> (direction, fingerprint, [batch indices]) for the walk group.
     groups: Dict[str, tuple] = {}
 
     for i, z in enumerate(z_list):
         if valid_fn is not None and not valid_fn(z):
             results[i] = (float("-inf"), False)
+            if stats is not None:
+                stats.add("outside")
             continue
         direction, tid, fp = flatland_trajectory_key(
             z, geom=geom, shard=shard, start=start,
             shard_id=shard_id, shard_encoding_str=shard_encoding_str,
         )
-        rec = seen.get(tid)
-        if rec is not None and rec.get("config_fingerprint") == fp:
-            dmap = rec.get("delta_estimate") or {}
-            if constant.name in dmap:  # Case A
-                imap = rec.get("identified") or {}
-                results[i] = (float(dmap[constant.name]),
-                              bool(imap.get(constant.name, False)))
+        rec = seen.get(tid, {}).get(constant.name)
+        if tier1_record_fresh(rec, fp):
+            cached = score_record(rec, objective_name)
+            if cached is not None:  # already scored for this constant
+                results[i] = cached
+                if stats is not None:
+                    stats.scored(tid)
                 continue
-        if tid in handler_cache:  # Case B — cheap recompute, no new walk
+        if tid in handler_cache:  # walk cached — cheap recompute, no new walk
             results[i] = evaluate_in_flatland(z, **eval_ctx)
             continue
-        # Case C — dedupe directions that share a primitive ray.
+        # Needs a walk — dedupe directions that share a primitive ray.
         grp = groups.get(tid)
         if grp is None:
             groups[tid] = (direction, fp, [i])
@@ -264,12 +346,36 @@ def evaluate_batch(
             grp[2].append(i)
 
     if groups:
+        group_items = list(groups.items())          # deterministic (insertion) order
         args = [
-            (direction, constant, cmf_id, shard_id, shard_encoding_str)
-            for (direction, fp, idxs) in groups.values()
+            (gi, direction, constant, cmf_id, shard_id, shard_encoding_str)
+            for gi, (tid, (direction, fp, idxs)) in enumerate(group_items)
         ]
-        walked = pool.map(_pool_walk, args)
-        for (tid, (direction, fp, idxs)), res in zip(groups.items(), walked):
+        # Dynamic load balancing: ``imap_unordered`` with ``chunksize=1`` lets a
+        # worker pull the next trajectory the instant it is free, so a few long
+        # (deep-walk) trajectories can't stall a statically-assigned ``map`` chunk
+        # while other cores idle.  Results are reassembled by group index and then
+        # processed in deterministic group order, so the sink / ``seen`` updates and
+        # the returned batch values are identical to the old ``pool.map`` path.
+        walked: List = [None] * len(group_items)
+        if prefetcher is None:
+            for gi, res in pool.imap_unordered(_pool_walk, args, chunksize=1):
+                walked[gi] = res
+        else:
+            # Take walks the prefetcher already started; queue the rest first so
+            # they are not stuck behind the speculation submitted right after.
+            # Claim the prefetched handles *before* speculating (which may evict).
+            handles = {}
+            for gi, (tid, _grp) in enumerate(group_items):
+                if prefetcher.has(tid):
+                    handles[gi] = prefetcher.claim(tid)
+                else:
+                    handles[gi] = pool.apply_async(_pool_walk, (args[gi],))
+            if speculate:
+                prefetcher.speculate(speculate)
+            for gi in range(len(group_items)):
+                walked[gi] = handles[gi].get()[1]
+        for (tid, (direction, fp, idxs)), res in zip(group_items, walked):
             if isinstance(res, WalkError):
                 Logger(
                     f"Parallel walk failed — shard {shard_id}, "
@@ -278,18 +384,25 @@ def evaluate_batch(
                 ).log()
                 for i in idxs:
                     results[i] = (float("-inf"), False)
+                if stats is not None:
+                    stats.add("failed", len(idxs))
                 continue
             matrix, vsym, dto = res
+            if stats is not None:
+                stats.walked(tid, cached_walk=False, ok=True)
+                stats.add("revisited", len(idxs) - 1)   # same ray in this batch
             sink((matrix, vsym, dto))
-            seen[tid] = {
-                "extended_metrics": dict.fromkeys(desired),
-                "delta_estimate": dict(dto.delta_estimate),
-                "identified": dict(dto.identified),
-                "config_fingerprint": fp,
-            }
-            d = float(dto.delta_estimate.get(constant.name, float("-inf")))
-            ided = bool(dto.identified.get(constant.name, False))
+            record = json.loads(dto.to_json_line())
+            seen.setdefault(tid, {})[constant.name] = record
+            scored = score_record(record, objective_name)
+            if scored is None:
+                scored = (float("-inf"), bool(dto.identified))
             for i in idxs:
-                results[i] = (d, ided)
+                results[i] = scored
+
+    elif prefetcher is not None and speculate:
+        # Nothing to walk for this batch (all cached) — still keep the
+        # speculation for the next step running.
+        prefetcher.speculate(speculate)
 
     return [r if r is not None else (float("-inf"), False) for r in results]

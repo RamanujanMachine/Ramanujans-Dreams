@@ -215,7 +215,8 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
                      heuristic_num_rays=None, heuristic_max_seconds=None,
                      heuristic_missing_mass=5e-4, heuristic_face_aligned=False,
                      heuristic_face_subsets=200, heuristic_face_offsets=50,
-                     symmetry=None):
+                     heuristic_workers=1, heuristic_parallel_after_seconds=3.0,
+                     heuristic_seed=0, symmetry=None):
             captured["strategy"] = strategy
             captured["timeout_seconds"] = timeout_seconds
             captured["exact_unbounded_check"] = exact_unbounded_check
@@ -229,6 +230,9 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
             captured["heuristic_face_aligned"] = heuristic_face_aligned
             captured["heuristic_face_subsets"] = heuristic_face_subsets
             captured["heuristic_face_offsets"] = heuristic_face_offsets
+            captured["heuristic_workers"] = heuristic_workers
+            captured["heuristic_parallel_after_seconds"] = heuristic_parallel_after_seconds
+            captured["heuristic_seed"] = heuristic_seed
 
         def extract(self, hyperplanes):
             captured["num_hps"] = len(hyperplanes)
@@ -243,6 +247,13 @@ def test_extract_via_v2_routes_through_manager(monkeypatch, _restore_strategy):
     assert captured["strategy"] == "auto"
     assert captured["timeout_seconds"] == extraction_config.EXACT_TIMEOUT_SECONDS
     assert captured["heuristic_max_seconds"] == extraction_config.HEURISTIC_TIMEOUT_SECONDS
+    assert captured["heuristic_workers"] == extraction_config.HEURISTIC_WORKERS
+    assert captured["heuristic_parallel_after_seconds"] == extraction_config.HEURISTIC_PARALLEL_AFTER_SECONDS
+    # Seeded from GLOBAL_SEED (reproducible per CMF), no longer a fixed 0.
+    from dreamer.configs import config as _cfg
+    from dreamer.utils.rand import derive_seed
+    if _cfg.search.GLOBAL_SEED is not None:
+        assert captured["heuristic_seed"] == derive_seed("heuristic-extraction", extractor.cmf_data.cmf_name)
     assert captured["exact_unbounded_check"] == extraction_config.EXACT_UNBOUNDED_CHECK
     assert captured["heuristic_refine"] == extraction_config.HEURISTIC_REFINE_WITNESSES
     assert captured["heuristic_num_rays"] == extraction_config.HEURISTIC_NUM_RAYS

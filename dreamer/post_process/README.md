@@ -37,6 +37,13 @@ It has **two independent jobs**, each off until you enable it:
 An empty `TIER3_ATTRIBUTES` **and** a disabled `config.graph` make the whole
 stage a no-op (no files read, no subprocesses spawned).
 
+Tier-3 work for every prioritised shard runs on one stage-wide process pool
+(sized by `config.system.TOTAL_CORES`, capped by `STAGE_POOL_WORKERS`): the main
+process reads each shard file once and queues the rows whose attributes are
+missing or out of date, workers rebuild the trajectory at its own walk depth from
+the stored Tier-1 values (no re-identification) and compute the attributes, and
+the main process appends the patches (single writer).
+
 ---
 
 ## Directory contents

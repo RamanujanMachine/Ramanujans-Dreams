@@ -55,7 +55,9 @@ def test_shard_sampler_translates_pipeline_output(monkeypatch, cmf_2d, symbols):
     sampled = sampler.sample_trajectories(lambda d: d * 4)
 
     assert requested[0] == 8
-    assert sampled == {
+    # sample_trajectories returns a deterministically-ordered list; this test
+    # checks content, not order, so compare as sets.
+    assert set(sampled) == {
         Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(-2)}),
         Position({symbols[0]: sp.Integer(3), symbols[1]: sp.Integer(4)}),
     }

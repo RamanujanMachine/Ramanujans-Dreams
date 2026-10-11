@@ -12,7 +12,7 @@ Three graph kinds (see :class:`GraphConfig`):
      over the first ``DELTA_SEQUENCE_DEPTH`` walk steps of the best-δ trajectory.
      The only kind that walks a trajectory (just the single best one per group).
   2. **δ histograms** — one per ``(constant, shard)`` and one aggregated per
-     ``(constant, CMF)``, from stored ``delta_estimate`` (cheap).
+     ``(constant, CMF)``, from the stored scalar ``delta`` column (cheap).
   3. **Bumpiness table** — per-shard CSV + markdown with the semivariogram-based
      spatial roughness and the median δ-sequence total variation
      (see :mod:`dreamer.graphing.bumpiness`).
@@ -36,6 +36,11 @@ from dreamer.utils.storage.handler_reconstruction import (
     reconstruct_positions,
 )
 from dreamer.utils.storage.record_metrics import delta_metric
+from dreamer.utils.storage.optimization_objectives import (
+    objective_display_label,
+    record_raw_value,
+    score_record,
+)
 from dreamer.utils.storage.trajectory_attributes import (
     TrajectoryAttributesHandler,
     derive_cmf_and_shard_ids,
@@ -160,11 +165,12 @@ class Grapher:
         from dreamer.graphing.plots import plot_delta_sequence
 
         depth = graph_config.DELTA_SEQUENCE_DEPTH
+        label = objective_display_label(config.system.OPTIMIZATION_OBJECTIVE)
         for (const_name, cmf_id), grp in groups.items():
             best = self._best_record(grp["shards"], const_name)
             if best is None:
                 continue
-            best_delta, record = best
+            best_value, record = best
             cmf = self._cmf_lookup.get(cmf_id)
             if cmf is None:
                 Logger(
@@ -193,8 +199,8 @@ class Grapher:
             plot_delta_sequence(
                 deltas, out,
                 title=(
-                    f"Best-δ trajectory δ-sequence — {cmf_id} [{const_name}] "
-                    f"(δ≈{best_delta:.4f}, first {len(deltas)} steps)"
+                    f"Best-{label} trajectory δ-sequence — {cmf_id} [{const_name}] "
+                    f"({label}≈{best_value:.4f}, first {len(deltas)} steps)"
                 ),
             )
 
@@ -206,17 +212,20 @@ class Grapher:
         rows: List[dict] = []
         for (const_name, cmf_id), grp in groups.items():
             for enc, path in grp["shards"]:
-                records = load_seen_trajectories(path)
+                records = load_seen_trajectories(path)  # {tid: {const: record}}
                 directions: List[list] = []
                 deltas: List[float] = []
                 seqs: List[list] = []
-                for rec in records.values():
+                for by_const in records.values():
+                    rec = by_const.get(const_name)
+                    if rec is None:
+                        continue
                     d = delta_metric(rec, const_name)
                     direction = rec.get("direction")
                     if d is not None and direction:
                         directions.append(direction)
                         deltas.append(d)
-                    seq = (rec.get("extended_metrics") or {}).get("delta_sequence")
+                    seq = rec.get("delta_sequence")
                     if isinstance(seq, (list, tuple)) and len(seq) >= 2:
                         seqs.append(seq)
 
@@ -286,9 +295,12 @@ class Grapher:
     # ------------------------------------------------------------------
 
     def _shard_deltas(self, path: str, const_name: Optional[str]) -> List[float]:
-        records = load_seen_trajectories(path)
+        records = load_seen_trajectories(path)  # {tid: {const: record}}
         out: List[float] = []
-        for rec in records.values():
+        for by_const in records.values():
+            rec = by_const.get(const_name)
+            if rec is None:
+                continue
             d = delta_metric(rec, const_name)
             if d is not None:
                 out.append(d)
@@ -297,13 +309,29 @@ class Grapher:
     def _best_record(
         self, shards, const_name: Optional[str]
     ) -> Optional[Tuple[float, dict]]:
-        """Return ``(best_delta, record)`` over all shards of one (constant, CMF)."""
+        """Return ``(best_objective_value, record)`` over all shards of one
+        ``(constant, CMF)``.
+
+        "Best" is chosen by the active optimisation objective's signed score (so it
+        is correct for both larger- and smaller-is-better objectives); the returned
+        value is that objective's raw value for display.
+        """
+        objective_name = config.system.OPTIMIZATION_OBJECTIVE
+        best_score = -float("inf")
         best: Optional[Tuple[float, dict]] = None
         for _enc, path in shards:
-            for rec in load_seen_trajectories(path).values():
-                d = delta_metric(rec, const_name)
-                if d is None:
+            for by_const in load_seen_trajectories(path).values():
+                rec = by_const.get(const_name)
+                if rec is None:
                     continue
-                if best is None or d > best[0]:
-                    best = (d, rec)
+                scored = score_record(rec, objective_name)
+                if scored is None:
+                    continue
+                score, _identified = scored
+                if score != score or score == -float("inf"):  # NaN / worst sentinel
+                    continue
+                if best is None or score > best_score:
+                    best_score = score
+                    raw = record_raw_value(rec, objective_name)
+                    best = (raw if raw is not None else score, rec)
         return best

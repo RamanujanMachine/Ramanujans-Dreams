@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import subprocess
 import time
-from multiprocessing import get_context
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -234,8 +233,8 @@ class LrslibExtractor(BaseExtractor):
             for child in children
         ]
         timed_out = False
-        ctx = get_context()
-        with ctx.Pool(processes=min(self.num_workers, len(tasks))) as pool:
+        from dreamer.utils.resilient_pool import ResilientPool
+        with ResilientPool(min(self.num_workers, len(tasks)), name="exact extraction") as pool:
             try:
                 for sub_out, sub_timed_out in pool.imap_unordered(
                     _subtree_extract_worker, tasks

@@ -54,23 +54,26 @@ class FrequencyList:
     def _sync_from_shared(self) -> None:
         """Fold any values appended to *shared_log* by other processes in.
 
-        Reads the shared proxy once (a single IPC round-trip) and advances the
-        cursor so each shared entry is folded in at most once.  Entries already
-        present locally are skipped by :meth:`_add_local`'s dedup.
+        Fetches only the **new tail** of the shared log (entries after the
+        cursor) — copying the whole, ever-growing log on every scan made each
+        lookup cost O(log size) in IPC and memory.  Advances the cursor so each
+        shared entry is folded in at most once; entries already present locally
+        are skipped by :meth:`_add_local`'s dedup.
         """
         if self.shared_log is None:
             return
         try:
-            snapshot = list(self.shared_log)
+            n = len(self.shared_log)
+            if n <= self._synced_len:
+                self._synced_len = n
+                return
+            new_values = self.shared_log[self._synced_len:n]
         except Exception:
             # A torn-down manager (end of shard search) must never break a scan.
             return
-        if len(snapshot) <= self._synced_len:
-            self._synced_len = len(snapshot)
-            return
-        for value in snapshot[self._synced_len:]:
+        for value in new_values:
             self._add_local(value)
-        self._synced_len = len(snapshot)
+        self._synced_len = n
 
     def append(self, value: Any):
         """Adds a new item to the cache (starts with freq=0).

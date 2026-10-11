@@ -102,6 +102,17 @@ class SearchConfig(Configurable):
         default=1e-10,
         metadata={"description": "Tolerance used when deciding whether a searched trajectory identifies the constant."},
     )
+    IDENTIFY_DEPTH: int = field(
+        default=1000,
+        metadata={"description": "Walk depth at which the p/q integer relation is identified via "
+                  "LIReC. The relation is depth-independent, so it is found once at this (cheap) "
+                  "depth and reused for the deeper delta / spectral computations, avoiding a "
+                  "redundant deep identification walk (LIReC and the walk feeding it get expensive "
+                  "at large depth). Capped by the actual walk depth; falls back to the full walk "
+                  "depth if identification fails here (slow-converging trajectory), so results are "
+                  "unchanged -- only faster. Not part of the Tier-1 config fingerprint for that "
+                  "reason."},
+    )
     COMPUTE_EIGEN_VALUES: bool = field( # deprecated
         default=False,
         metadata={"description": "Compute eigenvalue diagnostics for trajectory matrices in search results."},
@@ -121,12 +132,12 @@ class SearchConfig(Configurable):
     # Misspelled entries raise KeyError loudly.
     #
     # Tier model:
-    #   Tier-1 — core DTO fields (delta, identified, limit, order, recurrence_relation,
-    #            p/q vectors).  Always computed in the main thread.
-    #   Tier-2 — async extras computed in background worker processes during search.
-    #            Default is empty so a vanilla run does no extra work beyond Tier-1.
-    #   Tier-3 — expensive post-process attributes (asymptotics, kamidelta).  Not
-    #            yet implemented; will run as a separate pipeline pass.
+    #   Tier-1 — core DTO fields (delta, identified, p/q vectors, projection column).
+    #            Computed by analysis and search for every new trajectory.
+    #   Tier-2 — extras computed during search, in the same pool task as the
+    #            trajectory's Tier-1 (or from its stored row when Tier-1 is reused).
+    #   Tier-3 — expensive attributes computed by the post-process stage for the
+    #            trajectories its predicates select (post_process.TIER3_ATTRIBUTES).
     TIER2_ATTRIBUTES: Tuple[str, ...] = field(
         default=(
             ("eigenvalues", "if_identified"), ("eigenvalue_errors", "if_identified"), ("spectral_gap", "if_identified"),
@@ -134,16 +145,17 @@ class SearchConfig(Configurable):
             ("delta_prediction", "if_identified"),
             ("gcd_slope", "if_identified"), ("error_formula_ratio", "if_identified"),
             ("approximated_digits_per_step", "if_identified"), ("digits_approximation", "if_identified"),
+            ("convergence_rate", "if_identified"),
             ("digits_computed", "if_identified"), ("avg_computed_digits_per_step", "if_identified"),
         ),
-        metadata={"description": "Background-worker attributes computed asynchronously during search. Empty disables the worker/writer subprocesses entirely."},
+        metadata={"description": "Attributes computed for every trajectory the search stage evaluates, in the same pool task as its Tier-1 walk (rows whose Tier-1 is already stored get only the missing / stale ones, from a handler seeded with the stored values). Reused across runs per attribute fingerprint (system.REUSE_POLICY)."},
     )
 
     USE_DELTA_PREDICTION: bool = field(
         default=False,
         metadata={"description": (
             "When True, use delta_prediction (eigenvalue-based) as the primary ranking "
-            "metric stored in delta_estimate for analysis and search, instead of the "
+            "metric stored in the `delta` column for analysis and search, instead of the "
             "regular walk-based delta.  The regular delta is always computed first because "
             "it is needed to select the best eigenvalue pair for delta_prediction; both "
             "values are computed, only the ranking metric changes."
@@ -260,6 +272,29 @@ class SearchConfig(Configurable):
     ANNEAL_NUM_EVAL_WORKERS: int = field(
         default=0,
         metadata={"description": "Worker cap for evaluating the neighbour batch in each SA step. 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},
+    )
+    HANDLER_CACHE_SIZE: int = field(
+        default=64,
+        metadata={"description": (
+            "Maximum number of trajectory handlers (each holding its walked matrices) the "
+            "search methods keep per shard to reuse a walk for another constant. Least "
+            "recently used handlers are evicted; a later request just walks again. Bounds "
+            "the main process' memory on large CMFs. 0 = unbounded."
+        )},
+    )
+    ANNEAL_LOOKAHEAD: str = field(
+        default="auto",
+        metadata={"description": (
+            "Speculative one-step look-ahead for simulated annealing. While a step's "
+            "neighbours are walked, idle eval workers already walk the neighbourhoods "
+            "of every possible next center (each neighbour = accept, the doubled "
+            "current = reject); the next step then often finds its walks done. The "
+            "search path and the written rows are identical to the plain loop (results "
+            "are committed only when the loop requests them); only idle capacity is "
+            "used. 'auto' enables it when the eval pool has at least 2 * (2 * d_flat) "
+            "workers (room for one step's neighbours plus one full speculative "
+            "neighbourhood); 'on' whenever a multi-process pool exists; 'off' disables it."
+        )},
     )
 
     # ============================== Shared trajectory-length cap (all search methods) ==============================
@@ -457,8 +492,15 @@ class SearchConfig(Configurable):
     )
 
     MAX_CONSTANT_RESOLUTION: int = field(
-        default=100_000,
-        metadata={"description": "Maximum number of digits to use for constant values in delta computation."},
+        default=1_000_000,
+        metadata={"description": (
+            "Maximum number of digits of the constant used in delta computation.  delta "
+            "raises the precision (doubling from CONSTANT_NO_DIGITS_HIGH_RES) until "
+            "|estimate - constant| is resolved beyond the constant's rounding; long "
+            "trajectories need ~2-3x10^5 digits.  Cheap with the arb evaluator (zeta(3) at "
+            "10^6 digits: ~0.4 s, ~20 MB); constants arb cannot evaluate fall back to "
+            "sympy evalf, which is far more expensive at this size."
+        )},
     )
 
 

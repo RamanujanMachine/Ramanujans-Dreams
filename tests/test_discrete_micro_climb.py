@@ -269,3 +269,62 @@ class TestDiscreteMicroClimb:
             max_norm=35.0, traj_norm="l2", improve_threshold=1e-9, visited=visited,
         )
         assert primitive_ray_key(start, geom) in visited
+
+
+# ---------------------------------------------------------------------------
+# parallel_micro_climb — must equal sequential discrete_micro_climb per anchor
+# ---------------------------------------------------------------------------
+
+class TestParallelMicroClimbEquivalence:
+    """The concurrent (batched-across-ties) climb is a pure scheduling change: for
+    every anchor it must return exactly what running :func:`discrete_micro_climb`
+    on that anchor alone (with its own fresh ``visited``) returns.  δ is a fixed
+    function of the direction here, so the only thing the restructure changes is
+    the order evaluations are dispatched — the refined result must be identical."""
+
+    def _fake_eval(self):
+        # A ridge in z[0] (peak at 7) with a gentle z[1] tilt (peak at 2): Phase A
+        # climbs, Phase B probes finer rays.  Pure function of z ⇒ cache-independent.
+        def fake_eval(z, **kw):
+            z = np.asarray(z, dtype=float)
+            return -abs(z[0] - 7.0) - 0.1 * abs(z[1] - 2.0), True
+        return fake_eval
+
+    def test_matches_sequential_per_anchor(self, whole_space_shard, monkeypatch):
+        geom = FlatlandGeometry(whole_space_shard)
+        fake_eval = self._fake_eval()
+        monkeypatch.setattr(dlm, "evaluate_in_flatland", fake_eval)
+        ctx = _ctx(whole_space_shard, geom)
+        kw = dict(geom=geom, eval_ctx=ctx, max_norm=35.0, traj_norm="l2",
+                  improve_threshold=1e-9)
+
+        starts = [np.array([1, 1]), np.array([3, 5]), np.array([9, 1]),
+                  np.array([4, 8])]
+        starts = [np.asarray(z, dtype=np.int64) for z in starts]
+
+        # Sequential: each anchor climbed independently (fresh visited each).
+        sequential = [
+            dlm.discrete_micro_climb(z.copy(), fake_eval(z)[0], **kw) for z in starts
+        ]
+
+        # Concurrent: all anchors climbed in lockstep, one batch per round.
+        anchors = [(z.copy(), fake_eval(z)[0]) for z in starts]
+        concurrent = dlm.parallel_micro_climb(anchors, pool=None, **kw)
+
+        assert len(concurrent) == len(sequential)
+        for (pz, pd), (sz, sd) in zip(concurrent, sequential):
+            assert tuple(int(v) for v in pz) == tuple(int(v) for v in sz)
+            assert pd == pytest.approx(sd)
+
+    def test_single_anchor_matches_micro_climb(self, whole_space_shard, monkeypatch):
+        geom = FlatlandGeometry(whole_space_shard)
+        fake_eval = self._fake_eval()
+        monkeypatch.setattr(dlm, "evaluate_in_flatland", fake_eval)
+        ctx = _ctx(whole_space_shard, geom)
+        kw = dict(geom=geom, eval_ctx=ctx, max_norm=35.0, traj_norm="l2",
+                  improve_threshold=1e-9)
+        z = np.array([1, 1], dtype=np.int64)
+        seq_z, seq_d = dlm.discrete_micro_climb(z.copy(), fake_eval(z)[0], **kw)
+        (par_z, par_d), = dlm.parallel_micro_climb([(z.copy(), fake_eval(z)[0])], pool=None, **kw)
+        assert tuple(int(v) for v in par_z) == tuple(int(v) for v in seq_z)
+        assert par_d == pytest.approx(seq_d)
