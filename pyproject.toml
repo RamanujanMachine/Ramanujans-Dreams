@@ -35,6 +35,9 @@ dependencies = [
     "pulp",
     "mip",
     "LIReC @ git+https://github.com/RamanujanMachine/LIReC.git@main",
+    # LIReC builds a SQLAlchemy PostgreSQL engine at import time; SQLAlchemy 2.1's
+    # default PostgreSQL driver is psycopg (v3), which LIReC does not declare.
+    "psycopg[binary]",
     "cysignals",
     "fpylll"
 ]
