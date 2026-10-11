@@ -1,5 +1,5 @@
 import sympy as sp
-from .constant import Constant
+from .constant import Constant, JointConstant
 from sympy.functions.special.hyper import hyper
 
 
@@ -41,3 +41,16 @@ def log(n: int):
     if f'log-{n}' not in Constant.registry:
         return Constant(f'log-{n}', sp.log(n))
     return Constant.registry[f'log-{n}']
+
+
+def joint(*members: Constant) -> JointConstant:
+    """Joint (common-denominator) target, e.g. ``joint(zeta(3), zeta(4))``.
+
+    Returns the registered instance when the same member list was built before.
+    """
+    from .constant import joint_name
+    name = joint_name([m.name for m in members])
+    existing = Constant.registry.get(name)
+    if isinstance(existing, JointConstant):
+        return existing
+    return JointConstant(members)

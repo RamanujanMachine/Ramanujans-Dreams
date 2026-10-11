@@ -127,6 +127,11 @@ def _serialize_delta_prediction(pred) -> Optional[dict]:
     }
 
 
+def _serialize_joint_forms(forms) -> Optional[dict]:
+    """JSON-safe :class:`~dreamer.utils.joint.recognition.JointForms` (or ``None``)."""
+    return None if forms is None else forms.as_dict()
+
+
 def _pq_jsonsafe_list(pq) -> list | None:
     """Convert a p/q coefficient list to JSON-safe form, or ``None`` when missing.
 
@@ -205,6 +210,12 @@ ATTRIBUTE_REGISTRY: Dict[str, AttributeComputer] = {
         h.delta_sequence(min(h._depth, 100))
     ),
     "digits_per_step":             lambda h: [[int(k), int(d)] for k, d in h.digits_per_step()],
+    # ----- joint (common-denominator) δ — JointConstant targets only -----
+    # Numerical evidence, not proof.  ``None`` / ``-inf`` for scalar targets.
+    "joint_forms":                 lambda h: _serialize_joint_forms(h.joint_forms()),
+    "joint_delta":                 lambda h: float(h.joint_delta()),
+    "joint_series":                lambda h: h.joint_series(),
+    "joint_casoratian":            lambda h: h.joint_casoratian(),
 }
 
 

@@ -503,5 +503,45 @@ class SearchConfig(Configurable):
         )},
     )
 
+    # ----- joint (common-denominator) δ for JointConstant targets -----
+    JOINT_RECOGNITION_DEPTH: int = field(
+        default=150,
+        metadata={"description": (
+            "Walk depth whose column is used to recognise the joint forms (homogeneous "
+            "PSLQ). The column must be accurate to JOINT_RECOGNITION_DPS digits there."
+        )},
+    )
+    JOINT_RECOGNITION_DPS: int = field(
+        default=1500,
+        metadata={"description": "Working digits of the joint-forms PSLQ (verification runs at twice this)."},
+    )
+    JOINT_VERIFY_DEPTH: int = field(
+        default=300,
+        metadata={"description": (
+            "Deeper, independent walk depth on which every recognised joint relation is "
+            "re-verified at 2*JOINT_RECOGNITION_DPS digits before it is accepted."
+        )},
+    )
+    JOINT_PSLQ_MAX_COEFF: int = field(
+        default=10 ** 6,
+        metadata={"description": "PSLQ coefficient bound for joint-form recognition."},
+    )
+    JOINT_SERIES_FRACTIONS: Tuple[float, ...] = field(
+        default=(0.125, 0.25, 0.5, 1.0),
+        metadata={"description": (
+            "Checkpoints (fractions of the walk depth) at which joint_series stores the "
+            "finite joint delta, interval scores and the least-squares slope."
+        )},
+    )
+    JOINT_REUSE_SHARD_FORMS: bool = field(
+        default=True,
+        metadata={"description": (
+            "Reuse joint forms recognised on another trajectory of the same shard after a "
+            "cheap per-trajectory check that they still hold; re-recognise only if the check "
+            "fails. ASSUMPTION to verify with a mathematician: forms were identical across "
+            "many directions from one start in the proof of concept. False = recognise per trajectory."
+        )},
+    )
+
 
 search_config: SearchConfig = SearchConfig()

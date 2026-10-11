@@ -63,6 +63,8 @@ _CORE_FIELD_OBJECTIVES = frozenset({"delta"})
 OBJECTIVES: Dict[str, Objective] = {
     "delta": Objective("delta", "max"),
     "convergence_rate": Objective("convergence_rate", "max"),
+    # Joint (common-denominator) δ of a JointConstant target's members.
+    "joint_delta": Objective("joint_delta", "max"),
 }
 
 

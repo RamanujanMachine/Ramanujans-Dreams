@@ -59,6 +59,8 @@ TIER1 = "tier1"
 #: Attributes computed together as the Tier-1 core (one shared fingerprint).
 TIER1_ATTRIBUTES: Tuple[str, ...] = (
     "delta", "identified", "p_vector", "q_vector", "projection_column",
+    # Joint targets: recognition of the frozen joint forms *is* identification.
+    "joint_forms",
 )
 
 #: Knobs the code reads but which provably do not change any stored value.
@@ -101,6 +103,13 @@ ATTRIBUTE_META: Dict[str, AttributeMeta] = {
             "search.CONSTANT_NO_DIGITS_HIGH_RES",
             "search.CONSTANT_NO_DIGITS_LOW_RES",
             "search.MAX_CONSTANT_RESOLUTION",
+            # Joint targets: ``identified`` of a joint row is joint-form
+            # recognition, a Tier-1 value (added 2026-10-11).
+            "search.JOINT_RECOGNITION_DEPTH",
+            "search.JOINT_RECOGNITION_DPS",
+            "search.JOINT_VERIFY_DEPTH",
+            "search.JOINT_PSLQ_MAX_COEFF",
+            "search.JOINT_REUSE_SHARD_FORMS",
         ),
         deps=("traj_size",),
         uses_depth=True,
@@ -134,6 +143,11 @@ ATTRIBUTE_META: Dict[str, AttributeMeta] = {
     "avg_computed_digits_per_step": AttributeMeta(deps=("digits_computed",), uses_depth=True),
     "delta_sequence": AttributeMeta(deps=(TIER1,), uses_depth=True),
     "digits_per_step": AttributeMeta(deps=(TIER1,), uses_depth=True),
+    # ----- joint (common-denominator) δ -----
+    "joint_delta": AttributeMeta(deps=("joint_forms",), uses_depth=True),
+    "joint_series": AttributeMeta(config=("search.JOINT_SERIES_FRACTIONS",), deps=("joint_forms",),
+                                  uses_depth=True),
+    "joint_casoratian": AttributeMeta(deps=("joint_forms",)),
 }
 
 

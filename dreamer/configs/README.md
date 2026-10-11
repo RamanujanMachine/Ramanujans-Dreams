@@ -88,7 +88,11 @@ Mostly **where things go** and **how many cores to use**.
 gates which attributes are optimisable (numeric, with a known optimal direction)
 and stores that direction. Shipped objectives: `delta` (max) and
 `convergence_rate` (max, the length-normalised spectral rate
-`approximated_digits_per_step / ‖direction‖₂`). Since a stored result is one flat
+`approximated_digits_per_step / ‖direction‖₂`) and `joint_delta` (max, the
+common-denominator δ of a joint target such as `joint(zeta(3), zeta(4))` from
+`dreamer.utils.constants.ready_made_consts`; numerical evidence of Q-linear
+independence, not proof — for joint targets "identified" means the joint forms
+were recognised, LIReC is not used). Since a stored result is one flat
 row per `(trajectory, constant)`, the objective is simply a **column** on that row
 (`delta` is the core field; `convergence_rate` etc. are their own key). Ranking
 reads it via `optimization_objectives.score_record`; the objective is **not** part
@@ -136,6 +140,9 @@ The largest category. Shared knobs plus one block per optimiser
 | `NUM_TRAJECTORIES_FROM_DIM` | Trajectory count per shard during search. |
 | `DEPTH_FROM_TRAJECTORY_LEN` | Walk depth as a function of trajectory length + dimension (default: between 1000 and 1500; shorter trajectories walk deeper). |
 | `CONSTANT_NO_DIGITS_HIGH_RES` / `MAX_CONSTANT_RESOLUTION` | Precision of the constant for δ: starts at `HIGH_RES` digits (10 000) and doubles until the estimate's error is clearly larger than the constant's rounding, up to `MAX_CONSTANT_RESOLUTION` (1 000 000). Long trajectories need ~10⁵ digits; constants are evaluated with FLINT's arb, so this is cheap (ζ(3) at 10⁶ digits ≈ 0.4 s, 20 MB). |
+| `JOINT_RECOGNITION_DEPTH` / `JOINT_RECOGNITION_DPS` / `JOINT_VERIFY_DEPTH` / `JOINT_PSLQ_MAX_COEFF` | Joint targets (`joint(zeta(3), zeta(4))`): depth and precision of the homogeneous-PSLQ recognition of the common-denominator forms, the deeper walk every relation is re-verified on (at twice the precision), and the PSLQ coefficient bound. Part of the Tier-1 fingerprint. |
+| `JOINT_SERIES_FRACTIONS` | Fractions of the walk depth at which `joint_series` stores the joint δ, interval scores and LS slope. |
+| `JOINT_REUSE_SHARD_FORMS` | Reuse joint forms found on another trajectory of the same shard after a per-trajectory check (default `True`). |
 | `SEARCH_MAX_TRAJ_LEN` / `SEARCH_TRAJ_NORM` | Cap on trajectory length (bounds symbolic cost) and the norm it's measured in. |
 | `SAMPLING_METHOD` | Sampler for the default hedgehog searcher. |
 | `TIER2_ATTRIBUTES` | Background-worker attributes computed during search (empty ⇒ no subprocesses). |

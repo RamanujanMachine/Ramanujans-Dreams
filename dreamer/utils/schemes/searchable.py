@@ -35,6 +35,10 @@ class Searchable(ABC):
         :param cmf_name: The name of the CMF.
         """
         self.cache = FrequencyList(max_size=100)
+        # Joint forms recognised on this searchable's trajectories, keyed by the
+        # tuple of member labels (reused after a per-trajectory check; see
+        # ``TrajectoryAttributesHandler.joint_forms``).  Process-local.
+        self.joint_forms_cache: dict = {}
         self.cmf = cmf
         self.consts: List[Constant] = constants if isinstance(constants, list) else [constants]
         self.shift = shift
