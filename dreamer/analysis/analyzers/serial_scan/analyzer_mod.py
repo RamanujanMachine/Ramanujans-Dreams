@@ -174,7 +174,7 @@ class AnalyzerModV1(AnalyzerModScheme):
             workers = min(total_core_budget(), len(tasks))
             with StagePool([r.shard for r in runs], workers=workers) as pool, \
                     BufferedJsonlWriter() as writer:
-                results = pool.imap(_analysis_walk_task, tasks)
+                results = pool.imap(_analysis_walk_task(), tasks)
                 for task, res in zip(
                     tasks,
                     SmartTQDM(results, total=len(tasks), desc='Analyzing trajectories',
@@ -459,14 +459,18 @@ class _ShardRun:
                 self.best_score[const_name] = sc
 
 
-def _analysis_walk_task(task: Tier1Task):
-    """Stage-pool task: one trajectory walk → one Tier-1 row per shard constant.
+def _analysis_walk_task():
+    """Stage-pool task callable: one trajectory walk → one Tier-1 row per constant.
 
-    Module-level (picklable).  Uses this module's ``TrajectoryAttributesHandler``
-    and ``build_trajectory_dtos`` names, resolved at call time.
+    A ``functools.partial`` of :func:`run_tier1_task` bound to this module's
+    ``TrajectoryAttributesHandler`` / ``build_trajectory_dtos`` (resolved now, so
+    test monkeypatches apply).  It pickles as references into the light
+    ``stage_pool`` / ``trajectory_attributes`` modules, so a worker unpickling it
+    does **not** import this module (and the samplers / numba behind it).
     """
-    return run_tier1_task(
-        task,
+    import functools
+    return functools.partial(
+        run_tier1_task,
         handler_cls=TrajectoryAttributesHandler,
         build_dtos=build_trajectory_dtos,
     )

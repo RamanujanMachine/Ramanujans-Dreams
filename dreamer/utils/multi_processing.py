@@ -75,17 +75,25 @@ def create_process_pool_executor() -> ProcessPoolExecutor:
     )
 
 
-def create_pool() -> Pool:
-    """Return a ``multiprocessing.Pool`` whose workers inherit the current config.
+def create_pool(name: str = "pool"):
+    """Return a process pool whose workers inherit the current config.
 
-    Sized by :func:`search_worker_budget` so it never oversubscribes the cores
-    reserved for the Tier-2 queue + sink (and uses the whole machine when Tier-2
-    is inactive).
+    A :class:`~dreamer.utils.resilient_pool.ResilientPool` (survives dead
+    workers instead of hanging), sized by :func:`search_worker_budget`.  Used by
+    the legacy (V1) searchers and shard encoding; the pipeline stages use a
+    stage pool (:class:`~dreamer.utils.stage_pool.StagePool`) and the optimisers
+    an eval pool (:func:`~dreamer.search.methods.flatland.parallel_eval.make_eval_pool`).
+
+    :param name: Label shown in the pool's recovery warnings.
+    :return: The pool (use as a context manager).
     """
-    return Pool(
-        processes=search_worker_budget(),
+    from dreamer.utils.resilient_pool import ResilientPool
+    return ResilientPool(
+        search_worker_budget(),
         initializer=_init_worker,
         initargs=(config.export_configurations(),),
+        max_tasks_per_child=getattr(sys_config, "POOL_MAX_TASKS_PER_CHILD", None),
+        name=name,
     )
 
 

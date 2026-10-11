@@ -52,6 +52,10 @@ tests      --> System tests
 
 #### Where to read more
 
+For the big picture — stages, processes and pools, one trajectory's
+computation, reuse of stored work, and failure handling — start with the
+diagrams in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 Each pipeline stage has its own README explaining what it does and what its
 directory contains. Start with the one matching what you're working on:
 

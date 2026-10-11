@@ -285,7 +285,7 @@ class SearcherModV1(SearcherModScheme):
             own_pool = StagePool([shard], workers=1)
             pool = own_pool.__enter__()
         try:
-            results = pool.imap(_search_walk_task, tasks)
+            results = pool.imap(_search_walk_task(), tasks)
             for (trajectory_id, new_consts, seeded), task, res in zip(
                 planned,
                 tasks,
@@ -318,15 +318,17 @@ class SearcherModV1(SearcherModScheme):
             if own_pool is not None:
                 own_pool.__exit__(None, None, None)
 
-def _search_walk_task(task: Tier1Task):
-    """Stage-pool task: handler + new-constant Tier-1 DTOs for one trajectory.
+def _search_walk_task():
+    """Stage-pool task callable: rows (Tier-1 + Tier-2) and seeded patches.
 
-    Module-level (picklable); uses this module's ``TrajectoryAttributesHandler``
-    and ``build_trajectory_dtos`` names, resolved at call time.
+    A ``functools.partial`` of :func:`run_tier1_task` bound to this module's
+    handler / DTO-builder names (resolved now, so test monkeypatches apply); it
+    pickles into the light ``stage_pool`` / ``trajectory_attributes`` modules, so
+    workers do not import the search package.
     """
-    return run_tier1_task(
-        task,
+    import functools
+    return functools.partial(
+        run_tier1_task,
         handler_cls=TrajectoryAttributesHandler,
         build_dtos=build_trajectory_dtos,
     )
-

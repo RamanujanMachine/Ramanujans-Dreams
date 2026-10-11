@@ -44,7 +44,7 @@ class _DummyPool:
 class TestShardMaps:
     def test_compute_mapping(self, monkeypatch):
         """Assumption: mapping cardinality is stable; failure mode: pool API migration breaks shard aggregation."""
-        monkeypatch.setattr(initial_points, "create_pool", lambda: _DummyPool())
+        monkeypatch.setattr(initial_points, "create_pool", lambda *a, **k: _DummyPool())
 
         D = 3
         S = 8

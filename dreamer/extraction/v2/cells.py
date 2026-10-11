@@ -56,7 +56,6 @@ from __future__ import annotations
 import os
 import time
 from collections import deque
-from multiprocessing import get_context
 from typing import Callable, List, Optional, Tuple
 
 import numpy as np
@@ -776,9 +775,9 @@ def _enumerate_parallel(
     ]
     # 'spawn' would re-import; 'fork' (default on Linux/WSL) is cheap and
     # lets workers inherit the imported modules.
-    ctx = get_context()
+    from dreamer.utils.resilient_pool import ResilientPool
     collected = {tuple(base.tolist())}
-    with ctx.Pool(processes=min(num_workers, len(tasks))) as pool:
+    with ResilientPool(min(num_workers, len(tasks)), name="cell enumeration") as pool:
         try:
             for subtree in pool.imap_unordered(_subtree_worker, tasks):
                 collected.update(subtree)

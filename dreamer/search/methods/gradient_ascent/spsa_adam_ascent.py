@@ -66,6 +66,7 @@ import numpy as np
 from ramanujantools import Position
 
 from dreamer.configs import config
+from dreamer.utils.lru import make_handler_cache
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.discrete_local_max import discrete_hill_climb
@@ -159,6 +160,7 @@ class HybridSPSASearch(SearchMethod):
         start=None,
         pool=None,
         initial_trajectory: Optional[Position] = None,
+        stats=None,
     ) -> None:
         """Run the hybrid SPSA + Adam ascent for a single constant.
 
@@ -182,9 +184,12 @@ class HybridSPSASearch(SearchMethod):
             direction) it seeds the optimiser instead of the reservoir; an invalid
             one falls back to reservoir seeding (see :func:`resolve_injected_seed`).
         :raises NoInitialIdentification: If no reservoir seed identifies *constant*.
+        :param stats: Optional :class:`~dreamer.search.methods.flatland.evaluator.EvalStats`
+            counting how evaluations were served (reused / revisited / new …);
+            the calling module logs its summary.
         """
         if handler_cache is None:
-            handler_cache = {}
+            handler_cache = make_handler_cache()
 
         # Per-(shard, method, constant) reproducible RNG for the Rademacher draws.
         # Same GLOBAL_SEED + shard + constant => identical run; distinct shards/
@@ -209,6 +214,7 @@ class HybridSPSASearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
+            stats=stats,
         )
 
         cfg = search_config

@@ -11,6 +11,7 @@ from sympy.abc import n
 
 from LIReC.db.access import db
 from ramanujantools import LinearRecurrence, Matrix, Limit, linear_recurrence
+from dreamer.utils.constants.high_precision import high_precision, resolved_error
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.configs import config
@@ -284,9 +285,8 @@ def build_trajectory_dtos(
     Tier-1 scalars for that constant.  The **active optimisation objective**
     (``system.OPTIMIZATION_OBJECTIVE``), when it is not a Tier-1 field like δ, is
     computed synchronously for that constant and stored under its own name in the
-    flat ``extra`` (so analysis ranking and the search optimisers have it without
-    waiting for the async Tier-2 workers, and it lands under the same key Tier-2
-    would use).
+    flat ``extra`` (so analysis ranking — which computes no Tier-2 — has it too,
+    under the same key Tier-2 would use).
 
     :param constants: Iterable of :class:`Constant` objects (preferred) or sympy
         expressions.  ``None`` falls back to ``handler.constant()``.
@@ -457,6 +457,11 @@ class TrajectoryAttributesHandler:
         # ``None`` until a column has been selected; geometry-only, so it persists
         # across constants (``compute_for_constant`` does not reset it).
         self._projection_column: Optional[int] = None
+        # Raw walk products W(d) = M(0)·M(1)···M(d-1) by depth d (exact FLINT
+        # matrices; see "Walk checkpoints").  ``_rt_checkpoints`` holds the
+        # sympy conversions actually requested.
+        self._checkpoints: dict = {}
+        self._rt_checkpoints: dict = {}
 
     @classmethod
     def from_cmf(
@@ -510,6 +515,99 @@ class TrajectoryAttributesHandler:
     def clear_utility_cache(self):
         """Drop all cached utility results (walks, p/q vectors)."""
         self._utility_cache.clear()
+        self.release_walks()
+
+    # ------------------------------------------------------------------
+    #  Walk checkpoints
+    # ------------------------------------------------------------------
+    #
+    # Every walk-based value reads raw products W(d) = M(0)···M(d-1) at a few
+    # depths: identification at min(IDENTIFY_DEPTH, D); the convergence check
+    # at round(c·D) and round(c·D) - 1 for c in DEPTH_CONVERGENCE_THRESHOLD; δ
+    # at D.  Instead of one independent walk per request (2-3 full walks per
+    # trajectory before), W(d) is stored per depth and a later depth continues
+    # from the deepest stored one: W(d) = W(c) · M(c)···M(d-1) — exact rational
+    # arithmetic, so the result equals a walk from 0.
+    #
+    # A walk also records, for free, every Tier-1 depth that lies on its way
+    # (no extra steps, only a matrix copy each), so the convergence check after
+    # a depth-D identification needs no walk at all.  An unidentified
+    # trajectory walks exactly the identification depth, as before.
+
+    def _tier1_walk_depths(self) -> set:
+        """Depths the Tier-1 computation reads W at (see section comment)."""
+        depth = int(self._depth)
+        depths = {depth, min(int(search_config.IDENTIFY_DEPTH), depth)}
+        for coef in search_config.DEPTH_CONVERGENCE_THRESHOLD:
+            d = round(coef * depth)
+            depths.update((d, max(d - 1, 0)))
+        return depths
+
+    def _numeric_walk_possible(self) -> bool:
+        return self._traj._is_numeric_walk({n: 1}, {n: 0})
+
+    def _extend_checkpoints(self, targets: list) -> None:
+        """Make W(d) available for every depth in *targets* (sorted, >= 0)."""
+        from ramanujantools import Position
+        from ramanujantools.flint_core import NumericMatrix
+
+        if not self._numeric_walk_possible():
+            # Symbolic leftovers (not expected for CMF trajectories): one plain
+            # walk from 0, no continuation.
+            missing = [d for d in targets if d not in self._rt_checkpoints]
+            if missing:
+                for d, w in zip(missing, self._traj.walk({n: 1}, missing, {n: 0})):
+                    self._rt_checkpoints[d] = w
+            return
+        missing = [d for d in targets if d not in self._checkpoints]
+        if not missing:
+            return
+        if 0 in missing:
+            self._checkpoints[0] = NumericMatrix.eye(self._traj.rows)
+            missing.remove(0)
+            if not missing:
+                return
+        lo, hi = missing[0], missing[-1]
+        base = max((c for c in self._checkpoints if c <= lo), default=0)
+        free = {d for d in self._tier1_walk_depths() if base < d <= hi}
+        depths = sorted((set(missing) | free) - set(self._checkpoints))
+        segment = NumericMatrix.walk(
+            self._traj, Position({n: 1}), [d - base for d in depths], Position({n: base}),
+        )
+        prefix = self._checkpoints.get(base)
+        for d, w in zip(depths, segment):
+            self._checkpoints[d] = w if prefix is None else prefix * w
+
+    def _raw_walks(self, depths) -> dict:
+        """``{d: W(d)}`` (sympy ``Matrix``, before any ``inv().T``) for *depths*.
+
+        Raises whatever the walk raises (e.g. ``ZeroDivisionError`` at a
+        singular step); callers handle it as before.
+        """
+        wanted = sorted({int(d) for d in depths})
+        self._extend_checkpoints(wanted)
+        out = {}
+        for d in wanted:
+            if d not in self._rt_checkpoints:
+                self._rt_checkpoints[d] = self._checkpoints[d].to_rt()
+            out[d] = self._rt_checkpoints[d]
+        return out
+
+    def release_walks(self) -> None:
+        """Drop every stored walk product and walk-derived cache entry.
+
+        Computed attribute values (δ, p/q, eigenvalues, …) are kept; anything
+        that needs a walk again recomputes it.  Call when the handler outlives
+        the computation (e.g. kept in an LRU) — walk products of long
+        trajectories are megabytes each.
+        """
+        self._checkpoints.clear()
+        self._rt_checkpoints.clear()
+        for key in [k for k in self._utility_cache if k.startswith(("walked_", "effective_walk_"))]:
+            del self._utility_cache[key]
+        pq = self._utility_cache.get("pq_vector")
+        if pq is not None and pq[1] is not None:
+            self._utility_cache["pq_vector"] = (pq[0], None)   # drop the walk column
 
     def _trajectory_repr(self) -> str:
         """Human-readable ``start`` / ``direction`` for diagnostic logs.
@@ -571,7 +669,7 @@ class TrajectoryAttributesHandler:
         """
         def compute():
             try:
-                walked = self.trajectory_matrix.walk({n: 1}, depth, {n: 0})
+                walked = self._raw_walks([depth])[depth]
                 return walked if self.walk_type() == 2 else walked.inv().T
             except Exception as e:
                 Logger(
@@ -1069,11 +1167,15 @@ class TrajectoryAttributesHandler:
             return []  # not identified — nothing to compute
         final_projection = self._final_projection()
         try:
-            limits = self.trajectory_matrix.limit(
-                {n: 1}, depths, {n: 0}, initial_values, final_projection,
-            )
-            if isinstance(limits, Limit):
-                limits = [limits]
+            if isinstance(depths, int):
+                depths = [depths]
+            # Same Limit objects as ``Matrix.limit`` (current = W(d),
+            # previous = W(d-1)), built from the walk checkpoints.
+            walks = self._raw_walks(list(depths) + [max(d - 1, 0) for d in depths])
+            limits = [
+                Limit(walks[d], walks[max(d - 1, 0)], initial_values, final_projection)
+                for d in depths
+            ]
 
             if self.walk_type() == 1:
                 for i, l in enumerate(limits):
@@ -1180,31 +1282,26 @@ class TrajectoryAttributesHandler:
                    Logger.Levels.debug).log()
             return False, float('-inf')
 
-        if self._high_res_constant is None:
-            self._high_res_constant = constant.evalf(self._constant_resolution)
-
-        while self._constant_resolution <= search_config.MAX_CONSTANT_RESOLUTION:
-            err = sp.Abs(estimated - self._high_res_constant)
-            # Match Searchable.calc_delta: use the integer denominator
-            # of the rational estimate for the delta formula, not the
-            # raw symbolic q·walk (which can be a fractional Rational).
-            delta = -1 - sp.log(err) / sp.log(denom_int)
-            if delta == sp.oo or delta == sp.zoo:
-                if self._constant_resolution == search_config.MAX_CONSTANT_RESOLUTION:
-                    Logger(
-                        f'Guardrail reached - could not approximate with constant at resolution: '
-                        f'{search_config.MAX_CONSTANT_RESOLUTION}'
-                        f'\nYou might want to rerun the search with a higher constant resolution to get a better approximation.',
-                        Logger.Levels.warning,
-                    ).log()
-                    break
-                self._constant_resolution = min(
-                    self._constant_resolution * 2, search_config.MAX_CONSTANT_RESOLUTION
-                )
-                self._high_res_constant = constant.evalf(self._constant_resolution)
-                continue
-            return True, delta
-        return False, float('-inf')
+        # Precision escalation: the error is trusted only once it clearly exceeds
+        # the constant's own rounding (see ``error_is_resolved``); until then the
+        # estimate agrees with the constant beyond the current resolution, so the
+        # resolution doubles.  (Escalating only on err == 0 accepted ±1-ulp
+        # rounding noise as the error and produced spurious δ values.)
+        err, self._constant_resolution, self._high_res_constant = resolved_error(
+            estimated, constant, self._constant_resolution, search_config.MAX_CONSTANT_RESOLUTION,
+        )
+        if err is None:
+            Logger(
+                f'Guardrail reached - the estimate agrees with the constant beyond '
+                f'MAX_CONSTANT_RESOLUTION={search_config.MAX_CONSTANT_RESOLUTION} digits; '
+                f'raise it to compute delta. {self._trajectory_repr()}',
+                Logger.Levels.warning,
+            ).log()
+            return False, float('-inf')
+        # Match Searchable.calc_delta: use the integer denominator of the
+        # rational estimate for the delta formula, not the raw symbolic q·walk
+        # (which can be a fractional Rational).
+        return True, -1 - sp.log(err) / sp.log(denom_int)
 
     def delta_sequence(self, depth: Optional[int | list] = None) -> list:
         """
@@ -1578,7 +1675,7 @@ class TrajectoryAttributesHandler:
             # delta() has populated _high_res_constant at the escalated precision.
             constant = self._high_res_constant
             if constant is None:
-                constant = self.constant().evalf(self._constant_resolution)
+                constant = high_precision(self.constant(), self._constant_resolution)
             err = sp.Abs(estimated - constant)
             if err == 0:
                 return None   # exact within available precision
@@ -1792,6 +1889,10 @@ class TrajectoryAttributesHandler:
         into the next.
         """
         self._utility_cache.pop("pq_vector", None)
+        # The high-precision value (and its escalated resolution) belongs to the
+        # previous constant — δ for the next one must not compare against it.
+        self._high_res_constant = None
+        self._constant_resolution = search_config.CONSTANT_NO_DIGITS_HIGH_RES
         for key in list(self._cache.keys()):
             if not key.startswith(_CONST_INDEPENDENT_CACHE_KEYS):
                 del self._cache[key]

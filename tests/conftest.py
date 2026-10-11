@@ -94,3 +94,16 @@ def serial_stage_pools():
     sys_config.STAGE_POOL_WORKERS = 1
     yield
     sys_config.STAGE_POOL_WORKERS = original
+
+
+@pytest.fixture(autouse=True)
+def memory_unaware_pools():
+    """Size pools by cores only in the unit tests, so results do not depend on how
+    much memory the test machine happens to have free.  The memory-aware
+    behaviour is tested explicitly in ``tests/test_memory_budget.py``."""
+    from dreamer.configs.system import sys_config
+
+    original = sys_config.MEMORY_AWARE_WORKERS
+    sys_config.MEMORY_AWARE_WORKERS = False
+    yield
+    sys_config.MEMORY_AWARE_WORKERS = original

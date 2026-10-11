@@ -141,6 +141,79 @@ class SystemConfig(Configurable):
             )
         },
     )
+    MEMORY_AWARE_WORKERS: bool = field(
+        default=True,
+        metadata={"description": (
+            "Cap every process pool by available memory, not only by cores: "
+            "workers = min(cores, (available - MEMORY_RESERVE_MB) / per-worker MB), and "
+            "shrink a running pool when available memory drops below the reserve (before "
+            "the OS kills workers). See dreamer.utils.memory_budget."
+        )},
+    )
+    MEMORY_LIMIT_MB: Optional[int] = field(
+        default=None,
+        metadata={"description": (
+            "Memory (MB) this run may use; None = detect (Linux MemAvailable + cgroup/SLURM "
+            "limit, macOS vm_stat). Set it on shared nodes."
+        )},
+    )
+    MEMORY_RESERVE_MB: int = field(
+        default=1024,
+        metadata={"description": "Memory (MB) kept free for the main process and the OS."},
+    )
+    WORKER_MEMORY_MB: Optional[int] = field(
+        default=None,
+        metadata={"description": (
+            "Memory budget per worker (MB). None = measured fresh-worker RSS (~130 MB) + "
+            "WORKER_TASK_HEADROOM_MB."
+        )},
+    )
+    WORKER_TASK_HEADROOM_MB: int = field(
+        default=512,
+        metadata={"description": (
+            "Per-worker allowance (MB) for a task's own data on top of the import baseline "
+            "(walked matrices, symbolic trajectory matrix, caches). Measured warm-up: "
+            "~50 MB (2F1) to ~350 MB (4F3); raise it for very large CMFs."
+        )},
+    )
+    POOL_START_METHOD: str = field(
+        default="auto",
+        metadata={"description": (
+            "Process start method for all pools: 'auto' = forkserver on Linux (no "
+            "fork-with-threads deadlocks, workers can be added at any time), spawn on "
+            "macOS; or 'spawn' / 'forkserver' / 'fork' explicitly."
+        )},
+    )
+    POOL_SLOW_START: int = field(
+        default=2,
+        metadata={"description": (
+            "Memory-aware pools that can grow start with at most this many workers, "
+            "measure the real per-task memory peak, then grow to every core that fits. "
+            "Avoids starting all workers on a task that needs gigabytes each (e.g. long "
+            "trajectories on a large CMF). 0 = start at the full memory cap."
+        )},
+    )
+    SYMPY_CACHE_CLEAR_AFTER_SECONDS: Optional[float] = field(
+        default=1.0,
+        metadata={"description": (
+            "After a trajectory task (worker or search evaluation) that took at least "
+            "this many seconds, clear sympy's global cache, which otherwise keeps the "
+            "huge rationals of long walks alive (~20 MB per long trajectory, up to GBs "
+            "per worker). Light tasks skip it (~5 ms re-warm cost). 0 = after every "
+            "task; None or negative = never."
+        )},
+    )
+    POOL_MAX_TASKS_PER_CHILD: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Recycle each pool worker after this many tasks (None = never). "
+                "Bounds slow memory growth of long-lived workers on large CMFs, at "
+                "the cost of re-spawning workers (each re-imports dreamer). Not "
+                "available with the 'fork' start method (ignored there)."
+            )
+        },
+    )
     STAGE_POOL_CHUNKSIZE: int = field(
         default=1,
         metadata={

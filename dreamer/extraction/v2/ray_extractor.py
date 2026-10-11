@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from multiprocessing import get_context
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -216,11 +215,12 @@ class _ShootRunner:
             and self.workers > 1
             and time.time() - self.t_start >= self.ex.parallel_after_seconds
         ):
-            ctx = get_context()
-            self.pool = ctx.Pool(
-                processes=self.workers,
+            from dreamer.utils.resilient_pool import ResilientPool
+            self.pool = ResilientPool(
+                self.workers,
                 initializer=_shoot_init,
                 initargs=(self.ex, self.A, self.c, self.base),
+                name="heuristic shooting",
             )
 
     def _local(self, phase: int, index: int):
@@ -626,8 +626,13 @@ class RayShootingExtractor(BaseExtractor):
         tasks = [(A, c, key) for key in keys]
         refine_workers = _resolve_workers(self.refine_workers)
         chunksize = max(1, len(tasks) // (refine_workers * 4))
-        ctx = get_context()
-        with ctx.Pool(processes=min(refine_workers, len(tasks))) as pool:
+        from dreamer.utils.resilient_pool import ResilientPool
+        # A refinement MILP whose worker dies keeps the ray witness (key, None).
+        with ResilientPool(
+            min(refine_workers, len(tasks)),
+            on_death=lambda fn, args: (args[0][2], None),
+            name="witness refinement",
+        ) as pool:
             for key, pt in pool.imap_unordered(
                 _refine_worker, tasks, chunksize=chunksize
             ):

@@ -75,6 +75,7 @@ from dreamer.utils.storage.trajectory_attributes import (
     derive_cmf_and_shard_ids,
 )
 from dreamer.utils.ui.tqdm_config import SmartTQDM
+from dreamer.utils.task_memory import releases_task_memory
 
 post_process_config = config.post_process
 
@@ -93,6 +94,7 @@ _SEED_FIELDS = (
 )
 
 
+@releases_task_memory
 def _tier3_task(task: "Tier3Task"):
     """Stage-pool task: compute the stale Tier-3 attributes of one stored row.
 

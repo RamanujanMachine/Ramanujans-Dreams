@@ -22,6 +22,7 @@ import numpy as np
 from ramanujantools import Position
 
 from dreamer.configs import config
+from dreamer.utils.lru import make_handler_cache
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
@@ -164,6 +165,7 @@ class GeneticSearch(SearchMethod):
         start=None,
         pool=None,
         initial_trajectory: Optional[Position] = None,
+        stats=None,
     ) -> None:
         """Run the GA for a single constant, emitting DTOs to *sink*.
 
@@ -187,9 +189,12 @@ class GeneticSearch(SearchMethod):
             direction) it is seeded into the initial population (the rest sampled as
             usual); an invalid one is ignored (see :func:`resolve_injected_seed`).
         :raises NoInitialPopulation: if no in-cone seed genome can be built.
+        :param stats: Optional :class:`~dreamer.search.methods.flatland.evaluator.EvalStats`
+            counting how evaluations were served (reused / revisited / new …);
+            the calling module logs its summary.
         """
         if handler_cache is None:
-            handler_cache = {}
+            handler_cache = make_handler_cache()
 
         # Per-(shard, method, constant) reproducible RNG for every GA operator
         # (selection / crossover / mutation / population top-up).  Same GLOBAL_SEED
@@ -214,6 +219,7 @@ class GeneticSearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
+            stats=stats,
         )
 
         # Resolve GA schedule (callable or int).

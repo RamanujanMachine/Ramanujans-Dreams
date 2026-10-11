@@ -41,6 +41,7 @@ from dreamer.search.methods.flatland.evaluator import (
     flatland_trajectory_key,
 )
 from dreamer.utils.logger import Logger
+from dreamer.utils.resilient_pool import ResilientPool
 from dreamer.utils.storage.attribute_fingerprints import tier1_record_fresh
 from dreamer.utils.multi_processing import search_worker_budget
 from dreamer.utils.storage.optimization_objectives import score_record
@@ -48,80 +49,16 @@ from dreamer.utils.storage.optimization_objectives import score_record
 search_config = config.search
 
 
-#: Returned by :func:`_pool_walk` when the walk raises, so a single bad
-#: trajectory degrades to δ = −∞ (matching the serial evaluator's try/except)
-#: instead of propagating through ``pool.map`` and aborting the whole batch.
-WalkError = namedtuple("WalkError", ["message"])
-
-
-# Per-worker context, populated once by the pool initializer.
-_POOL_STATE: dict = {}
-
-
-def _pool_init(config_overrides: dict, shard, start) -> None:
-    """Pool initializer: re-apply config and stash the per-shard walk context.
-
-    :param config_overrides: ``config.export_configurations()`` from the parent.
-    :param shard: The shard being searched (constant-independent).
-    :param start: Interior start :class:`Position` (constant-independent).
-    """
-    config.configure(**config_overrides)
-    # Rebind this worker's per-shard (p, q) cache onto the shared append-log (if
-    # one was attached by the deep-search module before the pool was built), so
-    # relations identified by any worker are reused by all of them instead of
-    # each worker re-deriving them via LIReC.  ``shared_pq_log`` is a Manager
-    # list proxy that survives pickling into the worker and reconnects to the
-    # parent's manager process; absent it, the cache stays process-local.
-    from dreamer.utils.storage.frequency_list import FrequencyList
-    shard.cache = FrequencyList(
-        shard.cache.max_size,
-        shared_log=getattr(shard, "shared_pq_log", None),
-    )
-    _POOL_STATE["shard"] = shard
-    _POOL_STATE["start"] = start
-
-
-def _pool_walk(args):
-    """Worker task: perform one Case-C walk and return the sink tuple.
-
-    :param args: ``(idx, direction, constant, cmf_id, shard_id, shard_encoding_str)``
-        where ``idx`` is the caller's group index (echoed back so the parent can
-        reassemble results dispatched out of order under ``imap_unordered``).
-    :return: ``(idx, (trajectory_matrix, value_sympy, dto))`` on success — the inner
-        tuple is identical to what the serial Case-C path passes to the sink — or
-        ``(idx, WalkError)`` if the walk raised (so the main process can map it to
-        δ = −∞ without the exception aborting the whole batch).
-    """
-    from dreamer.utils.storage.trajectory_attributes import (
-        TrajectoryAttributesHandler,
-        build_trajectory_dtos,
-    )
-
-    idx, direction, constant, cmf_id, shard_id, shard_encoding_str = args
-    shard = _POOL_STATE["shard"]
-    start = _POOL_STATE["start"]
-    try:
-        handler = TrajectoryAttributesHandler.from_cmf(
-            shard.cmf, direction, start, constant=None, searchable=shard
-        )
-        dtos = build_trajectory_dtos(
-            handler,
-            cmf_id=cmf_id,
-            shard_id=shard_id,
-            cmf_name=shard.cmf_name,
-            shard_encoding_str=shard_encoding_str,
-            start=start,
-            direction=direction,
-            constants=[constant],
-            # Tier-2 in the same scope as the walk (no second walk / LIReC); the
-            # symbolic matrix is no longer shipped back (nothing consumes it).
-            extra_metrics=tuple(config.search.TIER2_ATTRIBUTES),
-        )
-        if not dtos:
-            return idx, WalkError("no DTO produced")
-        return idx, (None, constant.value_sympy, dtos[0])
-    except Exception as exc:  # noqa: BLE001 — mirror serial evaluator resilience
-        return idx, WalkError(str(exc))
+# Worker-side entry points live in the light ``parallel_eval_worker`` module so a
+# spawned eval worker does not import the flatland geometry / samplers (numba,
+# scipy.optimize) just to walk trajectories.  Re-exported here for callers/tests.
+from dreamer.search.methods.flatland.parallel_eval_worker import (  # noqa: E402
+    _POOL_STATE,
+    WalkError,
+    _pool_init,
+    _pool_walk,
+    _walk_death_result,
+)
 
 
 def resolve_eval_workers(cap: Optional[int]) -> int:
@@ -132,7 +69,7 @@ def resolve_eval_workers(cap: Optional[int]) -> int:
     (:func:`dreamer.utils.multi_processing.search_worker_budget`), while a
     positive value caps the worker count at ``min(cap, budget)``.  This is what
     lets the eval pools scale to a large machine without per-method tuning while
-    still honouring the cores reserved for the Tier-2 queue + sink.
+    still letting a method cap its own pool.
 
     :param cap: The configured per-method worker cap (knob value).
     :return: Effective worker count (>= 1).
@@ -144,7 +81,7 @@ def resolve_eval_workers(cap: Optional[int]) -> int:
 
 
 def make_eval_pool(shard, start, workers: int) -> Optional[Pool]:
-    """Create a persistent per-shard evaluation pool, or ``None`` if disabled.
+    """Create a shard's **eval pool**, or ``None`` if disabled.
 
     :param shard: The shard being searched (handed to workers once).
     :param start: Interior start :class:`Position`.
@@ -156,10 +93,13 @@ def make_eval_pool(shard, start, workers: int) -> Optional[Pool]:
     effective = resolve_eval_workers(workers)
     if effective <= 1:
         return None
-    return Pool(
-        processes=effective,
+    return ResilientPool(
+        effective,
         initializer=_pool_init,
         initargs=(config.export_configurations(), shard, start),
+        on_death=_walk_death_result,
+        max_tasks_per_child=getattr(config.system, "POOL_MAX_TASKS_PER_CHILD", None),
+        name="eval pool",
     )
 
 
@@ -353,6 +293,8 @@ def evaluate_batch(
         for z in z_list:
             if valid_fn is not None and not valid_fn(z):
                 out.append((float("-inf"), False))
+                if eval_ctx.get("stats") is not None:
+                    eval_ctx["stats"].add("outside")
             else:
                 out.append(evaluate_in_flatland(z, **eval_ctx))
         return out
@@ -368,6 +310,7 @@ def evaluate_batch(
     cmf_id: str = eval_ctx["cmf_id"]
     shard_id: str = eval_ctx["shard_id"]
     shard_encoding_str: str = eval_ctx["shard_encoding_str"]
+    stats = eval_ctx.get("stats")
     objective_name = active_objective()
 
     results: List[Optional[Tuple[float, bool]]] = [None] * n
@@ -377,6 +320,8 @@ def evaluate_batch(
     for i, z in enumerate(z_list):
         if valid_fn is not None and not valid_fn(z):
             results[i] = (float("-inf"), False)
+            if stats is not None:
+                stats.add("outside")
             continue
         direction, tid, fp = flatland_trajectory_key(
             z, geom=geom, shard=shard, start=start,
@@ -387,6 +332,8 @@ def evaluate_batch(
             cached = score_record(rec, objective_name)
             if cached is not None:  # already scored for this constant
                 results[i] = cached
+                if stats is not None:
+                    stats.scored(tid)
                 continue
         if tid in handler_cache:  # walk cached — cheap recompute, no new walk
             results[i] = evaluate_in_flatland(z, **eval_ctx)
@@ -437,8 +384,13 @@ def evaluate_batch(
                 ).log()
                 for i in idxs:
                     results[i] = (float("-inf"), False)
+                if stats is not None:
+                    stats.add("failed", len(idxs))
                 continue
             matrix, vsym, dto = res
+            if stats is not None:
+                stats.walked(tid, cached_walk=False, ok=True)
+                stats.add("revisited", len(idxs) - 1)   # same ray in this batch
             sink((matrix, vsym, dto))
             record = json.loads(dto.to_json_line())
             seen.setdefault(tid, {})[constant.name] = record

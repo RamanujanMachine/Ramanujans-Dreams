@@ -104,6 +104,10 @@ ATTRIBUTE_META: Dict[str, AttributeMeta] = {
         ),
         deps=("traj_size",),
         uses_depth=True,
+        # v2 (2026-10-11): δ trusts |estimate − constant| only beyond the
+        # constant's rounding (was: any nonzero error) — spurious δ on long
+        # trajectories before.
+        version=2,
     ),
     **{name: AttributeMeta(deps=(TIER1,)) for name in TIER1_ATTRIBUTES},
     "traj_size": AttributeMeta(),

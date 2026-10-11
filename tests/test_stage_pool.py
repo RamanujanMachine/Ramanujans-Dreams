@@ -52,9 +52,33 @@ from dreamer.utils.storage.trajectory_attributes import (
 # Module-level task functions (must be picklable for the spawned workers)
 # ---------------------------------------------------------------------------
 
-def _echo_task(x):
-    """Return the task with the stage context it was executed under."""
-    return x, stage_shard(0), stage_extra("tag"), os.getpid()
+class _FakeShard:
+    """Minimal shard stand-in (picklable): a CMF reference, a cache and a label."""
+
+    def __init__(self, label, cmf):
+        from dreamer.utils.storage.frequency_list import FrequencyList
+        self.label = label
+        self.cmf = cmf
+        self.cache = FrequencyList(10)
+
+
+from collections import namedtuple  # noqa: E402
+
+_T = namedtuple("_T", ["shard_idx", "x"])
+
+
+def _echo_task(t):
+    """Return the task value with the stage context it was executed under."""
+    if isinstance(t, _T):
+        sh = stage_shard(t.shard_idx)
+        return t.x, (sh.label, sh.cmf, type(sh.cache).__name__), stage_extra("tag"), os.getpid()
+    return t, None, stage_extra("tag"), os.getpid()
+
+
+def _worker_shard_count(_):
+    """How many shards does this worker hold?"""
+    from dreamer.utils.stage_pool import _STAGE_STATE
+    return len(_STAGE_STATE["shards"])
 
 
 def _maybe_fail_task(x):
@@ -137,11 +161,12 @@ class TestBudget:
 
 class TestStagePoolSerial:
     def test_serial_runs_in_process_with_context(self):
-        with StagePool(["shard-A"], workers=1, extra={"tag": "T"}) as pool:
+        shard = _FakeShard("shard-A", "CMF")
+        with StagePool([shard], workers=1, extra={"tag": "T"}) as pool:
             assert not pool.parallel
-            out = list(pool.imap(_echo_task, [1, 2, 3]))
+            out = list(pool.imap(_echo_task, [_T(0, x) for x in (1, 2, 3)]))
         assert [o[0] for o in out] == [1, 2, 3]
-        assert all(o[1] == "shard-A" and o[2] == "T" for o in out)
+        assert all(o[1] == ("shard-A", "CMF", "FrequencyList") and o[2] == "T" for o in out)
         assert {o[3] for o in out} == {os.getpid()}
 
     def test_state_cleared_after_exit(self):
@@ -164,13 +189,26 @@ class TestStagePoolSerial:
 @pytest.mark.timeout(180)
 class TestStagePoolParallel:
     def test_results_ordered_and_context_in_workers(self, two_workers):
-        tasks = list(range(20))
-        with StagePool(["shard-A"], extra={"tag": "T"}) as pool:
+        shards = [_FakeShard("shard-A", "CMF-1"), _FakeShard("shard-B", "CMF-1")]
+        tasks = [_T(i % 2, i) for i in range(20)]
+        with StagePool(shards, extra={"tag": "T"}) as pool:
             assert pool.parallel and pool.workers == 2
             out = list(pool.imap(_echo_task, tasks))
-        assert [o[0] for o in out] == tasks          # delivery is in task order
-        assert all(o[1] == "shard-A" and o[2] == "T" for o in out)
+        assert [o[0] for o in out] == list(range(20))   # delivery is in task order
+        for t, o in zip(tasks, out):
+            # The worker got the right shard, re-attached to the CMF sent once,
+            # with a fresh (p, q) cache bound to its shared log.
+            assert o[1] == (shards[t.shard_idx].label, "CMF-1", "FrequencyList") and o[2] == "T"
         assert os.getpid() not in {o[3] for o in out}  # ran in worker processes
+
+    def test_workers_hold_only_the_shards_they_used(self, two_workers):
+        """Workers never receive the whole shard list (a 9D CMF has >300k shards):
+        only the shards of tasks they ran, at most a small LRU."""
+        shards = [_FakeShard(f"s{i}", "CMF") for i in range(500)]
+        with StagePool(shards) as pool:
+            assert list(pool.imap(_echo_task, [_T(0, 1), _T(1, 2)]))[0][0] == 1
+            counts = list(pool.imap(_worker_shard_count, range(4)))
+        assert max(counts) <= 2
 
     def test_task_errors_do_not_abort_parallel_stream(self, two_workers):
         with StagePool([]) as pool:
@@ -383,11 +421,13 @@ class TestFailurePaths:
         """An exception inside the ``with`` block terminates the workers, shuts the
         manager down and clears the stage state (no leaked processes)."""
         with pytest.raises(RuntimeError):
-            with StagePool(["shard-A"]) as pool:
-                inner = pool._pool
+            with StagePool([_FakeShard("shard-A", "CMF")]) as pool:
+                assert list(pool.imap(_echo_task, [_T(0, 1), _T(0, 2)]))[0][0] == 1   # workers started
+                procs = list(pool._pool._executor._processes.values())
+                assert procs
                 raise RuntimeError("producer failed")
         assert pool._pool is None and pool._manager is None
-        assert all(not p.is_alive() for p in inner._pool)
+        assert all(not p.is_alive() for p in procs)
         with pytest.raises(KeyError):
             stage_shard(0)
 

@@ -77,7 +77,7 @@ class SerialSearcher(SearchMethod):
             results = []
             from dreamer.utils.ui.tqdm_config import SmartTQDM
 
-            with create_pool() as pool:
+            with create_pool("legacy search pool") as pool:
                 process_data = partial(
                     self.space.compute_trajectory_data_from_tup,
                     use_LIReC=self.use_LIReC,

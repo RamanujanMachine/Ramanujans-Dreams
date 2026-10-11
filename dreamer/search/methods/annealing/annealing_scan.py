@@ -27,6 +27,7 @@ import numpy as np
 from ramanujantools import Position
 
 from dreamer.configs import config
+from dreamer.utils.lru import make_handler_cache
 from dreamer.extraction.samplers import ShardSamplingOrchestrator
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.evaluator import evaluate_in_flatland
@@ -125,6 +126,7 @@ class SimulatedAnnealingSearch(SearchMethod):
         start=None,
         pool=None,
         initial_trajectory: Optional[Position] = None,
+        stats=None,
     ) -> None:
         """
         Run SA for a single constant, emitting Tier-1 DTOs to *sink*.
@@ -158,9 +160,12 @@ class SimulatedAnnealingSearch(SearchMethod):
             logic handles an immediate stall).  An invalid one falls back to
             reservoir seeding (see :func:`resolve_injected_seed`).
         :raises NoInitialIdentification: if no reservoir seed identifies *constant*.
+        :param stats: Optional :class:`~dreamer.search.methods.flatland.evaluator.EvalStats`
+            counting how evaluations were served (reused / revisited / new …);
+            the calling module logs its summary.
         """
         if handler_cache is None:
-            handler_cache = {}
+            handler_cache = make_handler_cache()
 
         # Per-(shard, method, constant) reproducible RNG for the Metropolis accept.
         # Same GLOBAL_SEED + shard + constant => identical SA trajectory; different
@@ -186,6 +191,7 @@ class SimulatedAnnealingSearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
+            stats=stats,
         )
 
         T0 = search_config.ANNEAL_T0
