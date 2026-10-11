@@ -32,7 +32,7 @@ import json
 import multiprocessing as mp
 from collections import namedtuple
 from multiprocessing import Pool
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from dreamer.configs import config
 from dreamer.search.methods.flatland.evaluator import (
@@ -41,6 +41,7 @@ from dreamer.search.methods.flatland.evaluator import (
     flatland_trajectory_key,
 )
 from dreamer.utils.logger import Logger
+from dreamer.utils.storage.attribute_fingerprints import tier1_record_fresh
 from dreamer.utils.multi_processing import search_worker_budget
 from dreamer.utils.storage.optimization_objectives import score_record
 
@@ -112,10 +113,13 @@ def _pool_walk(args):
             start=start,
             direction=direction,
             constants=[constant],
+            # Tier-2 in the same scope as the walk (no second walk / LIReC); the
+            # symbolic matrix is no longer shipped back (nothing consumes it).
+            extra_metrics=tuple(config.search.TIER2_ATTRIBUTES),
         )
         if not dtos:
             return idx, WalkError("no DTO produced")
-        return idx, (handler.trajectory_matrix, constant.value_sympy, dtos[0])
+        return idx, (None, constant.value_sympy, dtos[0])
     except Exception as exc:  # noqa: BLE001 — mirror serial evaluator resilience
         return idx, WalkError(str(exc))
 
@@ -191,12 +195,130 @@ def make_shared_eval_pool(shard, start, workers: int):
     return pool, manager
 
 
+class WalkPrefetcher:
+    """Asynchronous speculative walks on an eval pool, using idle workers only.
+
+    A sequential optimiser (simulated annealing) needs the walks of step *k*
+    before it can choose step *k + 1*, so each step's small batch leaves most
+    workers idle.  The prefetcher uses that idle capacity to **start** the walks
+    a later step is likely to need (e.g. the neighbourhood of every possible next
+    center) while the current step's walks run.  When a later
+    :func:`evaluate_batch` asks for one of them it is taken from here — already
+    finished, or still running and awaited — instead of being dispatched again.
+
+    Speculative results are parked in memory and **never** sunk / recorded here:
+    :func:`evaluate_batch` commits a parked walk exactly like a fresh one, at the
+    moment (and in the order) it is requested, so the optimiser's decisions, the
+    JSONL rows and the ``seen`` cache are the same as without speculation.
+    Speculation that is never requested is simply discarded.
+
+    Capacity: a group is submitted only when all of its new walks fit into
+    ``workers - outstanding`` (outstanding = submitted, not yet finished), so the
+    pool's FIFO queue never holds speculation ahead of a step's own walks.
+
+    :param pool: The per-shard eval pool (its workers hold the shard / start).
+    :param eval_ctx: The evaluation context of the run (same dict passed to
+        :func:`evaluate_batch`).
+    :param workers: Worker count of *pool* (default: ``pool._processes``).
+    :param max_age: Finished, unclaimed results are dropped after this many
+        :meth:`speculate` calls (bounds memory; matrices can be large).
+    """
+
+    def __init__(self, pool, eval_ctx: dict, *, workers: Optional[int] = None, max_age: int = 2):
+        self.pool = pool
+        self.ctx = eval_ctx
+        self.workers = int(workers or getattr(pool, "_processes", 1) or 1)
+        self.max_age = max_age
+        # tid -> [AsyncResult, generation]
+        self._entries: Dict[str, list] = {}
+        self._gen = 0
+        self.stats = {"submitted": 0, "taken": 0, "dropped": 0}
+
+    def outstanding(self) -> int:
+        """Number of speculative walks submitted and not yet finished."""
+        return sum(1 for res, _gen in self._entries.values() if not res.ready())
+
+    def has(self, tid: str) -> bool:
+        """``True`` if a walk for trajectory *tid* was started (finished or not)."""
+        return tid in self._entries
+
+    def claim(self, tid: str):
+        """Remove the entry for *tid* and return its handle without waiting.
+
+        Claim first, wait later: a claimed walk can no longer be evicted by a
+        :meth:`speculate` call made before its result is read.
+
+        :return: The ``AsyncResult`` of the walk (``.get()[1]`` is the payload).
+        """
+        res, _gen = self._entries.pop(tid)
+        self.stats["taken"] += 1
+        return res
+
+    def take(self, tid: str):
+        """Remove and return the walk result for *tid* (blocks until it is done).
+
+        :return: The ``_pool_walk`` payload — ``(matrix, value_sympy, dto)`` or
+            :class:`WalkError`.
+        """
+        return self.claim(tid).get()[1]
+
+    def speculate(self, groups: Sequence[Sequence]) -> None:
+        """Start the walks of *groups* (in order) that fit into idle capacity.
+
+        A group is all-or-nothing: speculating half a neighbourhood rarely saves
+        a step.  Directions already scored (fresh ``seen`` row), walk-cached this
+        run, or already started are skipped.
+
+        :param groups: Sequence of direction groups (flatland vectors).
+        """
+        self._gen += 1
+        self._evict()
+        ctx = self.ctx
+        constant = ctx["constant"]
+        seen = ctx["seen_trajectories"]
+        free = self.workers - self.outstanding()
+        for group in groups:
+            if free <= 0:
+                break
+            new: Dict[str, Tuple] = {}
+            for z in group:
+                direction, tid, fp = flatland_trajectory_key(
+                    z, geom=ctx["geom"], shard=ctx["shard"], start=ctx["start"],
+                    shard_id=ctx["shard_id"], shard_encoding_str=ctx["shard_encoding_str"],
+                )
+                rec = seen.get(tid, {}).get(constant.name)
+                if tier1_record_fresh(rec, fp):
+                    continue
+                if tid in ctx["handler_cache"] or tid in self._entries or tid in new:
+                    continue
+                new[tid] = direction
+            if not new or len(new) > free:
+                continue
+            for tid, direction in new.items():
+                args = (0, direction, constant, ctx["cmf_id"], ctx["shard_id"], ctx["shard_encoding_str"])
+                self._entries[tid] = [self.pool.apply_async(_pool_walk, (args,)), self._gen]
+            self.stats["submitted"] += len(new)
+            free -= len(new)
+
+    def _evict(self) -> None:
+        """Drop finished, unclaimed results older than ``max_age`` generations."""
+        stale = [
+            tid for tid, (res, gen) in self._entries.items()
+            if gen < self._gen - self.max_age and res.ready()
+        ]
+        for tid in stale:
+            del self._entries[tid]
+        self.stats["dropped"] += len(stale)
+
+
 def evaluate_batch(
     z_list: List,
     *,
     eval_ctx: dict,
     pool=None,
     valid_fn: Optional[Callable] = None,
+    prefetcher: Optional["WalkPrefetcher"] = None,
+    speculate: Optional[Sequence[Sequence]] = None,
 ) -> List[Tuple[float, bool]]:
     """Evaluate a batch of flatland directions, optionally via a process *pool*.
 
@@ -210,6 +332,15 @@ def evaluate_batch(
     :param valid_fn: Optional ``z -> bool`` predicate; directions for which it
         returns ``False`` get ``(-inf, False)`` without a walk.  ``None`` treats
         every direction as valid.
+    :param prefetcher: Optional :class:`WalkPrefetcher` bound to *pool* and this
+        *eval_ctx*.  Walks it already started (speculatively, in an earlier call)
+        are taken from it instead of being dispatched again; new walks are
+        dispatched asynchronously so *speculate* can be queued behind them.
+        Results are committed exactly as freshly-walked ones, in the same order.
+    :param speculate: Optional groups of directions a *later* call is likely to
+        request (e.g. the next annealing step's candidate neighbourhoods).  Handed
+        to ``prefetcher.speculate`` after this batch's own walks are queued; they
+        only use idle workers and are **not** committed here.
     :return: List of ``(delta, identified)`` aligned with *z_list*.
     """
     n = len(z_list)
@@ -217,7 +348,7 @@ def evaluate_batch(
         return []
 
     # --- Serial path ---------------------------------------------------
-    if pool is None or n <= 1:
+    if pool is None or (n <= 1 and prefetcher is None):
         out: List[Tuple[float, bool]] = []
         for z in z_list:
             if valid_fn is not None and not valid_fn(z):
@@ -252,7 +383,7 @@ def evaluate_batch(
             shard_id=shard_id, shard_encoding_str=shard_encoding_str,
         )
         rec = seen.get(tid, {}).get(constant.name)
-        if rec is not None and rec.get("config_fingerprint") == fp:
+        if tier1_record_fresh(rec, fp):
             cached = score_record(rec, objective_name)
             if cached is not None:  # already scored for this constant
                 results[i] = cached
@@ -280,8 +411,23 @@ def evaluate_batch(
         # processed in deterministic group order, so the sink / ``seen`` updates and
         # the returned batch values are identical to the old ``pool.map`` path.
         walked: List = [None] * len(group_items)
-        for gi, res in pool.imap_unordered(_pool_walk, args, chunksize=1):
-            walked[gi] = res
+        if prefetcher is None:
+            for gi, res in pool.imap_unordered(_pool_walk, args, chunksize=1):
+                walked[gi] = res
+        else:
+            # Take walks the prefetcher already started; queue the rest first so
+            # they are not stuck behind the speculation submitted right after.
+            # Claim the prefetched handles *before* speculating (which may evict).
+            handles = {}
+            for gi, (tid, _grp) in enumerate(group_items):
+                if prefetcher.has(tid):
+                    handles[gi] = prefetcher.claim(tid)
+                else:
+                    handles[gi] = pool.apply_async(_pool_walk, (args[gi],))
+            if speculate:
+                prefetcher.speculate(speculate)
+            for gi in range(len(group_items)):
+                walked[gi] = handles[gi].get()[1]
         for (tid, (direction, fp, idxs)), res in zip(group_items, walked):
             if isinstance(res, WalkError):
                 Logger(
@@ -301,5 +447,10 @@ def evaluate_batch(
                 scored = (float("-inf"), bool(dto.identified))
             for i in idxs:
                 results[i] = scored
+
+    elif prefetcher is not None and speculate:
+        # Nothing to walk for this batch (all cached) — still keep the
+        # speculation for the next step running.
+        prefetcher.speculate(speculate)
 
     return [r if r is not None else (float("-inf"), False) for r in results]

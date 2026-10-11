@@ -12,7 +12,7 @@ This module provides two layers:
 
 2. **Stage-specific item functions**: ready-to-use per-item functions
    plugged into ``worker_pool`` by the Search stage:
-     - ``compute_tier2_for_item`` — runs ``TIER2_ATTRIBUTES`` for one item.
+     - ``sink_item_dto``         — unwraps a search sink tuple to its record.
      - ``write_jsonl_line``     — appends one DTO/patch as a JSON line.
 
 3. **Cross-run dedup helpers**: ``load_seen_trajectories`` and
@@ -43,21 +43,14 @@ from dreamer.utils.logger import Logger
 def search_worker_budget() -> int:
     """Return the number of cores available to search / analysis pools.
 
-    Single source of truth for sizing every search/eval pool.  Starts from
-    ``sys_config.TOTAL_CORES`` (``None`` → ``os.cpu_count()``) and reserves cores
-    for the Tier-2 background workers **and** their dedicated writer/sink — but
-    only when Tier-2 is actually active (``search.TIER2_ATTRIBUTES`` non-empty).
-    When Tier-2 is inactive, nothing is reserved and the whole machine is given
-    to search/analysis.
+    Single source of truth for sizing every search/eval pool: the whole machine,
+    ``sys_config.TOTAL_CORES`` (``None`` → ``os.cpu_count()``).  Nothing is
+    reserved any more — Tier-2 attributes are computed inside the same pool
+    tasks as Tier-1 (there is no separate background queue).
 
     :return: Worker budget, floored at 1.
     """
-    total = sys_config.TOTAL_CORES or os.cpu_count() or 1
-    if config.search.TIER2_ATTRIBUTES:
-        reserved = sys_config.NUM_BACKGROUND_WORKERS + 1  # +1 dedicated writer/sink
-    else:
-        reserved = 0
-    return max(1, total - reserved)
+    return max(1, sys_config.TOTAL_CORES or os.cpu_count() or 1)
 
 
 # ---------------------------------------------------------------------------
@@ -323,83 +316,19 @@ def worker_pool(
 # Search-stage per-item worker / writer
 # ---------------------------------------------------------------------------
 
-def compute_tier2_for_item(item):
-    """Per-item worker: compute the configured Tier-2 attributes.
+def sink_item_dto(item):
+    """Per-item ``worker_fn`` of the direct-write sinks: unwrap the record.
 
-    *item* is ``(trajectory_matrix, constant, dto_or_patch)`` where
-    *dto_or_patch* is either a ``TrajectoryDTO`` (new trajectory) or a patch
-    ``dict`` (partial coverage), and *constant* is the sympy expression for
-    the target constant (e.g. ``sp.log(2)``) — required by attributes that
-    need to compare against the limit (``delta_sequence``, ``limit``, p/q
-    identification).  Pass ``None`` when no constant context is available.
+    Search methods push ``(trajectory_matrix, constant_sympy, dto_or_patch)``
+    tuples (Tier-2 attributes are already inside the DTO — they are computed in
+    the walk task); the writer only needs the record.
 
-    Only attributes listed in ``search.TIER2_ATTRIBUTES`` and **not already
-    present** in ``extended_metrics`` are computed.  Per-attribute failures
-    are stored as ``<name>_error``; a fatal handler failure is recorded
-    under ``worker_error``.  The same dto/patch is returned for the writer.
+    :param item: A sink tuple, or a bare DTO / patch dict.
+    :return: The DTO or patch dict to write.
     """
-    from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
-    from dreamer.utils.storage.attribute_registry import compute_attributes, attribute_name
-    from dreamer.configs import config
-
-    traj_matrix, constant, dto_or_patch = item
-    is_patch = isinstance(dto_or_patch, dict)
-    # Records are flat: a DTO keeps its metrics in ``extra``; a patch dict carries
-    # them as top-level keys.  ``container`` is the mutable metrics target and
-    # ``present`` the attribute names already computed (so we compute only the
-    # missing ones).  For a patch the structural keys are excluded from ``present``
-    # by simply not appearing among the Tier-2 attribute names.
-    if is_patch:
-        container = dto_or_patch
-        present = set(dto_or_patch.keys())
-        tid = dto_or_patch.get("trajectory_id", "?")
-        direction = dto_or_patch.get("direction")
-        start = dto_or_patch.get("start_point")
-        wd_detail = f"traj_id={tid}"
-    else:
-        container = dto_or_patch.extra
-        present = set(dto_or_patch.extra.keys())
-        tid = dto_or_patch.trajectory_id
-        direction = dto_or_patch.direction
-        start = dto_or_patch.start_point
-        wd_detail = (
-            f"traj_id={tid} start={dto_or_patch.start_point} "
-            f"direction={dto_or_patch.direction}"
-        )
-
-    attrs_to_compute = config.search.TIER2_ATTRIBUTES
-    # Specs may be bare strings or ``(name, predicate)`` tuples; filter on
-    # the resolved attribute name so the predicate-skip path still runs
-    # inside ``compute_attributes``.
-    missing = [
-        spec for spec in attrs_to_compute
-        if attribute_name(spec) not in present
-    ]
-    if missing and traj_matrix is not None:
-        try:
-            handler = TrajectoryAttributesHandler(traj_matrix, constant=constant)
-            # Restore the trajectory direction / start on the (otherwise
-            # matrix-only) handler so **direction-normalised** attributes — e.g.
-            # ``convergence_rate`` = approximated_digits_per_step / ‖direction‖₂ —
-            # compute their norm instead of silently returning ``None``.  A plain
-            # dict suffices: the only consumer, ``_trajectory_norm``, just needs
-            # ``.values()`` (the pFq fast eigenvalue path stays disabled — no cmf).
-            if direction is not None:
-                handler._trajectory = {i: v for i, v in enumerate(direction)}
-            if start is not None:
-                handler._start_point = {i: v for i, v in enumerate(start)}
-            container.update(
-                compute_attributes(
-                    handler, missing, on_error="store", watchdog_detail=wd_detail
-                )
-            )
-        except Exception as e:
-            Logger(
-                f"compute_tier2_for_item error on trajectory {tid}: {e}",
-                Logger.Levels.warning,
-            ).log()
-            container["worker_error"] = str(e)
-    return dto_or_patch
+    if isinstance(item, tuple) and len(item) == 3:
+        return item[2]
+    return item
 
 
 #: Structural keys a patch dict may carry for identity / handler reconstruction; a
@@ -465,7 +394,11 @@ def load_seen_trajectories(jsonl_path: str) -> Dict[str, Dict[str, dict]]:
                 if const not in bucket:
                     bucket[const] = record
                 else:
-                    bucket[const].update(record)   # flat merge, later wins
+                    base = bucket[const]
+                    fps = record.pop("fingerprints", None)
+                    base.update(record)            # flat merge, later wins
+                    if fps:                        # per-attribute fps: deep merge
+                        base.setdefault("fingerprints", {}).update(fps)
     except FileNotFoundError:
         pass
     return merged

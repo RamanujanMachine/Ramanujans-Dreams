@@ -71,7 +71,10 @@ Mostly **where things go** and **how many cores to use**.
 | `EXPORT_ANALYSIS_RESULTS` | Separate analysis store, used only when `analysis.STORE_TRAJECTORIES_SEPARATELY` is on. |
 | `EXPORT_GRAPHS` | Where the graphing stage writes figures/tables. |
 | `*_FORMAT` | `'pkl'` or `'json'` for the corresponding export. |
-| `TOTAL_CORES` / `NUM_BACKGROUND_WORKERS` | The core budget (`None` ⇒ `os.cpu_count()`); workers reserved for Tier-2. |
+| `TOTAL_CORES` | The core budget for every process pool (`None` ⇒ `os.cpu_count()`); nothing is reserved. |
+| `REUSE_POLICY` | How stored attributes are reused across runs: `'strict'` (default — per-attribute fingerprints decide, so a config change recomputes exactly the affected attributes), `'keep'` (reuse anything stored), `'recompute'` (ignore earlier runs). |
+| `STAGE_POOL_WORKERS` | Cap for the per-stage trajectory pools (analysis, hedgehog search, Tier-3). `None`/`0` ⇒ full core budget; `1` ⇒ serial in-process. |
+| `STAGE_POOL_CHUNKSIZE` | Trajectories handed to a stage-pool worker at a time (default `1` = full dynamic load balancing). |
 | `CONSTANTS` | Default constants to search when `run()` is given none. |
 | `OPTIMIZATION_OBJECTIVE` | The numeric trajectory attribute the **whole pipeline** optimises for — both the analysis-stage shard ranking and the search-stage optimisers. `'delta'` (default) reproduces the historical behaviour exactly. Must be a registered objective (see below); each objective knows whether its optimum is the highest or lowest value, so "smaller is better" metrics work without inverting the search. Identification (LIReC) is always required regardless of the objective. |
 
@@ -103,6 +106,8 @@ with its direction.
 | `LOAD_SHARD_CACHE` | Reuse a previously-extracted `…__shards.jsonl` instead of re-extracting. |
 | `IGNORE_DUPLICATE_SEARCHABLES` | Drop symmetry-equivalent shards. |
 | `TRAJECTORY_CONSTRAINTS` | Optional `{var: int}` direction constraint, e.g. `{'x0': 12, 'y1': 28}` — pins the scale-invariant **ratio + sign** of every sampled trajectory and **drops shards** whose cone admits no such direction. Honoured by all samplers + search (see [extraction README](../extraction/README.md)). `None` = unconstrained. |
+| `HEURISTIC_WORKERS` / `HEURISTIC_PARALLEL_AFTER_SECONDS` | Ray-shooting processes (`0` = all cores) and the in-process grace period before the pool starts. Results do not depend on them. |
+| `HEURISTIC_REFINE_WORKERS` | Processes for the optional MILP witness refinement (`0` = all cores). |
 | `HEURISTIC_*`, `EXACT_*` | Fine-tuning of the ray-shooter / reverse-search (see `display()`). |
 
 ## `analysis`
@@ -131,7 +136,7 @@ The largest category. Shared knobs plus one block per optimiser
 | `ENABLE_MICRO_HILL_CLIMB` | The shared resolution-doubling finalization endgame after every method. |
 | `GA_*` | Genetic-algorithm knobs. |
 | `SA_*` | Small-Angle search knobs. |
-| `ANNEAL_*` | Simulated-Annealing knobs. |
+| `ANNEAL_*` | Simulated-Annealing knobs. `ANNEAL_LOOKAHEAD` (`auto`/`on`/`off`) speculatively pre-walks the next step's candidate neighbourhoods on idle eval workers — same search path and rows, fewer sequential rounds on large machines (`auto` needs ≥ 4·d_flat workers). |
 | `GRAD_*` | Gradient-Ascent knobs. |
 | `SPSA_*` | Hybrid SPSA + Adam knobs. |
 

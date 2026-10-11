@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 from functools import lru_cache, cached_property
-from typing import List, Optional, TYPE_CHECKING, Tuple
+from typing import Dict, List, Optional, TYPE_CHECKING, Tuple
 
 import sympy as sp
 from sympy.abc import n
@@ -163,57 +163,23 @@ def tier1_config_fingerprint(walk_depth: int) -> str:
       identification / cache-acceptance tolerances (``identified``, ``p``/``q``).
     * ``CONSTANT_NO_DIGITS_HIGH_RES`` / ``CONSTANT_NO_DIGITS_LOW_RES`` — the
       precision the target constant is evaluated at for identification and δ.
+    * ``MAX_CONSTANT_RESOLUTION`` — the cap of δ's precision escalation (raising
+      it can turn a ``-inf`` δ finite).  Added 2026-10-10; flagged by the
+      dependency test.
+
+    Deliberately **excluded**: ``IDENTIFY_DEPTH``.  It only changes *where* the
+    (depth-independent) p/q relation is identified, with a fallback to the full
+    depth on failure, so it never changes the stored Tier-1 values — including it
+    would spuriously invalidate every cached record.
 
     :param walk_depth: The walk depth used (or to be used) for this trajectory.
     :return: A 16-hex-char stable fingerprint string.
     """
-    walk_type = 1 if search_config.DEFAULT_USES_INV_T else 2
-    # The result depends only on these config values + walk_depth, so memoise
-    # the JSON-serialise + hash step keyed on them.  Reading the config fresh on
-    # every call (cheap attribute lookups) and keying on the values means the
-    # cache stays correct under *any* config change — both ``config.configure``
-    # and a direct ``setattr`` (e.g. test monkeypatching) — with no manual
-    # invalidation, while still skipping the repeated dumps/hash on cache hits.
-    key = (
-        int(walk_depth),
-        walk_type,
-        tuple(float(x) for x in search_config.DEPTH_CONVERGENCE_THRESHOLD),
-        float(search_config.LIMIT_DIFF_ERROR_BOUND),
-        int(search_config.MIN_ESTIMATE_DENOMINATOR),
-        float(search_config.CACHE_ACCEPTANCE_THRESHOLD),
-        float(search_config.IDENTIFY_CHECK_THRESHOLD),
-        int(search_config.CONSTANT_NO_DIGITS_HIGH_RES),
-        int(search_config.CONSTANT_NO_DIGITS_LOW_RES),
-    )
-    return _tier1_fingerprint_for_key(key)
-
-
-@lru_cache(maxsize=8192)
-def _tier1_fingerprint_for_key(key: tuple) -> str:
-    """Memoised core of :func:`tier1_config_fingerprint`.
-
-    Reconstructs the exact same payload dict and serialisation the function
-    used before caching was added, so previously-stored fingerprints still
-    match (a cache that changed the bytes would force a spurious full recompute
-    of every cached trajectory).
-
-    :param key: Tuple of the Tier-1 config values, in a fixed order.
-    :return: A 16-hex-char stable fingerprint string.
-    """
-    (walk_depth, walk_type, depth_conv, limit_diff, min_denom,
-     cache_acc, identify_thr, digits_hi, digits_lo) = key
-    payload = {
-        "walk_depth": walk_depth,
-        "walk_type": walk_type,
-        "depth_convergence_threshold": list(depth_conv),
-        "limit_diff_error_bound": limit_diff,
-        "min_estimate_denominator": min_denom,
-        "cache_acceptance_threshold": cache_acc,
-        "identify_check_threshold": identify_thr,
-        "constant_digits_high_res": digits_hi,
-        "constant_digits_low_res": digits_lo,
-    }
-    return _stable_id(json.dumps(payload, sort_keys=True))
+    # Delegates to the per-attribute fingerprint machinery: the Tier-1 core is
+    # the "tier1" group of attribute_fingerprints.ATTRIBUTE_META (its knobs are
+    # checked against the code by tests/test_attribute_fingerprints.py).
+    from dreamer.utils.storage.attribute_fingerprints import tier1_fingerprint
+    return tier1_fingerprint(walk_depth)
 
 
 def derive_trajectory_id(
@@ -240,6 +206,56 @@ def derive_trajectory_id(
 # ---------------------------------------------------------------------------
 # DTO factory
 # ---------------------------------------------------------------------------
+
+def computed_fingerprints(values: dict, walk_depth: Optional[int]) -> Dict[str, str]:
+    """Fingerprints for the attributes present in a computed *values* dict.
+
+    ``<name>_error`` entries are fingerprinted as ``<name>`` (an error under the
+    same inputs is a final outcome, not a reason to retry).
+
+    :param values: ``{attr or attr_error: value}`` as returned by
+        :func:`compute_attributes`.
+    :param walk_depth: The trajectory's walk depth.
+    :return: ``{attr: fingerprint}``.
+    """
+    from dreamer.utils.storage.attribute_fingerprints import attribute_fingerprint
+    names = {k[: -len("_error")] if k.endswith("_error") else k for k in values if k != "fingerprints"}
+    return {n: attribute_fingerprint(n, walk_depth) for n in sorted(names)}
+
+
+def attributes_patch(
+    handler: "TrajectoryAttributesHandler",
+    constant,
+    record: dict,
+    specs,
+    *,
+    context: Optional[dict] = None,
+) -> dict:
+    """Compute *specs* for a stored row, reusing its Tier-1 values (no LIReC).
+
+    The handler (built from the CMF at the row's ``walk_depth``) is seeded with
+    the row's δ / identified / p,q / projection column inside the constant's
+    scope, so only what the requested attributes genuinely need is computed.
+
+    :param handler: Handler for the row's trajectory (``from_cmf`` at the stored depth).
+    :param constant: :class:`Constant` (or sympy expression) of the row.
+    :param record: The stored flat row (must carry the Tier-1 fields).
+    :param specs: Attribute specs (names or ``(name, predicate)``) to compute.
+    :param context: Optional predicate context (shard-level gates).
+    :return: Flat patch ``{trajectory_id, constant, <attrs...>, fingerprints}``;
+        attributes gated off by their predicate are absent.
+    """
+    from dreamer.utils.constants.constant import Constant as _Constant
+    c_sympy = constant.value_sympy if isinstance(constant, _Constant) else constant
+    *_, values = handler.compute_for_constant(
+        c_sympy, sync_attributes=tuple(specs), seed=record, context=context,
+    )
+    patch = {"trajectory_id": record.get("trajectory_id"), "constant": record.get("constant")}
+    patch.update(values)
+    if values:
+        patch["fingerprints"] = computed_fingerprints(values, handler.walk_depth())
+    return patch
+
 
 def build_trajectory_dtos(
     handler: "TrajectoryAttributesHandler",
@@ -324,6 +340,8 @@ def build_trajectory_dtos(
         delta, p, q, ided, extra = handler.compute_for_constant(
             c_sympy, sync_attributes=tuple(sync_attrs),
         )
+        if extra:
+            extra["fingerprints"] = computed_fingerprints(extra, walk_depth)
 
         dtos.append(TrajectoryDTO(
             trajectory_id=trajectory_id,
@@ -1020,8 +1038,16 @@ class TrajectoryAttributesHandler:
         (:meth:`_effective_walk_values`) so ``Limit.as_rational`` reads the
         identical column.  Returns ``None`` (⇒ ramanujantools default, the last
         column) only when no column has been selected yet.
+
+        When the column is already known (selected during identification, or
+        seeded from a stored row) it is used directly — no full-depth walk just
+        to rediscover it.  Only identified trajectories reach this (``_limits``
+        returns early otherwise), and for those the column is non-degenerate at
+        the walk depth (δ was computed on it), so the result is unchanged.
         """
-        _, col_index = self._effective_walk_values(self._depth)
+        col_index = self._projection_column
+        if col_index is None:
+            _, col_index = self._effective_walk_values(self._depth)
         if col_index is None:
             return None
         N = self.traj_size()
@@ -1167,8 +1193,9 @@ class TrajectoryAttributesHandler:
                 if self._constant_resolution == search_config.MAX_CONSTANT_RESOLUTION:
                     Logger(
                         f'Guardrail reached - could not approximate with constant at resolution: '
-                        f'{search_config.MAX_CONSTANT_RESOLUTION}',
-                        Logger.Levels.debug,
+                        f'{search_config.MAX_CONSTANT_RESOLUTION}'
+                        f'\nYou might want to rerun the search with a higher constant resolution to get a better approximation.',
+                        Logger.Levels.warning,
                     ).log()
                     break
                 self._constant_resolution = min(
@@ -1191,7 +1218,10 @@ class TrajectoryAttributesHandler:
             depth = list(range(1, depth + 1))
 
         def compute():
-            vectors, effective_walk_values = self._pq_vector(depth[-1])
+            # Identification is depth-independent and cached (see _pq_vector); the
+            # returned walk column is at the identification depth, so it is NOT used
+            # for the δ values here — each requested depth walks its own column.
+            vectors, _ = self._pq_vector()
             if vectors is None:
                 return []
             p, q = vectors
@@ -1208,7 +1238,12 @@ class TrajectoryAttributesHandler:
                     success, delta = self.__compute_delta(p, q, walk_values, self.constant())
                     deltas.append(float(delta.evalf(10)) if success else delta)
             else:
-                success, delta = self.__compute_delta(p, q, effective_walk_values, self.constant())
+                # Single depth: walk the requested depth's column explicitly (the
+                # identification walk may have been at a shallower IDENTIFY_DEPTH).
+                walk_values, _ = self._effective_walk_values(depth[0])
+                if walk_values is None:
+                    return []
+                success, delta = self.__compute_delta(p, q, walk_values, self.constant())
                 deltas.append(float(delta.evalf(10)) if success else delta)
             return deltas
         
@@ -1273,24 +1308,56 @@ class TrajectoryAttributesHandler:
         return self.__get(f"delta_prediction_{depth}", compute)
 
     def gcd_slope(self, depth: int = 20):
-        """
-        Linear fit slope of log(q̃_n) = log(q_n / gcd(p_n, q_n)).
-        This measures how fast the reduced denominator grows.
+        r"""
+        Linear fit slope of ``log(q̃_n) = log(q_n / gcd(p_n, q_n))``.
+        This measures how fast the **reduced denominator** of the convergents
+        grows, and it is the denominator of the kamidelta formula
+        (``δ ≈ -1 + log|λ₁/λ₂| / gcd_slope``).
 
-        Used internally by delta_prediction, but also useful on its own.
-        Returns ``None`` for an unidentified trajectory (no p/q vectors) or when
-        the underlying ramanujantools fit fails.
+        IMPORTANT — must use the **same walk as δ**.  ``ramanujantools.Matrix.gcd_slope``
+        walks the reduced-denominator sequence starting at ``{n: 1}``, whereas this
+        handler identifies p/q and computes δ on the walk starting at ``{n: 0}``
+        (see :meth:`_limits` / :meth:`_walked_matrix`) and, for ``walk_type == 1``,
+        applies ``inv().T`` to each walked matrix.  Those are *different* integer
+        sequences: the identified p/q vectors belong to the ``{n: 0}`` walk, so
+        projecting them onto the ``{n: 1}`` walk yields a mismatched fraction with
+        far less gcd cancellation and a denominator that grows ~30 % faster.  Using
+        the ramanujantools slope therefore drove kamidelta far below the true δ
+        (e.g. δ≈0.26 but kamidelta≈-0.03).  We instead fit ``log(q̃_n)`` over the
+        **identical** ``Limit`` objects δ uses (:meth:`_limits`), so the eigenvalue
+        ratio and the denominator slope refer to the same convergents.
+
+        Used by :meth:`delta_prediction`.  Returns ``None`` for an unidentified
+        trajectory (no p/q vectors) or when the walk/fit fails.
         """
         def compute():
-            initial_values = self._initial_values()
-            if initial_values is None:
+            import numpy as np
+
+            if self._initial_values() is None:
                 return None  # not identified — nothing to fit
+            depths = list(range(1, depth))
+            if len(depths) < 2:
+                return None
             try:
-                return self.trajectory_matrix_typed.gcd_slope(
-                    depth,
-                    initial_values=initial_values,
-                    final_projection=self._final_projection(),
-                )
+                # Same walk δ uses (start {n: 0}, walk_type-aware) so the reduced
+                # denominator matches the convergents δ / the p/q vectors live on.
+                limits = self._limits(depths)
+                if not limits:
+                    return None
+                xs, ys = [], []
+                for d, lim in zip(depths, limits):
+                    try:
+                        q = lim.as_rational().q
+                        ys.append(float(sp.log(q).evalf(30)))
+                        xs.append(d)
+                    except Exception:
+                        continue  # degenerate step — skip this depth
+                if len(xs) < 2:
+                    return None
+                import mpmath as mp
+                slope = np.polyfit(np.asarray(xs, dtype=float),
+                                   np.asarray(ys, dtype=float), 1)[0]
+                return mp.mpf(float(slope))
             except Exception as e:
                 Logger(
                     f'gcd_slope failed at depth {depth}: {e} {self._trajectory_repr()}',
@@ -1533,9 +1600,23 @@ class TrajectoryAttributesHandler:
     # ==================================================================
 
     def _pq_vector(self, depth: Optional[int] = None) -> Tuple[Tuple[list, list], list] | Tuple[None, None]:
-        """Numerator and denominator projection vectors (p, q) such that constant = p·walk / q·walk."""
-        depth = depth or self._depth
+        """Numerator and denominator projection vectors (p, q) such that constant = p·walk / q·walk.
 
+        The (p, q) integer relation is **depth-independent**, so it is identified
+        once (via LIReC) at the cheap fixed depth ``search.IDENTIFY_DEPTH`` and then
+        cached and reused for the deeper δ / spectral computations.  LIReC — and the
+        walk that feeds it (whose convergents are huge rationals that must be
+        ``evalf``'d) — get much more expensive at large depth, so this avoids a
+        redundant deep identification walk.  If identification fails at that depth
+        (a slow-converging trajectory whose convergents are not yet accurate enough
+        there), it falls back to the full walk depth, so the result is **identical**
+        to identifying at the full depth — only faster in the common case.
+
+        The ``depth`` argument is retained for API compatibility but no longer
+        selects the identification depth (that is ``min(IDENTIFY_DEPTH, walk_depth)``);
+        callers that need a walk column at a specific depth use
+        :meth:`_effective_walk_values` directly.
+        """
         def compute():
             if self.constant() is None:
                 # No target constant ⇒ identification cannot run (it needs the
@@ -1545,76 +1626,89 @@ class TrajectoryAttributesHandler:
                 # ``constant=None`` handler the analyzer builds before injecting
                 # constants via ``compute_for_constant``).
                 return None, None
-            walk_values, _ = self._effective_walk_values(depth)
-            if walk_values is None:
-                # Walk failed (singular matrix, ZeroDivisionError, …) — no
-                # identification possible.  ``identified()`` reads this as
-                # False; ``p_vector``/``q_vector`` propagate ``None``.
-                return None, None
-            low_res_constant = self.constant().evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES)
-            walk_col = sp.Matrix(walk_values)
-
-            # If searchable is provided, try to find a cached p/q pair that matches the effective walk values.
-            if self._searchable:
-                def matcher(v):
-                    v1, v2 = v
-                    v1 = sp.Matrix(v1).T
-                    v2 = sp.Matrix(v2).T
-                    numerator = v1.dot(walk_col)
-                    denom = v2.dot(walk_col)
-                    err = sp.Abs(sp.Abs(sp.Rational(numerator, denom)) - low_res_constant)
-                    return sp.N(err, 25) < search_config.CACHE_ACCEPTANCE_THRESHOLD
-
-                if matched := self._searchable.cache.find(matcher):
-                    # Cache hit: matcher verified this (p, q) reconstructs the
-                    # constant.  Returning a non-None result is itself the
-                    # signal that identification succeeded (see ``identified``).
-                    return matched, walk_values
-            
-            # Compute p, q using LIReC
-            try:
-                res = db.identify(
-                    [low_res_constant] + [v.evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES) for v in walk_values[1:]]
-                )
-            except Exception as e:
-                Logger(f'Error while identifying constant. LIReC failed with: "{e}"', Logger.Levels.warning).log()
-                return None, walk_values
-
-            # LIReC may also return an empty list when it cannot identify the constant
-            if len(res) == 0:
-                return None, walk_values
-
-            # extract p, q from LIReC result
-            res = res[0]
-            res.include_isolated = 0
-            estimated_expr = sp.nsimplify(str(res).rsplit(' ', 1)[0], rational=True)
-            numerator, denom = sp.fraction(estimated_expr)
-            p_dict = numerator.as_coefficients_dict()
-            q_dict = denom.as_coefficients_dict()
-            syms = sp.symbols(f'c:{self.traj_size()}')[1:]
-            ext_syms = [1] + list(syms)
-            # Keep coefficients as sympy Numbers — they can be Rational
-            # (e.g. ``1/2``) and ``int(Rational)`` raises.  JSON-safety is
-            # handled at the DTO boundary by ``_pq_to_jsonsafe``.
-            p = [p_dict[sym] for sym in ext_syms]
-            q = [q_dict[sym] for sym in ext_syms]
-
-            estimated = estimated_expr.subs({sym: v for sym, v in zip(ext_syms, list(walk_values))})
-            err = sp.Abs(estimated - self.constant())
-            if sp.N(err, 15) > search_config.IDENTIFY_CHECK_THRESHOLD:
-                # Logger(
-                #     f'Unexpected - LIReC provided bad combination. '
-                #     f'Could not approximate constant {self.constant()} with p/q. Error: {err}'
-                #     f'Please contact developers.',
-                #     Logger.Levels.warning
-                # ).log()
-                return None, walk_values
-
-            if self._searchable:
-                self._searchable.cache.append((tuple(p), tuple(q)))
-            return (p, q), walk_values
+            id_depth = min(int(search_config.IDENTIFY_DEPTH), int(self._depth))
+            vectors, walk_values = self._identify_at(id_depth)
+            if vectors is None and self._depth > id_depth:
+                # Cheap identification failed — retry at the full walk depth so a
+                # slow-converging trajectory still identifies (result-preserving).
+                vectors, walk_values = self._identify_at(self._depth)
+            return vectors, walk_values
 
         return self.__get_utility("pq_vector", compute)
+
+    def _identify_at(self, depth: int):
+        """Identify the (p, q) integer relation from the walk column at ``depth``.
+
+        :return: ``((p, q), walk_values)`` on success; ``(None, walk_values)`` when
+            the walk succeeded but no verified relation was found (LIReC error /
+            empty / failed the ``IDENTIFY_CHECK_THRESHOLD`` reconstruction check);
+            ``(None, None)`` when the walk itself failed.  ``walk_values`` is the
+            effective walk column at ``depth``.
+        """
+        walk_values, _ = self._effective_walk_values(depth)
+        if walk_values is None:
+            # Walk failed (singular matrix, ZeroDivisionError, …) — no
+            # identification possible.  ``identified()`` reads this as False;
+            # ``p_vector``/``q_vector`` propagate ``None``.
+            return None, None
+        low_res_constant = self.constant().evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES)
+        walk_col = sp.Matrix(walk_values)
+
+        # If searchable is provided, try to find a cached p/q pair that matches the effective walk values.
+        if self._searchable:
+            def matcher(v):
+                v1, v2 = v
+                v1 = sp.Matrix(v1).T
+                v2 = sp.Matrix(v2).T
+                numerator = v1.dot(walk_col)
+                denom = v2.dot(walk_col)
+                err = sp.Abs(sp.Abs(sp.Rational(numerator, denom)) - low_res_constant)
+                return sp.N(err, 25) < search_config.CACHE_ACCEPTANCE_THRESHOLD
+
+            if matched := self._searchable.cache.find(matcher):
+                # Cache hit: matcher verified this (p, q) reconstructs the
+                # constant.  Returning a non-None result is itself the
+                # signal that identification succeeded (see ``identified``).
+                return matched, walk_values
+
+        # Compute p, q using LIReC (values evaluated at CONSTANT_NO_DIGITS_LOW_RES).
+        try:
+            res = db.identify(
+                [low_res_constant] + [v.evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES) for v in walk_values[1:]]
+            )
+        except Exception as e:
+            Logger(f'Error while identifying constant. LIReC failed with: "{e}"', Logger.Levels.warning).log()
+            return None, walk_values
+
+        # LIReC may also return an empty list when it cannot identify the constant
+        if len(res) == 0:
+            return None, walk_values
+
+        # extract p, q from LIReC result
+        res = res[0]
+        res.include_isolated = 0
+        estimated_expr = sp.nsimplify(str(res).rsplit(' ', 1)[0], rational=True)
+        numerator, denom = sp.fraction(estimated_expr)
+        p_dict = numerator.as_coefficients_dict()
+        q_dict = denom.as_coefficients_dict()
+        syms = sp.symbols(f'c:{self.traj_size()}')[1:]
+        ext_syms = [1] + list(syms)
+        # Keep coefficients as sympy Numbers — they can be Rational
+        # (e.g. ``1/2``) and ``int(Rational)`` raises.  JSON-safety is
+        # handled at the DTO boundary by ``_pq_to_jsonsafe``.
+        p = [p_dict[sym] for sym in ext_syms]
+        q = [q_dict[sym] for sym in ext_syms]
+
+        estimated = estimated_expr.subs({sym: v for sym, v in zip(ext_syms, list(walk_values))})
+        err = sp.Abs(estimated - self.constant())
+        if sp.N(err, 15) > search_config.IDENTIFY_CHECK_THRESHOLD:
+            # LIReC provided a combination that does not reconstruct the constant
+            # to tolerance (spurious relation) — treat as not identified.
+            return None, walk_values
+
+        if self._searchable:
+            self._searchable.cache.append((tuple(p), tuple(q)))
+        return (p, q), walk_values
 
     def p_vector(self, depth: Optional[int] = None) -> list:
         """Projection vector p such that p·walk gives the numerator sequence."""
@@ -1702,7 +1796,41 @@ class TrajectoryAttributesHandler:
             if not key.startswith(_CONST_INDEPENDENT_CACHE_KEYS):
                 del self._cache[key]
 
-    def compute_for_constant(self, constant, sync_attributes: tuple = ()) -> tuple:
+    def seed_tier1(self, record: dict) -> None:
+        """Inject a stored row's Tier-1 values into this handler's caches.
+
+        A stored row keeps δ (float64), ``identified``, the **exact** p/q vectors
+        and the projection column, but not the walk.  Seeding lets Tier-2/3
+        attributes that only *read* these values (identification gates,
+        δ-matched eigenvalue selection, p/q projections) run without re-walking
+        to the full depth and without calling LIReC.  Attributes that need the
+        walk itself still compute it (once, at the stored depth).
+
+        Must be called inside a constant scope (``compute_for_constant`` does),
+        after the constant-dependent cache was cleared.
+
+        :param record: Flat stored row (``delta``, ``identified``, ``p_vector``,
+            ``q_vector``, ``projection_column``).
+        """
+        delta = record.get("delta")
+        self._cache[f"delta_{self._depth}"] = float(delta) if delta is not None else float("-inf")
+        p, q = record.get("p_vector"), record.get("q_vector")
+        if record.get("identified") and p is not None and q is not None:
+            pq = ([sp.sympify(x) for x in p], [sp.sympify(x) for x in q])
+            # Second element (walk values) is never read by consumers of the seed.
+            self._utility_cache["pq_vector"] = (pq, None)
+        else:
+            self._utility_cache["pq_vector"] = (None, None)
+        if record.get("projection_column") is not None:
+            self._projection_column = int(record["projection_column"])
+
+    def compute_for_constant(
+        self,
+        constant,
+        sync_attributes: tuple = (),
+        seed: Optional[dict] = None,
+        context: Optional[dict] = None,
+    ) -> tuple:
         """Evaluate delta / p / q / identified (+ optional extra metrics) for *constant*.
 
         Reuses the cached walk matrices from this handler (the walk is
@@ -1719,16 +1847,26 @@ class TrajectoryAttributesHandler:
         is a ``float``, ``extra`` is the (possibly empty) metrics dict, and the
         rest match :meth:`delta` / :meth:`p_vector` / :meth:`q_vector` /
         :meth:`identified`.
+
+        :param seed: Optional stored ``(trajectory, constant)`` row whose Tier-1
+            values (δ, identified, p/q, projection column) are injected instead of
+            recomputed (see :meth:`seed_tier1`) — no walk is primed and LIReC is
+            never called; only what *sync_attributes* genuinely need is computed.
+        :param context: Optional predicate context forwarded to
+            :func:`compute_attributes` (shard-level gates).
         """
-        # Ensure the walk is cached before swapping the constant (walk is
-        # constant-independent, so we prime it here if not already done).
-        _ = self._effective_walk_values(self._depth)
+        if seed is None:
+            # Ensure the walk is cached before swapping the constant (walk is
+            # constant-independent, so we prime it here if not already done).
+            _ = self._effective_walk_values(self._depth)
 
         old_constant = self._constant
         self._constant = constant
         self._clear_constant_dependent_cache()
 
         try:
+            if seed is not None:
+                self.seed_tier1(seed)
             delta = self.delta()
             p = self.p_vector()
             q = self.q_vector()
@@ -1737,7 +1875,7 @@ class TrajectoryAttributesHandler:
             if sync_attributes:
                 # Local import avoids a module-load cycle with attribute_registry.
                 from dreamer.utils.storage.attribute_registry import compute_attributes
-                extra = compute_attributes(self, sync_attributes, on_error="store")
+                extra = compute_attributes(self, sync_attributes, on_error="store", context=context)
         finally:
             # Restore the previous constant regardless of exceptions, and clear
             # again so subsequent calls see the right constant.

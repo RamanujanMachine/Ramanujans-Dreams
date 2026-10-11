@@ -42,9 +42,11 @@ common all-zero shift this reduces to a plain block sort).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Sequence
-
+from typing import List, Optional, Sequence, Tuple
+from ramanujantools.cmf import CMF, MeijerG, pFq as rt_pFq
 import numpy as np
+
+Range = List[Tuple[int, int | None]]
 
 
 class SymmetryStrategy(ABC):
@@ -114,36 +116,101 @@ class BlockSortSymmetry(SymmetryStrategy):
         return P
 
 
-def _fractional_shift_groups(
-    p: int, q: int, shift: Sequence[float]
-) -> List[np.ndarray]:
-    r"""
-    Build the column-index groups for the :math:`pFq` :math:`S_p \times S_q`
-    symmetry, partitioned by equal fractional shift.
+class Grouping(ABC):
+    """Builds the column-index groups for a given CMF family and shift."""
 
-    The first ``p`` columns are the numerator block, the last ``q`` the
-    denominator block; within each block, only coordinates whose shifts
-    share a fractional part may be swapped.  Mirrors the legacy
-    ``initial_points.__same_shift_indices``.
-    """
-    if p + q != len(shift):
-        raise ValueError(
-            f"p + q must equal len(shift): {len(shift)} != {p} + {q}"
-        )
-    reduced = np.array([v - int(v) for v in shift], dtype=np.float64)
-    groups: List[np.ndarray] = []
-    # Numerator block: indices [0, p)
-    nom = reduced[:p]
-    for off in np.unique(nom):
-        groups.append(np.where(nom == off)[0])
-    # Denominator block: indices [p, p + q); offset back into full coords.
-    denom = reduced[p:]
-    for off in np.unique(denom):
-        groups.append(p + np.where(denom == off)[0])
-    return groups
+    def __init__(self, cmf: CMF, shift: Sequence[float]):
+        self.cmf = cmf
+        self.shift = shift
+    
+    @abstractmethod
+    def groups(self, shift: Sequence[float]) -> Range:
+        """
+        Return the column-index groups for the given per-coordinate shift.
+
+        :param shift: Per-coordinate shift in the same column order the
+            extraction matrices use (numerator block first, then denominator).
+        :return: List of integer arrays, each array being a group of column
+            indices whose coordinates may be freely permuted.
+        """
+        raise NotImplementedError
+
+    def reduce_shift(self, shift: Sequence[float]) -> np.ndarray:
+        """
+        Reduce the per-coordinate shift to its fractional part.
+
+        :param shift: Per-coordinate shift in the same column order the
+            extraction matrices use (numerator block first, then denominator).
+        :return: Array of fractional shifts.
+        """
+        return np.array([v - int(v) for v in shift], dtype=np.float64)
+
+    def group(self) -> List[np.ndarray]:
+        """
+        Return the column-index groups for the given per-coordinate shift.
+        """
+        reduced = self.reduce_shift(self.shift)
+        groups: List[np.ndarray] = []
+
+        for g in self.groups(self.shift):
+            for off in np.unique(r := reduced[g[0]:g[1]]):
+                groups.append(np.where(r == off)[0])
+        return groups
 
 
-def symmetry_for_cmf(cmf, shift: Sequence[float]) -> Optional[SymmetryStrategy]:
+class pFqGrouping(Grouping):
+    r"""Builds the column-index groups for the :math:`pFq` :math:`S_p \times S_q` symmetry."""
+
+    def __init__(self, cmf: rt_pFq, shift: Sequence[float]):
+        super().__init__(cmf, shift)
+        self.p = cmf.p
+        self.q = cmf.q
+
+    def groups(self, shift: Sequence[float]) -> Range:
+        if self.p + self.q != len(shift):
+            raise ValueError(
+                f"p + q must equal len(shift): {len(shift)} != {self.p} + {self.q}"
+            )
+        return [(0, self.p), (self.p, None)]
+
+
+class MeijerGGrouping(Grouping):
+    r"""Builds the column-index groups for the :math:`MeijerG` :math:`S_m \times S_{q-m} \times S_n \times S_{p-n}` symmetry."""
+
+    def __init__(self, cmf: MeijerG, shift: Sequence[float]):
+        super().__init__(cmf, shift)
+        self.p = cmf.p
+        self.q = cmf.q
+        self.m = cmf.m
+        self.n = cmf.n
+
+    def groups(self, shift: Sequence[float]) -> Range:
+        if self.p + self.q != len(shift):
+            raise ValueError(
+                f"p + q must equal len(shift): {len(shift)} != {self.p} + {self.q}"
+            )
+        if self.n > self.p or self.m > self.q:
+            raise ValueError(
+                f"n must be <= p and m must be <= q: n={self.n}, p={self.p}, m={self.m}, q={self.q}"
+            )
+        return [(0, self.m), (self.m, self.q), (self.q, self.q + self.n), (self.q + self.n, None)]
+
+
+class GroupingFactory:
+    """Factory for building the column-index groups for a given CMF family and shift."""
+
+    @staticmethod
+    def create(cmf: CMF, shift: Sequence[float]) -> Grouping | None:
+        match cmf:
+            case rt_pFq():
+                return pFqGrouping(cmf, shift)
+            case MeijerG():
+                return MeijerGGrouping(cmf, shift)
+            case _:
+                return None
+
+
+def symmetry_for_cmf(cmf: CMF, shift: Sequence[float]) -> Optional[SymmetryStrategy]:
     r"""
     Build the :class:`SymmetryStrategy` for ``cmf`` (or ``None`` if the CMF
     family has no registered symmetry).
@@ -156,14 +223,7 @@ def symmetry_for_cmf(cmf, shift: Sequence[float]) -> Optional[SymmetryStrategy]:
     :param shift: Per-coordinate shift in the same column order the
         extraction matrices use (numerator block first, then denominator).
     """
-    # Imported lazily so this module does not hard-depend on ramanujantools
-    # at import time (and to avoid a heavy import for the no-symmetry path).
-    try:
-        from ramanujantools.cmf import pFq as rt_pFq
-    except Exception:  # pragma: no cover - ramanujantools always present in prod
+    grouping = GroupingFactory.create(cmf, shift)
+    if grouping is None:
         return None
-
-    if isinstance(cmf, rt_pFq):
-        groups = _fractional_shift_groups(cmf.p, cmf.q, list(shift))
-        return BlockSortSymmetry(groups, shift=list(shift))
-    return None
+    return BlockSortSymmetry(grouping.group(), shift=list(shift))

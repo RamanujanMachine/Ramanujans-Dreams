@@ -148,7 +148,7 @@ class SearchConfig(Configurable):
             ("convergence_rate", "if_identified"),
             ("digits_computed", "if_identified"), ("avg_computed_digits_per_step", "if_identified"),
         ),
-        metadata={"description": "Background-worker attributes computed asynchronously during search. Empty disables the worker/writer subprocesses entirely."},
+        metadata={"description": "Attributes computed for every trajectory the search stage evaluates, in the same pool task as its Tier-1 walk (rows whose Tier-1 is already stored get only the missing / stale ones, from a handler seeded with the stored values). Reused across runs per attribute fingerprint (system.REUSE_POLICY)."},
     )
 
     USE_DELTA_PREDICTION: bool = field(
@@ -272,6 +272,20 @@ class SearchConfig(Configurable):
     ANNEAL_NUM_EVAL_WORKERS: int = field(
         default=0,
         metadata={"description": "Worker cap for evaluating the neighbour batch in each SA step. 0/None = use the full core budget (search_worker_budget); a positive value caps at min(value, budget). A resolved count <= 1 runs serial."},
+    )
+    ANNEAL_LOOKAHEAD: str = field(
+        default="auto",
+        metadata={"description": (
+            "Speculative one-step look-ahead for simulated annealing. While a step's "
+            "neighbours are walked, idle eval workers already walk the neighbourhoods "
+            "of every possible next center (each neighbour = accept, the doubled "
+            "current = reject); the next step then often finds its walks done. The "
+            "search path and the written rows are identical to the plain loop (results "
+            "are committed only when the loop requests them); only idle capacity is "
+            "used. 'auto' enables it when the eval pool has at least 2 * (2 * d_flat) "
+            "workers (room for one step's neighbours plus one full speculative "
+            "neighbourhood); 'on' whenever a multi-process pool exists; 'off' disables it."
+        )},
     )
 
     # ============================== Shared trajectory-length cap (all search methods) ==============================

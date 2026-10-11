@@ -51,6 +51,7 @@ from dreamer.utils.storage.attribute_registry import (
     register_predicate,
 )
 from dreamer.utils.storage import Exporter, Importer, Formats
+from dreamer.utils.storage.attribute_fingerprints import attribute_fingerprint
 from dreamer.utils.multi_processing import (
     load_seen_shards,
     load_seen_trajectories,
@@ -1525,97 +1526,57 @@ class TestMergeOnRead:
     # Worker: only compute missing attributes
     # ------------------------------------------------------------------
 
-    def test_worker_skips_already_present_t2_attr(self, monkeypatch):
-        """``compute_tier2_for_item`` must not overwrite already-present attrs."""
-        from dreamer.configs import config
-        from dreamer.utils.multi_processing import compute_tier2_for_item
+    def test_sink_item_dto_unwraps_records(self):
+        """The direct-write sinks receive ``(matrix, constant, record)`` tuples
+        and must write only the record (Tier-2 is already inside it)."""
+        from dreamer.utils.multi_processing import sink_item_dto
 
-        monkeypatch.setattr(
-            config.search,
-            "TIER2_ATTRIBUTES",
-            ("eigenvalues", "spectral_gap", "gcd_slope", "approximated_digits_per_step"),
-        )
+        patch = {"trajectory_id": "t1", "constant": "e", "spectral_gap": 0.5}
+        assert sink_item_dto((None, None, patch)) is patch
+        assert sink_item_dto(patch) is patch
 
-        patch = {
-            "trajectory_id": "existing_t1",
-            "constant": "e",
-            "eigenvalues": ["pre-computed"],
-            "spectral_gap": 0.5,
-            "gcd_slope": 0.1,
-            "approximated_digits_per_step": 8.0,
-        }
-        out = compute_tier2_for_item((None, None, patch))
+    def test_stale_attributes_skips_present_fresh_values(self):
+        """Already-present attributes with a matching fingerprint are not
+        recomputed; missing ones are (replaces the old Tier-2 worker check)."""
+        from dreamer.utils.storage.attribute_fingerprints import stale_attributes
 
-        assert out["trajectory_id"] == "existing_t1"
-        # Pre-computed values must not be replaced by error entries.
-        assert out["eigenvalues"] == ["pre-computed"]
-        assert "eigenvalues_error" not in out
-
-    def test_worker_full_dto_input_is_passthrough_when_nothing_missing(
-        self, minimal_handler, symbols, monkeypatch,
-    ):
-        """Full DTO input with no missing TIER2 attrs is returned unchanged."""
-        from dreamer.configs import config
-        from dreamer.utils.multi_processing import compute_tier2_for_item
-
-        # No attrs requested → nothing to compute → DTO untouched.
-        monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ())
-
-        start = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
-        direction = Position({symbols[0]: sp.Integer(1), symbols[1]: sp.Integer(1)})
-        dto = build_trajectory_dtos(
-            minimal_handler,
-            cmf_id="c", shard_id="s", cmf_name="c",
-            shard_encoding_str="enc", start=start, direction=direction,
-        )[0]
-
-        out = compute_tier2_for_item((None, None, dto))
-        assert out is dto, "Worker must return the same DTO object unchanged"
-        assert out.extra == {}
-
-    def test_worker_with_none_traj_matrix_does_not_crash(self, monkeypatch):
-        """When traj_matrix=None and attrs are missing, the worker is a no-op.
-
-        The producer passes ``None`` to short-circuit work; the worker must
-        forward the patch unchanged without raising.
-        """
-        from dreamer.configs import config
-        from dreamer.utils.multi_processing import compute_tier2_for_item
-
-        monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ("eigenvalues",))
-
-        patch = {"trajectory_id": "t1", "constant": "e"}
-        out = compute_tier2_for_item((None, None, patch))
-        # No computation happened; the flat patch gained no metric columns.
-        assert set(out.keys()) == {"trajectory_id", "constant"}
+        row = {"eigenvalues": ["pre-computed"], "spectral_gap": 0.5,
+               "fingerprints": {"eigenvalues": attribute_fingerprint("eigenvalues", 1000),
+                                "spectral_gap": attribute_fingerprint("spectral_gap", 1000)}}
+        assert stale_attributes(row, ["eigenvalues", "spectral_gap", "gcd_slope"], 1000) == ["gcd_slope"]
 
     def test_tier3_worker_direct_call(self, simple_shard, monkeypatch):
-        """``compute_tier3_for_item`` computes registered attrs into a patch dict."""
+        """``_tier3_task`` computes the requested attributes for a stored row on a
+        seeded handler and returns a flat patch with per-attribute fingerprints."""
         from dreamer.configs import config
-        from dreamer.post_process.tier3_post_process_mod import compute_tier3_for_item
-
-        monkeypatch.setattr(config.post_process, "TIER3_ATTRIBUTES", ("kamidelta",))
-
-        # Build a real handler from simple_shard so the worker has something
-        # symbolic to walk through.
+        from dreamer.post_process.tier3_post_process_mod import Tier3Task, _SEED_FIELDS, _tier3_task
         from dreamer.search.methods.hedgehog_scan import SerialSearcher
+        from dreamer.utils.stage_pool import StagePool
+
         pairs = SerialSearcher(simple_shard, e, use_LIReC=False).sample_pairs()
         if not pairs:
             pytest.skip("No trajectory pairs available")
         traj_p, start_p = pairs[0]
         handler = TrajectoryAttributesHandler.from_cmf(
-            simple_shard.cmf, traj_p, start_p,
-            constant=e.value_sympy,
-            searchable=simple_shard,
+            simple_shard.cmf, traj_p, start_p, searchable=simple_shard,
         )
-
-        patch = {"trajectory_id": "t1", "constant": "e"}
-        out = compute_tier3_for_item((handler.trajectory_matrix, e.value_sympy, patch, None))
-
-        assert out is patch  # same dict, mutated in place
-        # kamidelta either computed successfully or recorded as an error (flat keys);
-        # either path is acceptable — what matters is that one of them is present.
-        assert "kamidelta" in out or "kamidelta_error" in out
+        cmf_id, shard_id, enc = derive_cmf_and_shard_ids(simple_shard)
+        (dto,) = build_trajectory_dtos(
+            handler, cmf_id=cmf_id, shard_id=shard_id, cmf_name=simple_shard.cmf_name,
+            shard_encoding_str=enc, start=start_p, direction=traj_p, constants=[e],
+        )
+        row = json.loads(dto.to_json_line())
+        task = Tier3Task(
+            jsonl_path="unused", cmf_name=simple_shard.cmf_name,
+            record={k: row.get(k) for k in _SEED_FIELDS}, constant=e.value_sympy,
+            specs=("traj_size", "eigenvalues"), context=None,
+        )
+        with StagePool(workers=1, extra={"cmf_lookup": {simple_shard.cmf_name: simple_shard.cmf}}):
+            out = _tier3_task(task)
+        assert out["trajectory_id"] == row["trajectory_id"] and out["constant"] == e.name
+        assert out["traj_size"] == row.get("traj_size", out["traj_size"])
+        assert "eigenvalues" in out or "eigenvalues_error" in out
+        assert set(out["fingerprints"]) == {"traj_size", "eigenvalues"}
 
     # ------------------------------------------------------------------
     # Writer: handles plain patch dicts
@@ -1695,9 +1656,12 @@ class TestMergeOnRead:
             dir_t = tuple(int(v) for v in traj_p.values())
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
             fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
+            wd = walk_depth_for(simple_shard.cmf, traj_p)
             seen_trajectories[tid] = {
                 c.name: {"trajectory_id": tid, "constant": c.name,
-                         "eigenvalues": "dummy", "config_fingerprint": fp}
+                         "eigenvalues": "dummy", "config_fingerprint": fp,
+                         # per-attribute fingerprint: a value without one is stale
+                         "fingerprints": {"eigenvalues": attribute_fingerprint("eigenvalues", wd)}}
                 for c in simple_shard.consts
             }
 
@@ -1799,9 +1763,9 @@ class TestMergeOnRead:
             assert isinstance(payload, TrajectoryDTO), (
                 f"Expected TrajectoryDTO for a new trajectory, got {type(payload).__name__}"
             )
-            assert traj_matrix is not None, (
-                "New trajectories must ship the trajectory matrix to workers."
-            )
+            # Tier-2 is computed inside the walk task now; the symbolic matrix
+            # is no longer shipped anywhere (it can be a page of math).
+            assert traj_matrix is None
             assert constant is not None, (
                 "Producer must propagate the sympy constant alongside each item."
             )
@@ -1943,9 +1907,11 @@ class TestMergeOnRead:
             dir_t = tuple(int(v) for v in traj_p.values())
             tid = derive_trajectory_id(shard_id, simple_shard.cmf_name, enc_str, start_t, dir_t)
             fp = tier1_config_fingerprint(walk_depth_for(simple_shard.cmf, traj_p))
+            wd = walk_depth_for(simple_shard.cmf, traj_p)
             seen_trajectories[tid] = {
                 c.name: {"trajectory_id": tid, "constant": c.name,
-                         present_attr: "pre-computed", "config_fingerprint": fp}
+                         present_attr: "pre-computed", "config_fingerprint": fp,
+                         "fingerprints": {present_attr: attribute_fingerprint(present_attr, wd)}}
                 for c in simple_shard.consts
             }
 
@@ -1966,9 +1932,11 @@ class TestMergeOnRead:
                 f"Expected patch dict, got {type(payload).__name__}"
             )
             assert "trajectory_id" in payload and "constant" in payload
-            # The flat patch carries only structural keys (workers fill metrics);
-            # the already-present attr must not be in it.
+            # The patch carries only the missing attribute(s) (computed on a
+            # handler seeded with the stored Tier-1 values) — never the
+            # already-present, still-fresh one.
             assert present_attr not in payload
+            assert "spectral_gap" in payload or "spectral_gap_error" in payload
 
 
 # ---------------------------------------------------------------------------
@@ -3403,3 +3371,192 @@ class TestSummaryWriter:
         assert "Start point" in text
         # Row should contain an em-dash for the missing point.
         assert "| — |" in text
+
+
+class TestGcdSlopeDeltaConsistency:
+    """Regression: ``gcd_slope`` must be measured on the **same walk as δ**
+    (``start {n: 0}``), so kamidelta (:meth:`delta_prediction`) tracks the
+    measured δ.
+
+    Before the fix, ``gcd_slope`` delegated to ``ramanujantools.Matrix.gcd_slope``,
+    which walks the reduced-denominator sequence from ``{n: 1}`` — a *different*
+    integer sequence from the ``{n: 0}`` walk that identification / δ live on.  The
+    identified p/q vectors, projected onto the ``{n: 1}`` walk, gave far less gcd
+    cancellation, so the denominator grew ~30 % faster and kamidelta landed far
+    below δ (e.g. δ≈0.26 but kamidelta≈-0.03).
+    """
+
+    def test_delta_prediction_tracks_delta(self):
+        # pFq(2,1,-1) approximates log(2); this trajectory identifies by depth 200.
+        cmf = rt_pFq(2, 1, -1)
+        syms = list(cmf.matrices.keys())
+        start = Position({s: sp.Rational(v) for s, v in zip(syms, (-1, 2, 1))})
+        direction = Position({s: sp.Rational(v) for s, v in zip(syms, (-4, 8, 5))})
+        handler = TrajectoryAttributesHandler.from_cmf(
+            cmf, direction, start, sp.log(2), walk_depth=200, walk_type=1,
+        )
+        delta = handler.delta(200)
+        assert delta > -1, "test trajectory should identify log(2)"
+
+        pred = handler.delta_prediction(200)
+        assert pred is not None
+        kamidelta = float(pred["predicted_delta"])
+        # kamidelta must track δ.  Pre-fix it was ~0.3+ away (a different regime);
+        # post-fix the two agree to well within 0.03.
+        assert abs(kamidelta - delta) < 0.03, (
+            f"kamidelta {kamidelta} should track delta {delta} "
+            f"(gcd_slope must use the same {{n:0}} walk as delta)"
+        )
+
+    def test_gcd_slope_matches_delta_walk_denominator(self):
+        # gcd_slope's reduced-denominator growth must equal the growth of the
+        # denominators δ actually uses (handler._limits), not ramanujantools'
+        # {n:1} walk.  Compare the handler slope to a direct fit over _limits.
+        cmf = rt_pFq(2, 1, -1)
+        syms = list(cmf.matrices.keys())
+        start = Position({s: sp.Rational(v) for s, v in zip(syms, (-1, 2, 1))})
+        direction = Position({s: sp.Rational(v) for s, v in zip(syms, (-4, 8, 5))})
+        handler = TrajectoryAttributesHandler.from_cmf(
+            cmf, direction, start, sp.log(2), walk_depth=200, walk_type=1,
+        )
+        assert handler.delta(200) > -1  # ensure identified / projection selected
+        slope = handler.gcd_slope(200)
+        assert slope is not None
+
+        depths = list(range(150, 200))
+        limits = handler._limits(depths)
+        ys = [float(sp.log(l.as_rational().q).evalf(30)) for l in limits]
+        direct = float(np.polyfit(np.array(depths, dtype=float),
+                                  np.array(ys, dtype=float), 1)[0])
+        # The handler slope is fit over 1..depth; the local late-window fit must
+        # agree closely (log(q̃) is linear), and both are the δ-walk denominator.
+        assert abs(float(slope) - direct) < 0.05 * abs(direct)
+
+
+class TestIdentifyDepthOptimization:
+    """``IDENTIFY_DEPTH``: the (depth-independent) p/q relation is identified once
+    at a cheap fixed depth and reused for the deeper computation.  Must be
+    **result-preserving** — same p/q and δ as identifying at the full walk depth —
+    with a fallback to the full depth when the cheap identification fails."""
+
+    def _handler(self, walk_depth):
+        cmf = rt_pFq(2, 1, -1)  # approximates log(2)
+        syms = list(cmf.matrices.keys())
+        start = Position({s: sp.Rational(v) for s, v in zip(syms, (-1, 2, 1))})
+        direction = Position({s: sp.Rational(v) for s, v in zip(syms, (-4, 8, 5))})
+        return TrajectoryAttributesHandler.from_cmf(
+            cmf, direction, start, sp.log(2), walk_depth=walk_depth, walk_type=1,
+        )
+
+    def test_shallow_identify_matches_full_depth(self, monkeypatch):
+        from dreamer.configs import config
+        D = 300
+        # Baseline: identify at the full walk depth (IDENTIFY_DEPTH above D).
+        monkeypatch.setattr(config.search, "IDENTIFY_DEPTH", 100000)
+        h_full = self._handler(D)
+        pq_full = (h_full.p_vector(), h_full.q_vector())
+        d_full = h_full.delta(D)
+        assert pq_full[0] is not None and d_full > -1
+
+        # Optimised: identify at a shallow depth, reuse for δ at D.
+        monkeypatch.setattr(config.search, "IDENTIFY_DEPTH", 100)
+        h_cheap = self._handler(D)
+        pq_cheap = (h_cheap.p_vector(), h_cheap.q_vector())
+        d_cheap = h_cheap.delta(D)
+
+        assert pq_cheap == pq_full            # identical integer relation
+        assert abs(d_cheap - d_full) < 1e-9   # identical δ
+
+    def test_fallback_when_shallow_identification_fails(self, monkeypatch):
+        from dreamer.configs import config
+        D = 300
+        monkeypatch.setattr(config.search, "IDENTIFY_DEPTH", 100000)
+        h_full = self._handler(D)
+        pq_full = (h_full.p_vector(), h_full.q_vector())
+
+        # A tiny identify depth may fail to identify there; the fallback to the
+        # full walk depth must still recover the same p/q (result-preserving).
+        monkeypatch.setattr(config.search, "IDENTIFY_DEPTH", 3)
+        h = self._handler(D)
+        assert h.delta(D) > -1
+        assert (h.p_vector(), h.q_vector()) == pq_full
+
+
+class TestKamideltaEigenvalueSelection:
+    """kamidelta (``delta_prediction``) selects the dominant/subdominant eigenvalue
+    pair that governs convergence, and its prediction tracks the measured δ.
+
+    The strongest guarantee here (``test_eigenvalue_ratio_matches_observed_convergence``)
+    ties the chosen eigenvalue pair to the *actual* per-step error decay measured
+    from the walk — so the pair is not "some arbitrary two" but the pair that
+    genuinely controls the approximation.
+    """
+
+    @pytest.fixture(scope="class")
+    def handler(self):
+        cmf = rt_pFq(2, 1, -1)  # approximates log(2)
+        syms = list(cmf.matrices.keys())
+        start = Position({s: sp.Rational(v) for s, v in zip(syms, (-1, 2, 1))})
+        direction = Position({s: sp.Rational(v) for s, v in zip(syms, (-4, 8, 5))})
+        h = TrajectoryAttributesHandler.from_cmf(
+            cmf, direction, start, sp.log(2), walk_depth=300, walk_type=1,
+        )
+        assert h.delta(300) > -1  # identifies log(2)
+        return h
+
+    def test_prediction_tracks_delta(self, handler):
+        pred = handler.delta_prediction(300)
+        assert pred is not None
+        assert abs(float(pred["predicted_delta"]) - handler.delta(300)) < 0.03
+
+    def test_chosen_pair_ordered_and_dominant(self, handler):
+        pred = handler.delta_prediction(300)
+        n1, n2 = float(pred["norm_1"]), float(pred["norm_2"])
+        assert n1 > n2 > 0.0                       # |λ₁| strictly above |λ₂|
+        norms = [float(TrajectoryAttributesHandler._eigenvalue_norm(e))
+                 for e in handler.sorted_eigenvalues()]
+        # the dominant of the chosen pair is the largest-magnitude eigenvalue
+        assert abs(n1 - max(norms)) < 1e-6 * max(norms)
+
+    def test_unique_pairs_invariants(self, handler):
+        pairs = handler._unique_eigenvalue_pairs()
+        assert pairs
+        for _l1, _l2, m1, m2 in pairs:
+            assert float(m1) > float(m2) > 0.0     # ordered, non-zero
+        # exactly C(k, 2) ordered pairs over k distinct magnitudes (deduped)
+        mags = {round(float(m), 9) for _a, _b, m, _n in pairs}
+        mags |= {round(float(n), 9) for _a, _b, _m, n in pairs}
+        k = len(mags)
+        assert len(pairs) == k * (k - 1) // 2
+
+    def test_approx_dps_equals_pair_log_ratio(self, handler):
+        # approximated_digits_per_step is log10 of the chosen pair's ratio.
+        pred = handler.delta_prediction(300)
+        expected = float(sp.log(pred["norm_1"] / pred["norm_2"], 10))
+        assert abs(float(handler.approximated_digits_per_step(300)) - expected) < 1e-6
+
+    def test_eigenvalue_ratio_matches_observed_convergence(self, handler):
+        # log10(|λ₁|/|λ₂|) of the chosen pair must equal the ACTUAL per-step error
+        # decay measured from the walk (deeper convergent as the reference limit).
+        depths = [200, 220, 240, 260, 280, 300]
+        rats = [sp.Rational(int(l.as_rational().p), int(l.as_rational().q))
+                for l in handler._limits(depths)]
+        L = rats[-1]
+        ys = [float(sp.log(abs(r - L), 10)) for r in rats[:-1]]
+        observed_decay = -float(np.polyfit(np.array(depths[:-1], dtype=float),
+                                           np.array(ys), 1)[0])
+        eig_dps = float(handler.approximated_digits_per_step(300))
+        assert abs(eig_dps - observed_decay) / observed_decay < 0.01
+
+    def test_selection_is_argmin_over_pairs(self, handler):
+        # delta_prediction returns the pair whose kamidelta prediction is closest
+        # to the measured δ — re-derived independently here (argmin invariant).
+        pred = handler.delta_prediction(300)
+        actual = handler.delta(300)
+        slope = float(handler.gcd_slope(300))
+        best = min(
+            (-1 + float(sp.log(m1 / m2)) / slope
+             for _l1, _l2, m1, m2 in handler._unique_eigenvalue_pairs()),
+            key=lambda p: abs(p - actual),
+        )
+        assert abs(float(pred["predicted_delta"]) - best) < 1e-9

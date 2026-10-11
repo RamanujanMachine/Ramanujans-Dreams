@@ -6,17 +6,18 @@ handler-based pipeline:
 
   Producer (main thread)
     For each unique shard (deduplicated by shard_id across all constants):
-      For each (trajectory, start) pair sampled from the shard:
-        1. Compute ``trajectory_id`` from (cmf_name, encoding, start, direction)
-           — cheap; no symbolic work, no trajectory walk.
-        2. If the id is already in the JSONL and every configured Tier-2
-           attribute is present, skip immediately.
-        3. Otherwise build the handler and push per-constant Tier-1 data.
-
-  push(item) — provided by the generic ``worker_pool`` context manager:
-    * ``TIER2_ATTRIBUTES`` empty (default) → ``push`` is a synchronous
-      writer; the JSONL is written from the main thread, no subprocesses.
-    * ``TIER2_ATTRIBUTES`` non-empty → ``push`` enqueues to a worker pool.
+      For each (trajectory, start) pair sampled from the shard, per searched
+      constant (``attribute_fingerprints`` decide, under ``REUSE_POLICY``):
+        * no valid Tier-1 row → queue Tier-1 **and** the configured Tier-2
+          attributes, computed in one task on one handler (nothing twice);
+        * valid Tier-1 row but some Tier-2 attributes missing/stale → queue
+          only those, on a handler seeded with the stored δ / identified / p,q
+          (no LIReC, no δ recompute);
+        * otherwise fully covered → skip.
+      The queued tasks run on one **stage-wide** process pool
+      (:class:`~dreamer.utils.stage_pool.StagePool`, created once for all
+      shards, every core); results come back in task order and the main
+      process — the single writer — appends rows and patches to the shard file.
 
 Output files:
     ``sys_config.EXPORT_SEARCH_RESULTS / <shard_id>.jsonl``
@@ -42,7 +43,6 @@ from dreamer.extraction.shard import Shard
 from dreamer.utils.constants.constant import Constant
 from dreamer.configs import config
 from dreamer.configs.system import sys_config
-from dreamer.configs.logging import logging_config
 from dreamer.utils.logger import Logger
 from dreamer.utils.storage.attribute_registry import attribute_name
 from dreamer.utils.storage.trajectory_attributes import (
@@ -55,11 +55,18 @@ from dreamer.utils.storage.trajectory_attributes import (
     walk_depth_for,
 )
 from dreamer.utils.multi_processing import (
-    compute_tier2_for_item,
     load_seen_trajectories_for_search,
-    worker_pool,
+    search_worker_budget,
     write_jsonl_line,
 )
+from dreamer.utils.stage_pool import (
+    BufferedJsonlWriter,
+    StagePool,
+    TaskError,
+    Tier1Task,
+    run_tier1_task,
+)
+from dreamer.utils.storage.attribute_fingerprints import stale_attributes, tier1_is_fresh
 
 search_config = config.search
 
@@ -95,7 +102,6 @@ class SearcherModV1(SearcherModScheme):
 
         os.makedirs(sys_config.EXPORT_SEARCH_RESULTS, exist_ok=True)
 
-        num_workers = sys_config.NUM_BACKGROUND_WORKERS
         config_overrides = config.export_configurations()
 
         # Build shard_id → (Shard, Set[Constant_identified]) mapping.
@@ -109,13 +115,20 @@ class SearcherModV1(SearcherModScheme):
                 shard_by_id[shard_id] = shard
                 shard_identified[shard_id].add(const)
 
-        for shard_id, shard in SmartTQDM(
-            shard_by_id.items(),
-            desc='Searching in shards: ',
-            **sys_config.TQDM_CONFIG,
-        ):
-            identified_consts = list(shard_identified[shard_id])
-            self._run_shard(shard, identified_consts, num_workers, config_overrides)
+        # One persistent pool for the whole stage (shards handed to the workers
+        # once), on every core: Tier-1 and Tier-2 both run in its tasks.
+        shard_idx = {sid: i for i, sid in enumerate(shard_by_id)}
+        with StagePool(list(shard_by_id.values()), workers=search_worker_budget()) as pool:
+            for shard_id, shard in SmartTQDM(
+                shard_by_id.items(),
+                desc='Searching in shards: ',
+                **sys_config.TQDM_CONFIG,
+            ):
+                identified_consts = list(shard_identified[shard_id])
+                self._run_shard(
+                    shard, identified_consts, 0, config_overrides,
+                    pool=pool, shard_idx=shard_idx[shard_id],
+                )
 
     # ------------------------------------------------------------------
     # Per-shard pipeline
@@ -127,8 +140,17 @@ class SearcherModV1(SearcherModScheme):
         identified_consts: List[Constant],
         num_workers: int,
         config_overrides: dict,
+        pool: Optional[StagePool] = None,
+        shard_idx: int = 0,
     ) -> None:
-        """Run the search for a single shard using only *identified_consts*."""
+        """Run the search for a single shard using only *identified_consts*.
+
+        :param num_workers: Unused (kept for interface stability; the former
+            separate Tier-2 queue is gone — Tier-2 runs in the pool tasks).
+        :param config_overrides: Unused (the pool propagates the config).
+        :param pool: The stage-wide Tier-1 pool (``None`` → serial in-process).
+        :param shard_idx: This shard's index in *pool*'s shard list.
+        """
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
         Logger(
             f"Starting deep search on shard {shard_id} (cmf={cmf_id})",
@@ -139,22 +161,19 @@ class SearcherModV1(SearcherModScheme):
         )
         seen_trajectories = load_seen_trajectories_for_search(output_path, shard_id)
 
-        with worker_pool(
-            num_workers=num_workers,
-            worker_fn=compute_tier2_for_item,
-            writer_fn=write_jsonl_line,
-            output_path=output_path,
-            config_overrides=config_overrides,
-            parallel=bool(search_config.TIER2_ATTRIBUTES),
-        ) as push:
+        # The main process is the single writer of the shard file.
+        with BufferedJsonlWriter() as writer:
+            out = writer.sink(output_path)
             self._produce(
                 shard=shard,
                 identified_consts=identified_consts,
                 cmf_id=cmf_id,
                 shard_id=shard_id,
                 shard_encoding_str=shard_encoding_str,
-                sink=push,
+                sink=lambda item: write_jsonl_line(item[2], out),
                 seen_trajectories=seen_trajectories,
+                pool=pool,
+                shard_idx=shard_idx,
             )
 
         Logger(
@@ -175,8 +194,15 @@ class SearcherModV1(SearcherModScheme):
         shard_encoding_str: str,
         sink: Callable,
         seen_trajectories: dict,
+        pool: Optional[StagePool] = None,
+        shard_idx: int = 0,
     ) -> None:
         """Iterate over trajectory pairs and hand work to *sink*.
+
+        Classification (cache lookup) runs in the main process; the handler
+        builds / walks of every trajectory that needs work run on *pool* (the
+        stage-wide :class:`StagePool`, in which this shard sits at *shard_idx*).
+        With ``pool=None`` a serial in-process pool over just *shard* is used.
 
         Three cases per trajectory:
 
@@ -200,76 +226,107 @@ class SearcherModV1(SearcherModScheme):
             ).log()
             return
 
-        desired = {attribute_name(s) for s in search_config.TIER2_ATTRIBUTES}
+        tier2_specs = tuple(search_config.TIER2_ATTRIBUTES)
+        tier2_names = [attribute_name(spec) for spec in tier2_specs]
 
-        for traj, start in SmartTQDM(
-            pairs,
-            desc=f"  Shard {shard_id[:8]}… trajectories",
-            leave=False,
-            **sys_config.TQDM_CONFIG,
-        ):
+        # Plan (main process): classify every sampled trajectory against the
+        # cache and queue one task per trajectory that needs work.
+        planned: List[tuple] = []
+        tasks: List[Tier1Task] = []
+        counts = {"reused": 0, "tier2_only": 0, "new": 0}
+        for traj, start in pairs:
             start_t = _position_to_tuple(start)
             dir_t = _position_to_tuple(traj)
             trajectory_id = derive_trajectory_id(
                 shard_id, shard.cmf_name, shard_encoding_str, start_t, dir_t,
             )
-            current_fp = tier1_config_fingerprint(walk_depth_for(shard.cmf, traj))
+            walk_depth = walk_depth_for(shard.cmf, traj)
             bucket = seen_trajectories.get(trajectory_id, {})
 
-            # Classify each searched constant against its cached (traj, const) row:
-            #   'new'      — no fresh row (needs the full Tier-1 DTO), or
-            #   'partial'  — fresh row but missing some Tier-2 attributes (patch), or
-            #   'complete' — fresh row with every desired attribute (skip).
+            # Per searched constant (see attribute_fingerprints / REUSE_POLICY):
+            #   'new'    — no valid Tier-1 row → Tier-1 + Tier-2 in one task;
+            #   'seeded' — valid Tier-1 row, some Tier-2 attrs missing or stale →
+            #              only those, on a handler seeded with the stored values;
+            #   otherwise fully covered → skip.
             new_consts: List[Constant] = []
-            partial_consts: List[Constant] = []
+            seeded: List[tuple] = []
             for c in identified_consts:
                 rec = bucket.get(c.name)
-                if rec is None or rec.get("config_fingerprint") != current_fp:
+                if not tier1_is_fresh(rec, walk_depth):
                     new_consts.append(c)
-                elif desired - set(rec.keys()):
-                    partial_consts.append(c)
-            if not new_consts and not partial_consts:
-                continue  # every constant fully covered
-
-            # Build the (shared) handler once for whichever constants need work.
-            try:
-                with Logger.watchdog(
-                    f"Tier-1 trajectory compute (shard {shard_id})",
-                    logging_config.WATCHDOG_TRAJECTORY_SECONDS,
-                    detail=lambda: f"traj_id={trajectory_id} start={start_t} direction={dir_t}",
-                ):
-                    handler = TrajectoryAttributesHandler.from_cmf(
-                        shard.cmf, traj, start, constant=None, searchable=shard,
-                    )
-                    dtos = build_trajectory_dtos(
-                        handler,
-                        cmf_id=cmf_id,
-                        shard_id=shard_id,
-                        cmf_name=shard.cmf_name,
-                        shard_encoding_str=shard_encoding_str,
-                        start=start,
-                        direction=traj,
-                        constants=new_consts,
-                    ) if new_consts else []
-            except Exception as e:
-                Logger(
-                    f"Handler error — shard {shard_id}, traj={traj}, start={start}: {e}",
-                    Logger.Levels.warning,
-                ).log()
+                    continue
+                stale = set(stale_attributes(rec, tier2_names, walk_depth))
+                if stale:
+                    seeded.append((c, rec, tuple(sp_ for sp_ in tier2_specs if attribute_name(sp_) in stale)))
+            if not new_consts and not seeded:
+                counts["reused"] += 1
                 continue
+            counts["new" if new_consts else "tier2_only"] += 1
+            planned.append((trajectory_id, new_consts, seeded))
+            tasks.append(Tier1Task(
+                key=trajectory_id, shard_idx=shard_idx, trajectory=traj, start=start,
+                constants=tuple(new_consts), cmf_id=cmf_id, shard_id=shard_id,
+                shard_encoding_str=shard_encoding_str,
+                extra_metrics=tier2_specs, seeded=tuple(seeded),
+            ))
 
-            # New constants — emit the full flat DTO (Tier-2 filled by the worker).
-            for c, dto in zip(new_consts, dtos):
-                sink((handler.trajectory_matrix, c.value_sympy, dto))
-                seen_trajectories.setdefault(trajectory_id, {})[c.name] = (
-                    json.loads(dto.to_json_line())
-                )
-            # Partial constants — emit a patch; the worker fills missing Tier-2.
-            # Carry the direction / start so the worker can compute
-            # direction-normalised attributes (e.g. convergence_rate).
-            for c in partial_consts:
-                patch = {
-                    "trajectory_id": trajectory_id, "constant": c.name,
-                    "direction": dir_t, "start_point": start_t,
-                }
-                sink((handler.trajectory_matrix, c.value_sympy, patch))
+        Logger(
+            f"Shard {shard_id[:24]}…: {len(pairs)} trajectories → "
+            f"{counts['reused']} reused · {counts['tier2_only']} Tier-2 only · {counts['new']} new",
+            Logger.Levels.info,
+        ).log()
+        if not tasks:
+            return
+
+        # Compute on the stage pool; results arrive in task order and the main
+        # process forwards them to the sink (rows first, then patches).
+        own_pool = None
+        if pool is None:
+            own_pool = StagePool([shard], workers=1)
+            pool = own_pool.__enter__()
+        try:
+            results = pool.imap(_search_walk_task, tasks)
+            for (trajectory_id, new_consts, seeded), task, res in zip(
+                planned,
+                tasks,
+                SmartTQDM(
+                    results,
+                    total=len(tasks),
+                    desc=f"  Shard {shard_id[:8]}… trajectories",
+                    leave=False,
+                    **sys_config.TQDM_CONFIG,
+                ),
+            ):
+                if isinstance(res, TaskError):
+                    Logger(
+                        f"Handler error — shard {shard_id}, traj={task.trajectory}, "
+                        f"start={task.start}: {res.message}",
+                        Logger.Levels.warning,
+                    ).log()
+                    continue
+                bucket = seen_trajectories.setdefault(trajectory_id, {})
+                for c, dto in zip(new_consts, res.dtos):
+                    sink((None, c.value_sympy, dto))
+                    bucket[c.name] = json.loads(dto.to_json_line())
+                for (c, _rec, _specs), patch in zip(seeded, res.patches):
+                    sink((None, c.value_sympy, patch))
+                    merged = bucket.setdefault(c.name, {})
+                    fps = {**merged.get("fingerprints", {}), **patch.get("fingerprints", {})}
+                    merged.update(patch)
+                    merged["fingerprints"] = fps
+        finally:
+            if own_pool is not None:
+                own_pool.__exit__(None, None, None)
+
+def _search_walk_task(task: Tier1Task):
+    """Stage-pool task: handler + new-constant Tier-1 DTOs for one trajectory.
+
+    Module-level (picklable); uses this module's ``TrajectoryAttributesHandler``
+    and ``build_trajectory_dtos`` names, resolved at call time.
+    """
+    return run_tier1_task(
+        task,
+        handler_cls=TrajectoryAttributesHandler,
+        build_dtos=build_trajectory_dtos,
+    )
+

@@ -1,0 +1,3 @@
+scenario,d_orig,d_flat,yield,time_s,accept_rate,unit_pca_pc1,unit_pca_effdim90,gram_logdet,norm_min,norm_mean,norm_median,norm_max,slack_min,slack_mean,slack_median,nn_angle_min_deg,nn_angle_mean_deg,nn_angle_median_deg
+7D_Real_World_Degenerate,7,7,1905,4.96,0.90362,0.388,5,72.617,4.69,17.3,14.9,50.46,1.0,6.6671,5.0,1.03,3.56,3.36
+10D_Fat_Baseline,10,7,279,0.86,0.60253,0.569,4,-inf,59.77,157.27,114.04,769.79,-0.0,176.7445,43.5,0.7,5.65,5.2

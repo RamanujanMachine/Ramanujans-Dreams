@@ -100,17 +100,57 @@ class SystemConfig(Configurable):
         metadata={
             "description": (
                 "Total CPU cores the pipeline may use. None resolves to "
-                "os.cpu_count() at runtime. Single source of truth for the core "
-                "budget: when Tier-2 is active, NUM_BACKGROUND_WORKERS + 1 (writer) "
-                "cores are reserved for the Tier-2 queue + sink and the rest go to "
-                "the search/eval pools; when Tier-2 is inactive, all cores go to "
-                "search/analysis. See dreamer.utils.multi_processing.search_worker_budget."
+                "os.cpu_count() at runtime. Single source of truth for every "
+                "process pool (stage pools, eval pools, extraction); nothing is "
+                "reserved. See dreamer.utils.multi_processing.search_worker_budget."
             )
         },
     )
-    NUM_BACKGROUND_WORKERS: int = field(
-        default=4,
-        metadata={"description": "Number of background worker processes that compute Tier-2 trajectory attributes during search. When Tier-2 is active these (plus 1 writer/sink) are the cores reserved from TOTAL_CORES."},
+    REUSE_POLICY: str = field(
+        default="strict",
+        metadata={
+            "description": (
+                "How stored trajectory attributes are reused across runs. 'strict' "
+                "(default): reuse a stored value only while its per-attribute "
+                "fingerprint (the knobs it depends on, its dependencies, its code "
+                "version) matches the current config — exactly the affected "
+                "attributes are recomputed. 'keep': reuse any stored value, ignoring "
+                "fingerprints (fast exploratory reruns; values may be stale). "
+                "'recompute': ignore stored values."
+            )
+        },
+    )
+    RUN_ID: Optional[str] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Identifier of the current pipeline run (set automatically by "
+                "System.run). Used by REUSE_POLICY='recompute' to tell this run's "
+                "rows from earlier ones. Not meant to be set by hand."
+            )
+        },
+    )
+    STAGE_POOL_WORKERS: Optional[int] = field(
+        default=None,
+        metadata={
+            "description": (
+                "Worker cap for the per-stage trajectory pools (analysis, hedgehog "
+                "search, Tier-3 post-process). None/0 = use the full core budget; a "
+                "positive value caps at min(value, budget). A resolved count <= 1 "
+                "runs every task serially in the main process (no subprocess)."
+            )
+        },
+    )
+    STAGE_POOL_CHUNKSIZE: int = field(
+        default=1,
+        metadata={
+            "description": (
+                "Tasks handed to a stage-pool worker at a time (analysis, hedgehog "
+                "search, Tier-3 post-process). 1 gives full dynamic load balancing: "
+                "an idle worker pulls the next trajectory immediately. Raise it only "
+                "when single tasks are so cheap that dispatch overhead dominates."
+            )
+        },
     )
     WRITER_BATCH_SIZE: int = field(
         default=50,

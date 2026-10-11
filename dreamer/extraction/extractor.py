@@ -15,6 +15,7 @@ from dreamer.utils.storage.atlas_writer import (
 )
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.configs import config
+from dreamer.utils.rand import derive_seed
 from dreamer.utils.types import CMFData
 from .utils import initial_points as init_points
 from .v2 import ExtractionManager, LrslibExtractor, RayShootingExtractor
@@ -522,6 +523,13 @@ class ShardExtractor(ExtractionScheme):
             heuristic_face_aligned=config.extraction.HEURISTIC_FACE_ALIGNED,
             heuristic_face_subsets=config.extraction.HEURISTIC_FACE_SUBSETS,
             heuristic_face_offsets=config.extraction.HEURISTIC_FACE_OFFSETS,
+            heuristic_workers=config.extraction.HEURISTIC_WORKERS,
+            heuristic_parallel_after_seconds=config.extraction.HEURISTIC_PARALLEL_AFTER_SECONDS,
+            # Reproducible per-CMF seed from GLOBAL_SEED (None => nondeterministic).
+            heuristic_seed=(
+                derive_seed("heuristic-extraction", self.cmf_data.cmf_name)
+                if config.search.GLOBAL_SEED is not None else None
+            ),
             symmetry=symmetry,
         )
         mapping = manager.extract(shifted_hps)

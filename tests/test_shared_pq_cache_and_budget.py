@@ -8,7 +8,7 @@ Tests for the two large-machine efficiency features:
    ``shared_log=None`` path is unchanged.
 
 2. **Single global core budget** —
-   :func:`dreamer.utils.multi_processing.search_worker_budget` reserves Tier-2
+   :func:`dreamer.utils.multi_processing.search_worker_budget` (whole machine; it used to reserve Tier-2
    cores only when Tier-2 is active, and
    :func:`dreamer.search.methods.flatland.parallel_eval.resolve_eval_workers`
    treats the per-method knobs as optional caps against that budget.
@@ -100,16 +100,16 @@ class TestSearchWorkerBudget:
         monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ())
         assert mpc.search_worker_budget() == 10
 
-    def test_tier2_active_reserves_workers_plus_writer(self, monkeypatch):
+    def test_tier2_active_reserves_nothing(self, monkeypatch):
+        """Tier-2 runs inside the walk tasks (no separate background queue since
+        2026-10-10), so an active Tier-2 list no longer reserves cores."""
         monkeypatch.setattr(mpc.sys_config, "TOTAL_CORES", 10)
-        monkeypatch.setattr(mpc.sys_config, "NUM_BACKGROUND_WORKERS", 4)
         monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ("eigenvalues",))
-        assert mpc.search_worker_budget() == 10 - (4 + 1)
+        assert mpc.search_worker_budget() == 10
 
     def test_budget_floored_at_one(self, monkeypatch):
-        monkeypatch.setattr(mpc.sys_config, "TOTAL_CORES", 2)
-        monkeypatch.setattr(mpc.sys_config, "NUM_BACKGROUND_WORKERS", 8)
-        monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ("eigenvalues",))
+        monkeypatch.setattr(mpc.sys_config, "TOTAL_CORES", 0)
+        monkeypatch.setattr(mpc.os, "cpu_count", lambda: None)
         assert mpc.search_worker_budget() == 1
 
     def test_none_total_falls_back_to_cpu_count(self, monkeypatch):

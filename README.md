@@ -20,6 +20,10 @@ If you are a Windows user, it is recommended to use [Windows Subsystem for Linux
     ```bash
     pip install git+https://github.com/UriKH/RamanujansDreams.git
     ```
+* _Possible Issues:_
+  * For Mac-OS users you might get an error trying to install `psycopg` or `psycopg2`.  
+    To solve this, if you are using a conda environment, please try: `conda install conda-forge::psycopg2`  
+    Then run the installation command again.
 
 **Note:** If you are developing using an IDE the output might look a bit off due to terminal default configurations.  
 If you are a PyCharm user, an easy fix is:
@@ -73,7 +77,7 @@ Interaction with the system is via the System class (`from dreamer import System
 [//]: # (**Note:** each module could be executed independently of the others. In its current version, the system only wraps the modules together and connects them. )
 
 ### Configuration
-Configuration management is done using distinct configuration **categories**, all accessed via a single global configuration manager. Each category is a flat group of named settings; changing a setting never requires importing the category object directly.
+Configuration management is done using distinct configuration **catego ries**, all accessed via a single global configuration manager. Each category is a flat group of named settings; changing a setting never requires importing the category object directly.
 
 ```python
 from dreamer import config

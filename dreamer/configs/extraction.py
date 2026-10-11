@@ -137,12 +137,35 @@ class ExtractionConfig(Configurable):
         },
     )
     HEURISTIC_REFINE_WORKERS: int = field(
-        default=1,
+        default=0,
         metadata={
             "description": (
                 "Process count for the heuristic's MILP witness refinement "
-                "(the per-shard MILPs are independent).  >1 dispatches them "
-                "across processes; 1 (default) runs serially."
+                "(the per-shard MILPs are independent; only used when "
+                "HEURISTIC_REFINE_WITNESSES is on and >= 200 cells need it). "
+                "0 (default) = all cores (TOTAL_CORES / os.cpu_count()); 1 = serial. "
+                "Results are identical for any value."
+            )
+        },
+    )
+    HEURISTIC_WORKERS: int = field(
+        default=0,
+        metadata={
+            "description": (
+                "Process count for the heuristic ray-shooting phases. 0 (default) = "
+                "all cores; 1 = in-process. Every ray batch / face subset draws "
+                "from its own seeded stream and results merge in order, so the "
+                "found shards and witnesses are identical for any value."
+            )
+        },
+    )
+    HEURISTIC_PARALLEL_AFTER_SECONDS: float = field(
+        default=3.0,
+        metadata={
+            "description": (
+                "Start the heuristic's worker pool only after the shoot has run "
+                "this many seconds in-process, so small arrangements finish "
+                "without paying the pool start-up. Does not change results."
             )
         },
     )

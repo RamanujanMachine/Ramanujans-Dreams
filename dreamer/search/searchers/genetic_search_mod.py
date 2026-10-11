@@ -27,7 +27,7 @@ from dreamer.search.searchers.micro_climb_finalize import finalize_best_trajecto
 from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 from dreamer.utils.ui.tqdm_config import SmartTQDM
 from dreamer.utils.multi_processing import (
-    compute_tier2_for_item,
+    sink_item_dto,
     load_seen_trajectories_for_search,
     worker_pool,
     write_jsonl_line,
@@ -61,7 +61,7 @@ class GeneticSearchModV2(SearcherModScheme):
 
         os.makedirs(sys_config.EXPORT_SEARCH_RESULTS, exist_ok=True)
 
-        num_workers = sys_config.NUM_BACKGROUND_WORKERS
+        num_workers = 0  # direct-write sink (no background Tier-2 queue)
         config_overrides = config.export_configurations()
 
         shard_identified: Dict[str, Set[Constant]] = defaultdict(set)
@@ -120,11 +120,11 @@ class GeneticSearchModV2(SearcherModScheme):
                 detail=lambda: f"shard={shard_id} cmf={cmf_id}",
             ), worker_pool(
                 num_workers=num_workers,
-                worker_fn=compute_tier2_for_item,
+                worker_fn=sink_item_dto,
                 writer_fn=write_jsonl_line,
                 output_path=output_path,
                 config_overrides=config_overrides,
-                parallel=bool(search_config.TIER2_ATTRIBUTES),
+                parallel=False,  # direct write: Tier-2 is computed in the walk task
             ) as push:
                 for const in identified_consts:
                     method = GeneticSearch(shard, const, use_LIReC=self.use_LIReC)

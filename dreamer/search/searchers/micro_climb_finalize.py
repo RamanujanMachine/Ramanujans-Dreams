@@ -55,7 +55,7 @@ from dreamer.utils.storage.optimization_objectives import score_record
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.multi_processing import (
-    compute_tier2_for_item,
+    sink_item_dto,
     load_seen_trajectories,
     worker_pool,
     write_jsonl_line,
@@ -169,11 +169,11 @@ def finalize_best_trajectories(
 
     with worker_pool(
         num_workers=num_workers,
-        worker_fn=compute_tier2_for_item,
+        worker_fn=sink_item_dto,
         writer_fn=write_jsonl_line,
         output_path=output_path,
         config_overrides=config_overrides,
-        parallel=bool(cfg.TIER2_ATTRIBUTES),
+        parallel=False,  # direct write: Tier-2 is computed in the walk task
     ) as push:
         for const in identified_consts:
             max_delta, best_recs = _best_records_for_constant(
