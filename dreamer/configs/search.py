@@ -132,12 +132,12 @@ class SearchConfig(Configurable):
     # Misspelled entries raise KeyError loudly.
     #
     # Tier model:
-    #   Tier-1 — core DTO fields (delta, identified, limit, order, recurrence_relation,
-    #            p/q vectors).  Always computed in the main thread.
-    #   Tier-2 — async extras computed in background worker processes during search.
-    #            Default is empty so a vanilla run does no extra work beyond Tier-1.
-    #   Tier-3 — expensive post-process attributes (asymptotics, kamidelta).  Not
-    #            yet implemented; will run as a separate pipeline pass.
+    #   Tier-1 — core DTO fields (delta, identified, p/q vectors, projection column).
+    #            Computed by analysis and search for every new trajectory.
+    #   Tier-2 — extras computed during search, in the same pool task as the
+    #            trajectory's Tier-1 (or from its stored row when Tier-1 is reused).
+    #   Tier-3 — expensive attributes computed by the post-process stage for the
+    #            trajectories its predicates select (post_process.TIER3_ATTRIBUTES).
     TIER2_ATTRIBUTES: Tuple[str, ...] = field(
         default=(
             ("eigenvalues", "if_identified"), ("eigenvalue_errors", "if_identified"), ("spectral_gap", "if_identified"),

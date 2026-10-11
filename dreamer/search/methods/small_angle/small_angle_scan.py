@@ -127,6 +127,7 @@ class SmallAngleSearch(SearchMethod):
         start=None,
         pool=None,
         initial_trajectory: Optional[Position] = None,
+        stats=None,
     ) -> None:
         """Run the hill-climb for a single constant, emitting DTOs to *sink*.
 
@@ -150,6 +151,9 @@ class SmallAngleSearch(SearchMethod):
             falls back to reservoir seeding (see :func:`resolve_injected_seed`).
 
         :raises NoInitialIdentification: if no reservoir seed identifies *constant*.
+        :param stats: Optional :class:`~dreamer.search.methods.flatland.evaluator.EvalStats`
+            counting how evaluations were served (reused / revisited / new …);
+            the calling module logs its summary.
         """
         if handler_cache is None:
             handler_cache = make_handler_cache()
@@ -171,6 +175,7 @@ class SmallAngleSearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
+            stats=stats,
         )
 
         if initial_trajectory is None:
@@ -285,6 +290,7 @@ class SmallAngleSearch(SearchMethod):
         sink: Callable,
         seen_trajectories: dict,
         handler_cache: Dict[str, "TrajectoryAttributesHandler"],
+        stats=None,
     ) -> Tuple[float, bool]:
         """Compute δ/identified for *constant* and direction *z*, emitting a DTO.
 
@@ -303,4 +309,5 @@ class SmallAngleSearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
+            stats=stats,
         )

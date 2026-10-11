@@ -12,6 +12,7 @@ import os
 from collections import defaultdict
 from typing import Dict, List, Set
 
+from dreamer.search.methods.flatland.evaluator import EvalStats, log_eval_stats
 from dreamer.configs import config
 from dreamer.utils.lru import make_handler_cache
 from dreamer.configs.system import sys_config
@@ -62,7 +63,7 @@ class GeneticSearchModV2(SearcherModScheme):
 
         os.makedirs(sys_config.EXPORT_SEARCH_RESULTS, exist_ok=True)
 
-        num_workers = 0  # direct-write sink (no background Tier-2 queue)
+        num_workers = 0  # the result writer writes directly (no writer processes)
         config_overrides = config.export_configurations()
 
         shard_identified: Dict[str, Set[Constant]] = defaultdict(set)
@@ -129,6 +130,7 @@ class GeneticSearchModV2(SearcherModScheme):
             ) as push:
                 for const in identified_consts:
                     method = GeneticSearch(shard, const, use_LIReC=self.use_LIReC)
+                    stats = EvalStats(seen_trajectories, const.name)
                     try:
                         method.run(
                             constant=const,
@@ -138,6 +140,7 @@ class GeneticSearchModV2(SearcherModScheme):
                             sink=push,
                             seen_trajectories=seen_trajectories,
                             handler_cache=handler_cache,
+                            stats=stats,
                             geom=geom,
                             start=start,
                             pool=eval_pool,
@@ -145,9 +148,11 @@ class GeneticSearchModV2(SearcherModScheme):
                     except NoInitialPopulation as e:
                         Logger(str(e), Logger.Levels.warning).log()
                         continue
+                    finally:
+                        log_eval_stats("Genetic Algorithm", shard_id, const.name, stats)
 
             # Assurance endgame on the best-δ trajectory(ies): no-op unless
-            # ENABLE_MICRO_HILL_CLIMB.  Runs after the search pool has flushed the
+            # ENABLE_MICRO_HILL_CLIMB.  Runs after the result writer has flushed the
             # JSONL, while geom / start / eval_pool are still alive.
             finalize_best_trajectories(
                 shard=shard,

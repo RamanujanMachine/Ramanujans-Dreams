@@ -11,7 +11,7 @@ emits the flat per-``(trajectory, constant)`` :class:`TrajectoryDTO` to a
 
 import json
 import time
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
@@ -81,6 +81,89 @@ def flatland_trajectory_key(
     return direction, trajectory_id, current_fp
 
 
+class EvalStats:
+    """How a search method's evaluations of one ``(shard, constant)`` were served.
+
+    Every evaluation of a direction lands in exactly one bucket:
+
+    * ``reused`` — a fresh stored row from an **earlier run** (or the analysis
+      stage) already carries the objective: scored without a walk;
+    * ``revisited`` — the row was computed **earlier in this run** (the method
+      came back to the same ray, or two directions in one batch share a ray);
+    * ``cached_walk`` — no row for this constant yet, but the trajectory's walk
+      is still in the handler cache (another constant walked it): only this
+      constant's values are computed;
+    * ``new`` — a new walk (``stale`` of them replace a stored row whose
+      fingerprint no longer matches the configuration);
+    * ``failed`` — the walk or its evaluation raised;
+    * ``outside`` — the direction left the cone (never walked).
+
+    :param seen_trajectories: The method's ``{trajectory_id: {constant: record}}``
+        cache **as loaded from the store**, before the method runs — rows present
+        now count as ``reused`` later, rows added during the run as ``revisited``.
+    :param constant_name: The constant being searched.
+    """
+
+    _FIELDS = ("reused", "revisited", "cached_walk", "new", "stale", "failed", "outside")
+
+    def __init__(self, seen_trajectories: dict, constant_name: str):
+        self._stored = {tid for tid, by_const in seen_trajectories.items() if constant_name in by_const}
+        self.counts = dict.fromkeys(self._FIELDS, 0)
+
+    def scored(self, trajectory_id: str) -> None:
+        """A fresh row answered the evaluation (no walk)."""
+        self.counts["reused" if trajectory_id in self._stored else "revisited"] += 1
+
+    def walked(self, trajectory_id: str, *, cached_walk: bool, ok: bool) -> None:
+        """A walk (new, or on a cached handler) was evaluated."""
+        if not ok:
+            self.counts["failed"] += 1
+        elif cached_walk:
+            self.counts["cached_walk"] += 1
+        else:
+            self.counts["new"] += 1
+            if trajectory_id in self._stored:
+                self.counts["stale"] += 1
+
+    def add(self, field: str, n: int = 1) -> None:
+        """Count *n* evaluations in *field* (``revisited`` / ``failed`` / ``outside``)."""
+        self.counts[field] += n
+
+    @property
+    def total(self) -> int:
+        """Number of evaluations counted (``stale`` is a subset of ``new``)."""
+        return sum(v for k, v in self.counts.items() if k != "stale")
+
+    def summary(self) -> str:
+        """One line: ``N evaluations → a reused · b revisited · … · f new``."""
+        c = self.counts
+        parts = [f"{c['reused']} reused", f"{c['revisited']} revisited"]
+        if c["cached_walk"]:
+            parts.append(f"{c['cached_walk']} on a cached walk")
+        parts.append(f"{c['new']} new" + (f" ({c['stale']} replacing stale rows)" if c["stale"] else ""))
+        if c["failed"]:
+            parts.append(f"{c['failed']} failed")
+        if c["outside"]:
+            parts.append(f"{c['outside']} outside the cone")
+        return f"{self.total} evaluations → " + " · ".join(parts)
+
+
+def log_eval_stats(method: str, shard_id: str, constant_name: str, stats: "EvalStats") -> None:
+    """Log the per-``(shard, constant)`` reuse summary of a search method.
+
+    Same vocabulary as the analysis / hedgehog plan lines (``reused`` · ``new``).
+
+    :param method: Human-readable method name (e.g. ``"Simulated Annealing"``).
+    :param shard_id: The shard searched.
+    :param constant_name: The constant searched.
+    :param stats: The counts collected during the run.
+    """
+    Logger(
+        f"{method} — shard {shard_id[:24]}…, {constant_name}: {stats.summary()}",
+        Logger.Levels.info,
+    ).log()
+
+
 def evaluate_in_flatland(
     z,
     *,
@@ -94,6 +177,7 @@ def evaluate_in_flatland(
     sink: Callable,
     seen_trajectories: dict,
     handler_cache: Dict[str, "TrajectoryAttributesHandler"],
+    stats: Optional[EvalStats] = None,
 ) -> Tuple[float, bool]:
     """Compute the objective score / identified for *constant* at flatland *z*.
 
@@ -131,6 +215,8 @@ def evaluate_in_flatland(
     if tier1_record_fresh(seen_record, current_fp):
         cached = score_record(seen_record, objective_name)
         if cached is not None:
+            if stats is not None:
+                stats.scored(trajectory_id)
             return cached
 
     # --- Compute (reusing the cached handler when available) ---
@@ -161,11 +247,17 @@ def evaluate_in_flatland(
             f"direction={direction}, constant={constant.name}: {exc}",
             Logger.Levels.warning,
         ).log()
+        if stats is not None:
+            stats.walked(trajectory_id, cached_walk=cached_handler is not None, ok=False)
         return float("-inf"), False
 
     if not dtos:
+        if stats is not None:
+            stats.walked(trajectory_id, cached_walk=cached_handler is not None, ok=False)
         return float("-inf"), False
     dto = dtos[0]
+    if stats is not None:
+        stats.walked(trajectory_id, cached_walk=cached_handler is not None, ok=True)
 
     sink((None, constant.value_sympy, dto))
     # Keep the handler's computed values, not its walk products (megabytes per

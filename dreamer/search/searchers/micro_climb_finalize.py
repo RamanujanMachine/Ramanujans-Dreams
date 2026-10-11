@@ -43,6 +43,7 @@ from __future__ import annotations
 import math
 from typing import List, Set, Tuple
 
+from dreamer.search.methods.flatland.evaluator import EvalStats, log_eval_stats
 from dreamer.configs import config
 from dreamer.utils.lru import make_handler_cache
 from dreamer.search.methods.flatland.discrete_local_max import (
@@ -111,8 +112,8 @@ def _best_records_for_constant(
     max_score = max(s for s, _ in candidates)
     threshold = round(max_score, _TIE_DECIMALS)
     best = [rec for s, rec in candidates if round(s, _TIE_DECIMALS) == threshold]
-    # Return in a deterministic order: the JSONL append order is nondeterministic
-    # (parallel Tier-2 workers write on completion), so sorting by the stable
+    # Return in a deterministic order: the JSONL append order depends on which
+    # pool task finishes first, so sorting by the stable
     # trajectory_id makes the finalization's per-tie climb sequence reproducible.
     best.sort(key=lambda r: r.get("trajectory_id", ""))
     return max_score, best
@@ -194,6 +195,7 @@ def finalize_best_trajectories(
                 Logger.Levels.info,
             ).log()
 
+            stats = EvalStats(seen, const.name)
             eval_ctx = dict(
                 geom=geom,
                 shard=shard,
@@ -205,6 +207,7 @@ def finalize_best_trajectories(
                 sink=push,
                 seen_trajectories=seen,
                 handler_cache=handler_cache,
+                stats=stats,
             )
 
             # Baseline walk-cache size for this constant, so the log below can report
@@ -254,6 +257,7 @@ def finalize_best_trajectories(
             ]
             climbed = len(anchors)
             if climbed == 0:
+                log_eval_stats("Micro-climb", shard_id, const.name, stats)
                 continue
 
             refined = parallel_micro_climb(
@@ -278,3 +282,4 @@ def finalize_best_trajectories(
                     f"({climbed} tied trajectory(ies) certified, {new_walks} new trajectories walked).",
                     Logger.Levels.debug,
                 ).log()
+            log_eval_stats("Micro-climb", shard_id, const.name, stats)

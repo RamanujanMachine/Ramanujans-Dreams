@@ -267,7 +267,7 @@ def test_genetic_search_uses_parallel_pool_when_enabled(monkeypatch):
             return _DummyIterator([func(task) for task in tasks])
 
     @contextmanager
-    def _dummy_pool_context():
+    def _dummy_pool_context(*args, **kwargs):
         called["pool_used"] = True
         yield _DummyPool()
 

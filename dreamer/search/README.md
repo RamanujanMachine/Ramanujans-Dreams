@@ -53,6 +53,39 @@ endgame, `config.search.ENABLE_MICRO_HILL_CLIMB`) that certifies the reported
 best trajectory is a true lattice local maximum. They are reproducible from
 `config.search.GLOBAL_SEED`.
 
+### Process pools: stage pool vs eval pool
+
+Every process pool in the package is a `ResilientPool` (a dead worker does not
+hang the run; worker counts follow cores and memory). Two kinds do the
+trajectory work, and they differ in **what one task is** and **who waits for it**:
+
+| | **Stage pool** (`StagePool`) | **Eval pool** (`make_eval_pool`) |
+|---|---|---|
+| Used by | analysis, the hedgehog searcher, Tier-3 post-process | the five optimisers above and the micro-climb |
+| Lifetime | one per stage, for **all** shards | one per shard, for all constants of that shard |
+| Workers hold | every CMF (each task carries a light copy of its shard) | this shard and its start point |
+| One task | one trajectory (Tier-1 rows + Tier-2/3 for its constants) | one candidate direction of an optimiser step |
+| Scheduling | the whole stage's trajectories stream through it | a batch per step; the optimiser waits for the batch (SA may pre-walk the next step) |
+
+The writer that appends rows to `<shard_id>.jsonl` always runs in the main
+process (`BufferedJsonlWriter` for stage pools, the direct `worker_pool(...,
+parallel=False)` sink for optimisers).
+
+### Reuse counts
+
+Every searcher logs, per shard (and per constant for the optimisers), how its
+trajectories were served — the same vocabulary as analysis:
+
+```
+Shard pFq_2_1_…: 120 trajectories → 80 reused · 10 Tier-2 only · 30 new
+Simulated Annealing — shard pFq_2_1_…, log-2: 412 evaluations → 150 reused · 190 revisited · 72 new
+```
+
+`reused` = served from a stored row of an earlier run; `revisited` = computed
+earlier in this run (an optimiser came back to the same ray); `new` = walked now
+(`replacing stale rows` when a stored row's configuration fingerprint no longer
+matches); also `on a cached walk`, `failed`, `outside the cone` when non-zero.
+
 ### Attribute tiers
 
 - **Tier-1** — always computed (δ, identified, limit, recurrence, p/q).

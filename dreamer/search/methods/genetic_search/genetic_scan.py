@@ -165,6 +165,7 @@ class GeneticSearch(SearchMethod):
         start=None,
         pool=None,
         initial_trajectory: Optional[Position] = None,
+        stats=None,
     ) -> None:
         """Run the GA for a single constant, emitting DTOs to *sink*.
 
@@ -188,6 +189,9 @@ class GeneticSearch(SearchMethod):
             direction) it is seeded into the initial population (the rest sampled as
             usual); an invalid one is ignored (see :func:`resolve_injected_seed`).
         :raises NoInitialPopulation: if no in-cone seed genome can be built.
+        :param stats: Optional :class:`~dreamer.search.methods.flatland.evaluator.EvalStats`
+            counting how evaluations were served (reused / revisited / new …);
+            the calling module logs its summary.
         """
         if handler_cache is None:
             handler_cache = make_handler_cache()
@@ -215,6 +219,7 @@ class GeneticSearch(SearchMethod):
             sink=sink,
             seen_trajectories=seen_trajectories,
             handler_cache=handler_cache,
+            stats=stats,
         )
 
         # Resolve GA schedule (callable or int).

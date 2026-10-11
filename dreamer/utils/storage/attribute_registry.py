@@ -5,8 +5,8 @@ A dictionary maps an attribute name (the public, config-facing string) to a
 function that, given a fully constructed ``TrajectoryAttributesHandler``,
 returns a JSON-serialisable value.
 
-The pipeline stages — analysis, search-stage producer, and search-stage
-background workers — read their own ordered list of attribute *specs* from
+The pipeline stages — analysis (Tier-1), search (Tier-2, in the same task as
+Tier-1) and post-process (Tier-3) — read their own ordered list of attribute *specs* from
 config and call ``compute_attributes(handler, specs)``.  Each spec is either
 a bare attribute name (always compute) or a ``(name, predicate)`` tuple where
 ``predicate`` is either a callable on the handler or a string key into

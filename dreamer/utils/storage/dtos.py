@@ -9,10 +9,10 @@ Design rules:
   - All fields are JSON-serializable primitives or collections of primitives.
   - Tuple-typed fields are serialized as JSON arrays; ``from_dict`` converts them
     back to tuples so round-trips are lossless.
-  - ``extended_metrics`` on TrajectoryDTO is an intentionally open dict for
-    asynchronous workers to populate without schema changes.
+  - ``extended_metrics`` on TrajectoryDTO is an intentionally open dict, so
+    Tier-2/3 attributes can be added without schema changes.
   - ``frozen=True`` prevents accidental field reassignment; mutable dict fields
-    (``extended_metrics``) can still be updated in place by background workers.
+    (``extended_metrics``) can still be filled in place by the attribute code.
 """
 
 import json
@@ -139,7 +139,7 @@ class TrajectoryDTO:
 
     Composite key: ``(trajectory_id, constant)``.  ``trajectory_id`` is
     constant-independent (identifies the walk) and is shared across a trajectory's
-    per-constant rows.  ``extra`` is mutable so background workers can add metrics
+    per-constant rows.  ``extra`` is mutable so Tier-2/3 metrics can be added
     to a frozen DTO without breaking the frozen contract.
     """
     trajectory_id: str

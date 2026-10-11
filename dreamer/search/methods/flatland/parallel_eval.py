@@ -69,7 +69,7 @@ def resolve_eval_workers(cap: Optional[int]) -> int:
     (:func:`dreamer.utils.multi_processing.search_worker_budget`), while a
     positive value caps the worker count at ``min(cap, budget)``.  This is what
     lets the eval pools scale to a large machine without per-method tuning while
-    still honouring the cores reserved for the Tier-2 queue + sink.
+    still letting a method cap its own pool.
 
     :param cap: The configured per-method worker cap (knob value).
     :return: Effective worker count (>= 1).
@@ -81,7 +81,7 @@ def resolve_eval_workers(cap: Optional[int]) -> int:
 
 
 def make_eval_pool(shard, start, workers: int) -> Optional[Pool]:
-    """Create a persistent per-shard evaluation pool, or ``None`` if disabled.
+    """Create a shard's **eval pool**, or ``None`` if disabled.
 
     :param shard: The shard being searched (handed to workers once).
     :param start: Interior start :class:`Position`.
@@ -293,6 +293,8 @@ def evaluate_batch(
         for z in z_list:
             if valid_fn is not None and not valid_fn(z):
                 out.append((float("-inf"), False))
+                if eval_ctx.get("stats") is not None:
+                    eval_ctx["stats"].add("outside")
             else:
                 out.append(evaluate_in_flatland(z, **eval_ctx))
         return out
@@ -308,6 +310,7 @@ def evaluate_batch(
     cmf_id: str = eval_ctx["cmf_id"]
     shard_id: str = eval_ctx["shard_id"]
     shard_encoding_str: str = eval_ctx["shard_encoding_str"]
+    stats = eval_ctx.get("stats")
     objective_name = active_objective()
 
     results: List[Optional[Tuple[float, bool]]] = [None] * n
@@ -317,6 +320,8 @@ def evaluate_batch(
     for i, z in enumerate(z_list):
         if valid_fn is not None and not valid_fn(z):
             results[i] = (float("-inf"), False)
+            if stats is not None:
+                stats.add("outside")
             continue
         direction, tid, fp = flatland_trajectory_key(
             z, geom=geom, shard=shard, start=start,
@@ -327,6 +332,8 @@ def evaluate_batch(
             cached = score_record(rec, objective_name)
             if cached is not None:  # already scored for this constant
                 results[i] = cached
+                if stats is not None:
+                    stats.scored(tid)
                 continue
         if tid in handler_cache:  # walk cached — cheap recompute, no new walk
             results[i] = evaluate_in_flatland(z, **eval_ctx)
@@ -377,8 +384,13 @@ def evaluate_batch(
                 ).log()
                 for i in idxs:
                     results[i] = (float("-inf"), False)
+                if stats is not None:
+                    stats.add("failed", len(idxs))
                 continue
             matrix, vsym, dto = res
+            if stats is not None:
+                stats.walked(tid, cached_walk=False, ok=True)
+                stats.add("revisited", len(idxs) - 1)   # same ray in this batch
             sink((matrix, vsym, dto))
             record = json.loads(dto.to_json_line())
             seen.setdefault(tid, {})[constant.name] = record

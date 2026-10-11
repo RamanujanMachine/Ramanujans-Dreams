@@ -69,10 +69,9 @@ _STAGE_STATE: Dict[str, Any] = {}
 def total_core_budget() -> int:
     """Return the number of cores a stage pool may use.
 
-    ``sys_config.TOTAL_CORES`` (``None`` → ``os.cpu_count()``), floored at 1.
-    Unlike :func:`dreamer.utils.multi_processing.search_worker_budget` nothing is
-    reserved for the Tier-2 queue: use this for stages where that queue is not
-    running (analysis, post-process).
+    ``sys_config.TOTAL_CORES`` (``None`` → ``os.cpu_count()``), floored at 1 —
+    the whole machine, like :func:`dreamer.utils.multi_processing.search_worker_budget`
+    (nothing is reserved; Tier-2 runs inside the same tasks as Tier-1).
 
     :return: Worker budget (>= 1).
     """

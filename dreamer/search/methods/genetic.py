@@ -333,7 +333,7 @@ class GeneticSearchMethod(SearchMethod):
         if search_config.PARALLEL_SEARCH and len(missing_pairs) > 1:
             results = []
 
-            with create_pool() as pool:
+            with create_pool("legacy search pool") as pool:
                 iterator = pool.imap_unordered(
                     partial(
                         self.space.compute_trajectory_data_from_tup,

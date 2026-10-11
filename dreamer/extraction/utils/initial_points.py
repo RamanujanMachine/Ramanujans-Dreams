@@ -392,7 +392,7 @@ def compute_mapping(D: int, S: int, A: np.ndarray, b: np.ndarray, prefix_dims: i
         filter_with_matrices = None
 
     results = []
-    with create_pool() as pool:
+    with create_pool("shard encoding") as pool:
         # Pass the updated filter
         iterator = pool.imap_unordered(partial(__worker_wrapper_adaptor, filter_with_matrices), tasks)
 

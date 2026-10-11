@@ -285,9 +285,8 @@ def build_trajectory_dtos(
     Tier-1 scalars for that constant.  The **active optimisation objective**
     (``system.OPTIMIZATION_OBJECTIVE``), when it is not a Tier-1 field like δ, is
     computed synchronously for that constant and stored under its own name in the
-    flat ``extra`` (so analysis ranking and the search optimisers have it without
-    waiting for the async Tier-2 workers, and it lands under the same key Tier-2
-    would use).
+    flat ``extra`` (so analysis ranking — which computes no Tier-2 — has it too,
+    under the same key Tier-2 would use).
 
     :param constants: Iterable of :class:`Constant` objects (preferred) or sympy
         expressions.  ``None`` falls back to ``handler.constant()``.
