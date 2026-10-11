@@ -142,7 +142,6 @@ class TestFinalize:
             start=whole_space_shard.get_interior_point(), eval_pool=None,
             cmf_id="", shard_id="sid", shard_encoding_str="",
             output_path=str(tmp_path / "missing.jsonl"),
-            num_workers=0, config_overrides={},
         )
 
     def test_climbs_distinct_best_trajectories_with_dedup(
@@ -182,7 +181,7 @@ class TestFinalize:
             shard=whole_space_shard, identified_consts=[e], geom=geom,
             start=whole_space_shard.get_interior_point(), eval_pool=None,
             cmf_id="", shard_id="sid", shard_encoding_str="",
-            output_path=str(path), num_workers=0, config_overrides={},
+            output_path=str(path),
         )
 
         # Exactly the two distinct best rays were climbed; the duplicate and the

@@ -13,7 +13,7 @@ class PostProcessModScheme(Module):
     the JSONL files written by the searcher, reconstruct
     ``TrajectoryAttributesHandler`` for trajectories that still need
     expensive (Tier-3) attributes, compute those attributes (typically in
-    parallel via :func:`worker_pool`), and append patch records so the
+    parallel on a :class:`~dreamer.utils.stage_pool.StagePool`), and append patch records so the
     merge-on-read reader picks them up transparently.
     """
 

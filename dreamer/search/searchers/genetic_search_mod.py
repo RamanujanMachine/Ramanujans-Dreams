@@ -63,8 +63,6 @@ class GeneticSearchModV2(SearcherModScheme):
 
         os.makedirs(sys_config.EXPORT_SEARCH_RESULTS, exist_ok=True)
 
-        num_workers = 0  # the result writer writes directly (no writer processes)
-        config_overrides = config.export_configurations()
 
         shard_identified: Dict[str, Set[Constant]] = defaultdict(set)
         shard_by_id: Dict[str, Shard] = {}
@@ -80,14 +78,12 @@ class GeneticSearchModV2(SearcherModScheme):
             **sys_config.TQDM_CONFIG,
         ):
             identified_consts = list(shard_identified[shard_id])
-            self._run_shard(shard, identified_consts, num_workers, config_overrides)
+            self._run_shard(shard, identified_consts)
 
     def _run_shard(
         self,
         shard: Shard,
         identified_consts: List[Constant],
-        num_workers: int,
-        config_overrides: dict,
     ) -> None:
         """Run the genetic search for each identified constant of a single shard."""
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
@@ -121,12 +117,9 @@ class GeneticSearchModV2(SearcherModScheme):
                 logging_config.WATCHDOG_TRAJECTORY_SECONDS,
                 detail=lambda: f"shard={shard_id} cmf={cmf_id}",
             ), worker_pool(
-                num_workers=num_workers,
                 worker_fn=sink_item_dto,
                 writer_fn=write_jsonl_line,
                 output_path=output_path,
-                config_overrides=config_overrides,
-                parallel=False,  # direct write: Tier-2 is computed in the walk task
             ) as push:
                 for const in identified_consts:
                     method = GeneticSearch(shard, const, use_LIReC=self.use_LIReC)
@@ -164,8 +157,6 @@ class GeneticSearchModV2(SearcherModScheme):
                 shard_id=shard_id,
                 shard_encoding_str=shard_encoding_str,
                 output_path=output_path,
-                num_workers=num_workers,
-                config_overrides=config_overrides,
             )
         finally:
             if eval_pool is not None:

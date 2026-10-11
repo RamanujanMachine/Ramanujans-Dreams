@@ -68,8 +68,8 @@ trajectory work, and they differ in **what one task is** and **who waits for it*
 | Scheduling | the whole stage's trajectories stream through it | a batch per step; the optimiser waits for the batch (SA may pre-walk the next step) |
 
 The writer that appends rows to `<shard_id>.jsonl` always runs in the main
-process (`BufferedJsonlWriter` for stage pools, the direct `worker_pool(...,
-parallel=False)` sink for optimisers).
+process (`BufferedJsonlWriter` for stage pools, `worker_pool(...)` for the
+optimisers — despite its name, a plain in-process writer).
 
 ### Reuse counts
 

@@ -102,7 +102,6 @@ class SearcherModV1(SearcherModScheme):
 
         os.makedirs(sys_config.EXPORT_SEARCH_RESULTS, exist_ok=True)
 
-        config_overrides = config.export_configurations()
 
         # Build shard_id → (Shard, Set[Constant_identified]) mapping.
         # A shard can be identified for a subset of its consts; only those
@@ -126,7 +125,7 @@ class SearcherModV1(SearcherModScheme):
             ):
                 identified_consts = list(shard_identified[shard_id])
                 self._run_shard(
-                    shard, identified_consts, 0, config_overrides,
+                    shard, identified_consts,
                     pool=pool, shard_idx=shard_idx[shard_id],
                 )
 
@@ -138,16 +137,11 @@ class SearcherModV1(SearcherModScheme):
         self,
         shard: Shard,
         identified_consts: List[Constant],
-        num_workers: int,
-        config_overrides: dict,
         pool: Optional[StagePool] = None,
         shard_idx: int = 0,
     ) -> None:
         """Run the search for a single shard using only *identified_consts*.
 
-        :param num_workers: Unused (kept for interface stability; the former
-            separate Tier-2 queue is gone — Tier-2 runs in the pool tasks).
-        :param config_overrides: Unused (the pool propagates the config).
         :param pool: The stage-wide Tier-1 pool (``None`` → serial in-process).
         :param shard_idx: This shard's index in *pool*'s shard list.
         """

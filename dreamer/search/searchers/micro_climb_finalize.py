@@ -130,8 +130,6 @@ def finalize_best_trajectories(
     shard_id: str,
     shard_encoding_str: str,
     output_path: str,
-    num_workers: int,
-    config_overrides: dict,
 ) -> None:
     """Run the micro-hill-climb assurance endgame on a shard's best trajectories.
 
@@ -148,8 +146,6 @@ def finalize_best_trajectories(
     :param shard_id: Structural shard id (names the JSONL).
     :param shard_encoding_str: ±1 encoding string for the shard.
     :param output_path: ``EXPORT_SEARCH_RESULTS/<shard_id>.jsonl`` to read + append.
-    :param num_workers: Worker count for the finalization writer pool.
-    :param config_overrides: Exported config propagated to writer subprocesses.
     """
     cfg = search_config
     if not cfg.ENABLE_MICRO_HILL_CLIMB:
@@ -170,12 +166,9 @@ def finalize_best_trajectories(
     objective_name = active_objective()
 
     with worker_pool(
-        num_workers=num_workers,
         worker_fn=sink_item_dto,
         writer_fn=write_jsonl_line,
         output_path=output_path,
-        config_overrides=config_overrides,
-        parallel=False,  # direct write: Tier-2 is computed in the walk task
     ) as push:
         for const in identified_consts:
             max_delta, best_recs = _best_records_for_constant(
