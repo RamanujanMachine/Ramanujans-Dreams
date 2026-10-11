@@ -3,9 +3,11 @@
 Evaluates selected (start, direction) pairs of a CMF with the exact code path the
 analysis stage uses per trajectory — ``TrajectoryAttributesHandler.from_cmf`` (walk
 depth from ``search.DEPTH_FROM_TRAJECTORY_LEN``) + ``build_trajectory_dtos`` — and
-writes the resulting flat rows to ``<out>/rows.jsonl``.  Shard extraction is skipped:
-RD's hyperplane extraction does not yet finish for 10-variable Meijer-G CMFs
-(symbolic determinants), see context/roadmap.md.
+writes the resulting flat rows to ``<out>/rows.jsonl`` (:func:`run`, fast, no shards), or
+runs the whole System — extraction, analysis, search — on the selected shards
+(:func:`run_pipeline`, ``--pipeline``).  The reference constructions lie inside the CMF
+hyperplane Σa − Σb = p − 1, so the pipeline uses
+``extraction.ON_HYPERPLANE_TRAJECTORY = 'touching_shards'``.
 
 Joint δ is numerical evidence, not proof.
 """
@@ -73,3 +75,50 @@ def run(cmf, cmf_name, target, cases, out_dir, walk_depth=None, extra=("joint_se
     for label, d in sorted(summary, key=lambda x: -(x[1] if x[1] is not None else float('-inf'))):
         print(f'  {label:30s} {d}')
     print(f'rows written to {path}')
+
+
+# ---------------------------------------------------------------------------
+# Full pipeline (extraction -> analysis -> search) on the selected shards
+# ---------------------------------------------------------------------------
+
+def few_trajectories(d):
+    """Sampled directions per shard (module level: must be picklable).
+
+    Kept small: every new direction needs a symbolic RT trajectory_matrix build.
+    """
+    return 4
+
+
+def run_pipeline(formatter, target, out_dir):
+    """Run the whole System on *formatter*'s selected shards, ranked by joint δ.
+
+    :param formatter: A loading formatter (e.g. ``MeijerG``) with
+        ``selected_start_points`` / ``selected_trajectories`` and ``only_selected=True``;
+        each selected direction seeds the analysis and search of its shard(s).
+    :param target: ``JointConstant``.
+    :param out_dir: Root directory for every export of the run.
+    """
+    from dreamer import System, analysis, search, extraction
+
+    config.configure(
+        system={
+            'OPTIMIZATION_OBJECTIVE': 'joint_delta',
+            'EXPORT_CMFS': f'{out_dir}/CMFs',
+            'EXPORT_ANALYSIS_PRIORITIES': f'{out_dir}/analysis priorities',
+            'EXPORT_SEARCH_RESULTS': f'{out_dir}/search results',
+            'PATH_TO_SEARCHABLES': f'{out_dir}/spaces',
+        },
+        analysis={'NUM_TRAJECTORIES_FROM_DIM': few_trajectories, 'IDENTIFY_THRESHOLD': -1},
+        extraction={'STRATEGY': 'heuristic', 'HEURISTIC_TIMEOUT_SECONDS': 200.0,
+                    # the trajectories lie inside Σa − Σb = p − 1: search the shards they touch
+                    'ON_HYPERPLANE_TRAJECTORY': 'touching_shards'},
+        search={'NUM_TRAJECTORIES_FROM_DIM': few_trajectories, 'DEFAULT_USES_INV_T': True,
+                'MAX_TRAJECTORY_LENGTH': 35},
+        logging={'GENERATE_LOGS': True},
+    )
+    System(
+        function_sources=[formatter],
+        extractor=extraction.extractor.ShardExtractorMod,
+        analyzers=[analysis.AnalyzerModV1],
+        searcher=search.SearcherModV1,
+    ).run(constants=[target])

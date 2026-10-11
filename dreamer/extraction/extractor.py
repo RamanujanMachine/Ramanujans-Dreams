@@ -331,11 +331,24 @@ class ShardExtractor(ExtractionScheme):
                         for sym, coord, step in zip(symbols, abs_point, traj)
                     }
                     enc, on_boundary = Shard.encoding_at(hps, stepped_dict)
+                    contained = self._hyperplanes_containing(hps, point_dict, traj, on_boundary)
+                    if on_boundary and len(contained) == len(on_boundary) \
+                            and config.extraction.ON_HYPERPLANE_TRAJECTORY == 'touching_shards':
+                        traj_pos = Position({sym: sp.sympify(step) for sym, step in zip(symbols, traj)})
+                        for touching in self._touching_shard_encodings(hps, enc, contained, p, traj):
+                            shard_encodings[touching] = Position(point_dict)
+                            shard_trajectories[touching] = traj_pos
+                        continue
                     if on_boundary:
+                        hint = (
+                            ' The whole trajectory lies inside these hyperplane(s); set '
+                            "extraction.ON_HYPERPLANE_TRAJECTORY = 'touching_shards' to search "
+                            'the shards it touches.' if contained else ''
+                        )
                         raise ValueError(
                             f'start point {p} + trajectory {traj} lies on hyperplane(s) '
                             f'{on_boundary}; one step does not reach a legal interior point '
-                            'of a shard — choose a different trajectory or start point.'
+                            'of a shard — choose a different trajectory or start point.' + hint
                         )
 
                 # Keep the user's start point verbatim as the shard's interior/start point.
@@ -390,6 +403,81 @@ class ShardExtractor(ExtractionScheme):
                 level=Logger.Levels.info,
             ).log()
         return shards
+
+    @staticmethod
+    def _hyperplanes_containing(hps, point_dict, traj, on_boundary) -> List[sp.Expr]:
+        """Hyperplanes (among *on_boundary*) that contain the whole trajectory.
+
+        A hyperplane contains the trajectory iff the start lies on it and the direction
+        is parallel to it (its linear part vanishes on the direction).  Such a trajectory
+        never leaves the hyperplane, so stepping cannot assign it to a shard.
+        """
+        if not on_boundary:
+            return []
+        boundary = set(on_boundary)
+        out = []
+        for hp in hps:
+            if hp.expr not in boundary:
+                continue
+            at_start = sp.sympify(hp.expr.subs({s: point_dict[s] for s in hp.symbols}))
+            zero = {s: 0 for s in hp.symbols}
+            linear = hp.expr - hp.expr.subs(zero)
+            along = sp.sympify(linear.subs({s: step for s, step in zip(hp.symbols, traj)}))
+            if at_start == 0 and along == 0:
+                out.append(hp.expr)
+        return out
+
+    def _touching_shard_encodings(self, hps, stepped_enc, contained, start, traj) -> List[Tuple[int, ...]]:
+        """Encodings of the shards whose boundary contains a hyperplane-bound trajectory.
+
+        One shard per sign choice on the containing hyperplanes (the other signs are fixed
+        by one step along the trajectory); a side whose shard has no lattice point (e.g. a
+        slab of width < 1 between two parallel hyperplanes) is dropped.  Every decision is
+        logged, since searching several shards for one trajectory is not the default.
+
+        :param stepped_enc: Encoding one step along the trajectory (0 on *contained*).
+        :param contained: Hyperplane expressions containing the whole trajectory.
+        :param start: The user's start point (relative to the shift), for the log.
+        :param traj: The trajectory, for the log.
+        :return: Encodings of the kept touching shards.
+        """
+        import itertools
+        from .v2.base import BaseExtractor as _V2Base
+        from .v2.milp import find_integer_point
+
+        max_planes = 4
+        if len(contained) > max_planes:
+            raise ValueError(
+                f'start point {start} + trajectory {traj} lies inside {len(contained)} hyperplanes '
+                f'(> {max_planes}); too many touching shards ({2 ** len(contained)}) to search.'
+            )
+        shifted = [hp.apply_shift(self.cmf_data.shift) for hp in hps]
+        A, c = _V2Base.hyperplanes_to_matrix(shifted)
+        zero_idx = [i for i, e in enumerate(stepped_enc) if e == 0]
+        kept, dropped = [], []
+        for signs in itertools.product((1, -1), repeat=len(zero_idx)):
+            enc = list(stepped_enc)
+            for i, sgn in zip(zero_idx, signs):
+                enc[i] = sgn
+            side = ', '.join(f"{'>' if sgn > 0 else '<'} 0 on [{hps[i].expr}]" for i, sgn in zip(zero_idx, signs))
+            if find_integer_point(A, c, enc) is None:
+                dropped.append(side)
+            else:
+                kept.append((tuple(enc), side))
+        Logger(
+            f'Start point {start} + trajectory {traj} lies inside hyperplane(s) {contained} '
+            f'(ON_HYPERPLANE_TRAJECTORY=touching_shards): it belongs to no single shard, so the '
+            f'{len(kept)} touching shard(s) with lattice points are searched, each seeded with this '
+            f'trajectory: {[s for _, s in kept]}'
+            + (f'; dropped side(s) without lattice points: {dropped}' if dropped else ''),
+            level=Logger.Levels.info,
+        ).log()
+        if not kept:
+            Logger(
+                f'No touching shard of trajectory {traj} from {start} contains lattice points; skipped.',
+                level=Logger.Levels.warning,
+            ).log()
+        return [enc for enc, _ in kept]
 
     def _load_cached_encodings(
         self, hps: List[Hyperplane], symbols: List[sp.Symbol]

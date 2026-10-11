@@ -112,6 +112,7 @@ with its direction.
 |-------|---------|
 | `STRATEGY` | `'auto'` / `'exact'` / `'heuristic'` / `'legacy'` — how shards are found (see [extraction README](../extraction/README.md)). |
 | `EXACT_TIMEOUT_SECONDS` / `HEURISTIC_TIMEOUT_SECONDS` | Per-strategy wall-clock budgets (used by `'auto'` to decide fallback). |
+| `ON_HYPERPLANE_TRAJECTORY` | `'skip'` (default) or `'touching_shards'`: what to do with a selected start point + trajectory that lies **entirely inside** a CMF hyperplane (so it belongs to no single shard). `'touching_shards'` searches every shard it touches that contains lattice points (the reason is logged); analysis keeps those that contain the constant. A start point on a hyperplane whose trajectory leaves it is always resolved by one step along the trajectory. |
 | `LOAD_SHARD_CACHE` | Reuse a previously-extracted `…__shards.jsonl` instead of re-extracting. |
 | `IGNORE_DUPLICATE_SEARCHABLES` | Drop symmetry-equivalent shards. |
 | `TRAJECTORY_CONSTRAINTS` | Optional `{var: int}` direction constraint, e.g. `{'x0': 12, 'y1': 28}` — pins the scale-invariant **ratio + sign** of every sampled trajectory and **drops shards** whose cone admits no such direction. Honoured by all samplers + search (see [extraction README](../extraction/README.md)). `None` = unconstrained. |
