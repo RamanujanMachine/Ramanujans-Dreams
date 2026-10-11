@@ -250,3 +250,130 @@ def test_delta_equals_true_delta(monkeypatch, log2_shard, high_res_digits):
     digits = _true_error_digits(estimate, R.log(2).value_sympy, 20_000)
     true_delta = -1 + digits / float(sp.log(estimate.q, 10).evalf(30))
     assert delta == pytest.approx(true_delta, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Guardrails, precision levels, remaining node types
+# ---------------------------------------------------------------------------
+
+import mpmath
+
+
+class TestGuardrails:
+    @pytest.mark.parametrize("bad", [0, -5, 2.5, True, "10", None])
+    def test_digits_must_be_positive_int(self, bad):
+        """Public entry points reject non-positive / non-integer precisions."""
+        high_precision.cache_clear()
+        with pytest.raises(ValueError):
+            high_precision(sp.pi, bad)
+        with pytest.raises(ValueError):
+            arb_value(sp.pi, bad)
+        with pytest.raises(ValueError):
+            resolved_error(sp.Rational(22, 7), sp.pi, bad, 100)
+        with pytest.raises(ValueError):
+            resolved_error(sp.Rational(22, 7), sp.pi, 10, bad)
+
+    def test_one_digit_is_a_valid_boundary(self):
+        """digits=1 is the smallest precision: still the evalf precision."""
+        assert arb_value(sp.pi, 1)._prec == sp.pi.evalf(1)._prec
+
+    def test_start_above_max_is_clamped(self):
+        """A start precision above the cap is clamped to the cap (no escalation)."""
+        err, digits, ref = resolved_error(sp.Rational(22, 7), sp.pi, 500, 100)
+        assert digits == 100 and err is not None
+
+
+class TestKnownAnswersAtSeveralPrecisions:
+    """Known answers vs mpmath at 50 and 200 digits (reference computed with
+    30 extra digits), per the coverage policy's multi-precision rule."""
+
+    @pytest.mark.parametrize("digits", [50, 200])
+    @pytest.mark.parametrize("expr, reference", [
+        (sp.zeta(3), lambda: mpmath.zeta(3)),
+        (sp.pi, lambda: mpmath.pi),
+        (sp.Catalan, lambda: mpmath.catalan),
+        (sp.EulerGamma, lambda: mpmath.euler),
+        (-sp.E * sp.Ei(-1), lambda: -mpmath.e * mpmath.ei(-1)),
+    ])
+    def test_matches_mpmath(self, digits, expr, reference):
+        with mpmath.workdps(digits + 30):
+            ref = reference()
+            ours = mpmath.mpf(arb_value(expr, digits)._mpf_)
+            assert abs(ours - ref) <= abs(ref) * mpmath.mpf(10) ** (-digits)
+
+    def test_cancellation_needs_more_guard_bits(self):
+        """exp(π√163) − 640320³ − 744 ≈ −7.5·10⁻¹³ cancels ~30 digits (> the
+        64 guard bits of the first attempt): the retry loop must still deliver
+        the full 100 digits."""
+        expr = sp.Add(sp.exp(sp.pi * sp.sqrt(163)), -640320 ** 3 - 744, evaluate=False)
+        with mpmath.workdps(160):
+            ref = mpmath.exp(mpmath.pi * mpmath.sqrt(163)) - 640320 ** 3 - 744
+        ours = mpmath.mpf(arb_value(expr, 100)._mpf_)
+        assert ref < 0 and abs(ours - ref) <= abs(ref) * mpmath.mpf(10) ** -100
+
+
+class TestNodeCoverage:
+    def test_float_zero_and_unevaluated_abs(self):
+        """Exact zero Float input, and an unevaluated Abs of a negative value."""
+        expr = sp.Add(sp.Float(0), sp.pi, evaluate=False)
+        assert arb_value(expr, 60) == sp.pi.evalf(60)
+        absval = sp.Abs(sp.Add(sp.Integer(3), -sp.pi, evaluate=False), evaluate=False)
+        assert agreeing_digits(arb_value(absval, 80), (sp.pi - 3).evalf(110)) >= 80
+
+    def test_log_of_non_positive_is_unsupported(self):
+        """log of a value ≤ 0 is not real: Unsupported (→ evalf fallback)."""
+        with pytest.raises(Unsupported):
+            arb_value(sp.log(sp.Add(sp.Integer(3), -sp.pi, evaluate=False), evaluate=False), 30)
+
+    def test_zero_reference_counts_any_nonzero_error(self):
+        """With a zero reference, any nonzero error is real (no ulp scale)."""
+        zero = sp.Float(0, 100)
+        assert error_is_resolved(sp.Float("1e-50", 100), zero)
+        assert not error_is_resolved(sp.Float(0, 100), zero)
+
+
+# ---------------------------------------------------------------------------
+# The legacy δ path (Searchable.calc_delta) uses the same rule
+# ---------------------------------------------------------------------------
+
+@pytest.mark.timeout(300)
+def test_legacy_calc_delta_matches_handler(monkeypatch, log2_shard):
+    """``Searchable.calc_delta`` (DataManager path) and the handler compute the
+    same δ for the same trajectory, walk type and depth."""
+    import numpy as np
+    from ramanujantools import Position
+    from dreamer.configs import config
+
+    syms = list(log2_shard.cmf.matrices.keys())
+    traj = Position(dict(zip(syms, (2, 1, 3))))
+    start = log2_shard.get_interior_point()
+    monkeypatch.setattr(log2_shard, "use_inv_t", False)
+    traj_len = float(np.sqrt(sum(float(v) ** 2 for v in traj.values())))
+    m = log2_shard.cmf.trajectory_matrix(traj, start)
+    legacy, pq, _ = log2_shard.calc_delta(m, traj, start, R.log(2).value_sympy, traj_len)
+
+    depth = config.search.DEPTH_FROM_TRAJECTORY_LEN(traj_len, log2_shard.dim)
+    from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
+    h = TrajectoryAttributesHandler(m, R.log(2).value_sympy, walk_depth=depth, walk_type=2,
+                                    searchable=log2_shard)
+    assert legacy is not None and pq is not None
+    assert legacy == pytest.approx(h.delta(), rel=1e-9)
+
+
+@pytest.mark.timeout(300)
+def test_legacy_calc_delta_gives_up_beyond_max(monkeypatch, log2_shard):
+    """If the estimate agrees with the constant beyond MAX_CONSTANT_RESOLUTION,
+    the legacy path skips the trajectory instead of returning a noise δ."""
+    import numpy as np
+    from ramanujantools import Position
+    from dreamer.configs import config
+
+    monkeypatch.setattr(config.search, "CONSTANT_NO_DIGITS_HIGH_RES", 5)
+    monkeypatch.setattr(config.search, "MAX_CONSTANT_RESOLUTION", 10)
+    monkeypatch.setattr(log2_shard, "use_inv_t", False)
+    syms = list(log2_shard.cmf.matrices.keys())
+    traj = Position(dict(zip(syms, (2, 1, 3))))
+    start = log2_shard.get_interior_point()
+    traj_len = float(np.sqrt(sum(float(v) ** 2 for v in traj.values())))
+    m = log2_shard.cmf.trajectory_matrix(traj, start)
+    assert log2_shard.calc_delta(m, traj, start, R.log(2).value_sympy, traj_len) == (None, None, None)

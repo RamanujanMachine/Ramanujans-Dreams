@@ -74,6 +74,9 @@ Mostly **where things go** and **how many cores to use**.
 | `TOTAL_CORES` | The core budget for every process pool (`None` ⇒ `os.cpu_count()`); nothing is reserved. |
 | `MEMORY_AWARE_WORKERS` / `MEMORY_LIMIT_MB` / `MEMORY_RESERVE_MB` / `WORKER_TASK_HEADROOM_MB` | Pools also fit available memory: `min(cores, (available − reserve) / per-worker)`, then grow once warm workers measure smaller and shrink (draining) when memory runs low. `MEMORY_LIMIT_MB` sets a budget for the run (shared nodes); available memory is otherwise detected, including cgroup/SLURM limits. |
 | `POOL_MAX_TASKS_PER_CHILD` | Recycle pool workers after N tasks (bounds slow growth on very long runs). |
+| `POOL_START_METHOD` | How pool workers are started: `'auto'` (default) = `forkserver` on Linux (no fork-with-threads deadlocks; pools can add workers mid-run) and `spawn` on macOS; or `'spawn'` / `'forkserver'` / `'fork'`. |
+| `POOL_SLOW_START` | Memory-aware pools that can grow start with this many workers (default 2), measure each task's real peak memory, then grow to every core that fits. `0` = start at the full memory cap. |
+| `SYMPY_CACHE_CLEAR_AFTER_SECONDS` | After a trajectory task that took at least this long (default 1 s), clear sympy's global cache, which otherwise keeps the huge numbers of long walks alive (tens of MB per long trajectory, growing per worker). Light tasks skip it. `0` = after every task; `None` = never. |
 | `REUSE_POLICY` | How stored attributes are reused across runs: `'strict'` (default — per-attribute fingerprints decide, so a config change recomputes exactly the affected attributes), `'keep'` (reuse anything stored), `'recompute'` (ignore earlier runs). |
 | `STAGE_POOL_WORKERS` | Cap for the per-stage trajectory pools (analysis, hedgehog search, Tier-3). `None`/`0` ⇒ full core budget; `1` ⇒ serial in-process. |
 | `STAGE_POOL_CHUNKSIZE` | Trajectories handed to a stage-pool worker at a time (default `1` = full dynamic load balancing). |
@@ -131,7 +134,8 @@ The largest category. Shared knobs plus one block per optimiser
 |-------|---------|
 | `GLOBAL_SEED` | Master RNG seed for all samplers + search methods. |
 | `NUM_TRAJECTORIES_FROM_DIM` | Trajectory count per shard during search. |
-| `DEPTH_FROM_TRAJECTORY_LEN` | Walk depth as a function of trajectory length + dimension. |
+| `DEPTH_FROM_TRAJECTORY_LEN` | Walk depth as a function of trajectory length + dimension (default: between 1000 and 1500; shorter trajectories walk deeper). |
+| `CONSTANT_NO_DIGITS_HIGH_RES` / `MAX_CONSTANT_RESOLUTION` | Precision of the constant for δ: starts at `HIGH_RES` digits (10 000) and doubles until the estimate's error is clearly larger than the constant's rounding, up to `MAX_CONSTANT_RESOLUTION` (1 000 000). Long trajectories need ~10⁵ digits; constants are evaluated with FLINT's arb, so this is cheap (ζ(3) at 10⁶ digits ≈ 0.4 s, 20 MB). |
 | `SEARCH_MAX_TRAJ_LEN` / `SEARCH_TRAJ_NORM` | Cap on trajectory length (bounds symbolic cost) and the norm it's measured in. |
 | `SAMPLING_METHOD` | Sampler for the default hedgehog searcher. |
 | `TIER2_ATTRIBUTES` | Background-worker attributes computed during search (empty ⇒ no subprocesses). |

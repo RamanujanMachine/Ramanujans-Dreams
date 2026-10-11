@@ -186,6 +186,22 @@ class TestStartMethod:
         expected = "forkserver" if sys.platform.startswith("linux") else "spawn"
         assert start_method() == expected
 
+    @pytest.mark.parametrize("platform, available, expected", [
+        ("linux", ["fork", "spawn", "forkserver"], "forkserver"),
+        ("linux", ["fork", "spawn"], "spawn"),          # no forkserver → spawn
+        ("darwin", ["spawn", "fork", "forkserver"], "spawn"),
+    ])
+    def test_auto_choice_per_platform(self, monkeypatch, platform, available, expected):
+        """The OS rule, independent of the machine running the test."""
+        import multiprocessing as mp
+        from dreamer.configs.system import sys_config
+        from dreamer.utils import mp_context
+
+        monkeypatch.setattr(sys_config, "POOL_START_METHOD", "auto")
+        monkeypatch.setattr(mp_context.sys, "platform", platform)
+        monkeypatch.setattr(mp, "get_all_start_methods", lambda: available)
+        assert mp_context.start_method() == expected
+
     def test_explicit_override_and_invalid(self, monkeypatch):
         from dreamer.configs.system import sys_config
         from dreamer.utils.mp_context import start_method

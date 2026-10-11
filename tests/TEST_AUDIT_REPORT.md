@@ -1,3 +1,50 @@
+# Test Audit Report (2026-10-11)
+
+Bottom line: long trajectories on large CMFs no longer exhaust memory or hang, and δ is now
+correct for them. A dead worker no longer hangs a run (`ResilientPool`); pools are sized and
+started per available memory and per OS; δ's constant is evaluated with FLINT arb (4F3 L2 128:
+peak 4.6 GB → 0.4 GB); δ trusts |estimate − constant| only beyond the constant's rounding (old
+rule produced spurious δ: −0.456 vs true −0.266); Tier-1 walks each trajectory once (20.7 s →
+12.2 s); sympy's cache no longer retains long-walk numbers in workers. Covers commits
+`21533be`…`5188b3a` and the follow-up tests. Full suite under coverage: `1144 passed,
+2 skipped` (72 % line+branch).
+
+## Touched Modules (Detailed Review)
+
+| Touched module | Changes made | Coverage evidence | Challenge rubric (/5) | Regression evidence |
+|---|---|---|---:|---|
+| `dreamer/utils/resilient_pool.py` (new) | Pool on `ProcessPoolExecutor`: dead worker → halve + resubmit, poison task isolated, `on_death`; bounded `imap`; memory cap, in-place growth, drain-shrink; per-task **peak** RSS (`_measured_call`), climb-back reserve, `POOL_SLOW_START`; `_guarded_init` → `WorkerInitError`. | `tests/test_resilient_pool.py` (20), `tests/test_memory_budget.py` (15); 89 %. | 5 | SIGKILL from inside a task (the OOM case) — the exact scenario that hung `multiprocessing.Pool` now finishes; initializer failure raises without OOM retries (failed before the fix); growth refuses to size by current RSS when the peak is 1 GB. |
+| `dreamer/utils/mp_context.py` (new) | `POOL_START_METHOD`: auto = forkserver on Linux, spawn on macOS; forkserver preload. | 7 tests (per-platform rule with faked `sys.platform`, override, invalid, real pools under spawn and forkserver); 94 %. | 4 | Pool tests also pass with forkserver forced (115 tests). |
+| `dreamer/utils/memory_budget.py` (new) | Available memory (meminfo / cgroup / vm_stat / `MEMORY_LIMIT_MB`), measured worker baseline, `memory_worker_cap`. | `tests/test_memory_budget.py`; 80 %. | 4 | Real pool shrinks under a tight budget and stays correct; grows in place after warm-up. Uncovered: platform-specific detection branches. |
+| `dreamer/utils/constants/high_precision.py` (new) | `high_precision` / `arb_value` (sympy → arb, accuracy check with guard-bit retries, evalf-precision `Float`, evalf fallback); `error_is_resolved` / `resolved_error` (2⁴⁰-ulp rule, doubling to `MAX_CONSTANT_RESOLUTION`); digit guardrails. | `tests/test_high_precision.py` (59); **100 %** line+branch. | 5 | 19 expressions agree with sympy to 3 000 digits; 5 constants vs mpmath at 50 and 200 digits; cancellation case (needs retry); 80 000-digit check (scratch, documented): 15/16 constants bit-identical with sympy, ζ(3) equals an independent exact-integer series bit for bit; handler δ == δ from the true error; 1-ulp case the old rule accepted. |
+| `dreamer/utils/storage/trajectory_attributes.py` | δ via `resolved_error`; constant swap resets the high-precision value (bug fix); walk checkpoints (`_raw_walks`, `_extend_checkpoints`, continuation, free Tier-1 depths), `_limits` from checkpoints, `release_walks`. | `tests/test_walk_checkpoints.py` (21), `tests/test_high_precision.py`; 87 %. | 5 | Constant-swap regression test (−0.9999 vs 0.1005 without the fix); products == `Matrix.walk` from 0 (incl. depth 0, symbolic fallback); Tier-1 + Tier-2 values identical to the old walk-per-request path (walk types 1/2, D = 1000/1200, 3 directions); step counts: identified = D, unidentified ≤ old. |
+| `dreamer/utils/schemes/searchable.py` | Legacy `calc_delta` uses `resolved_error` (was fixed 10k digits, no escalation). | 2 new tests; file 54 % (17 % before). | 4 | Legacy δ == handler δ; gives up (None) instead of a noise δ beyond the cap. |
+| `dreamer/utils/task_memory.py` (new); `stage_pool.run_tier1_task`, `parallel_eval_worker._pool_walk`, `tier3._tier3_task`, `flatland/evaluator.py` | Clear sympy's cache after tasks ≥ `SYMPY_CACHE_CLEAR_AFTER_SECONDS`; evaluator releases walks of cached handlers. | `tests/test_task_memory.py` (5); 92 % / 91 % / 87 % / 86 % / 93 %. | 4 | Heavy task clears, light task keeps, disabled/always, decorator on error, every worker task wrapped. Memory measured (scratch): RSS flat over 8 long 4F3 trajectories (was +20 MB per trajectory). |
+| `dreamer/_lazy.py`, package `__init__`s, light worker entry points (`616c869`) | PEP 562 lazy exports; worker modules import only what tasks need. | Whole suite imports through them; 90 %. | 3 | Worker baseline ~250 MB → ~130 MB (spawn), ~25 MB own RSS under forkserver. |
+| Configs (`system`, `search`) | `POOL_START_METHOD`, `POOL_SLOW_START`, `SYMPY_CACHE_CLEAR_AFTER_SECONDS`, memory knobs; `MAX_CONSTANT_RESOLUTION` 200k → 1M; Tier-1 fingerprint version 2. | Covered through the tests above; fingerprint dependency test green. | 4 | — |
+
+Benchmarks (macOS, 18 cores; 4F3, ζ(3), one shard, depth 1000):
+
+| L2 length | peak RSS before → after | Tier-1 time before → after | δ before → after (true) |
+|---:|---|---|---|
+| 128 | 4 647 → 392 MB | 27.1 → 12.2 s | −0.456 → −0.266277 (−0.266278) |
+| 256 | 4 734 → 495 MB | 69.0 → 36.1 s | −0.729 → −0.265264 (−0.265265) |
+
+Profile (L2 128, before): numeric walk +16 MB / 9.5 s; LIReC +0 / 1.3 s; limits +6 MB / 10 s;
+δ +3.7 GB / 9.8 s (ζ(3) evalf at 10k→80k digits). Sympy cache clearing costs ~5 ms per light
+trajectory (skipped below 1 s).
+
+## Non-Touched Modules (Repository-Wide Summary)
+
+| Area | Status | Risk / follow-up |
+|---|---|---|
+| ramanujantools numeric walk | Unchanged here. | 6.3 of 8.4 s of a long walk is step evaluation (sympy-tree lambdas); prompt for a fix in that repo: `context/prompts/ramanujantools_numeric_walk.md`. |
+| LIReC identification | Unchanged. | Verified: RD's `db.identify(numbers)` never queries the remote DB (10 calls with sockets blocked → 0 attempts). |
+| Legacy `DataManager` path | Partially covered (54 %). | Options `find_limit` / `find_eigen_values` / no-LIReC untested — test or retire. |
+| Heuristic extraction coverage | Unchanged. | Thin far-out cells still missed (parked). |
+
+---
+
 # Test Audit Report (2026-10-10, d)
 
 Bottom line: attributes are computed once and reused exactly while valid —

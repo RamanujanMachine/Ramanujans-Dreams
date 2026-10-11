@@ -130,6 +130,29 @@ class TestExactProducts:
         assert got[260] == ref[260] and got[333] == ref[333]
 
 
+    def test_depth_zero_is_identity(self, shard):
+        """Boundary: W(0) is the identity (empty product), with no walk."""
+        from ramanujantools import Matrix
+
+        h = _handler(shard, depth=100)
+        w0 = h._raw_walks([0])[0]
+        assert w0 == Matrix.eye(h._traj.rows)
+
+    def test_symbolic_fallback_for_extra_symbols(self):
+        """A matrix with a symbol besides n cannot be walked numerically: the
+        handler falls back to ``Matrix.walk`` (no continuation) — same result."""
+        from ramanujantools import Matrix
+
+        k = sp.Symbol("k")
+        m = Matrix([[0, -(n ** 2) * k], [1, n + k]])
+        h = TrajectoryAttributesHandler(m, walk_depth=20, walk_type=2)
+        assert not h._numeric_walk_possible()
+        got = h._raw_walks([5, 9])
+        ref = m.walk({n: 1}, [5, 9], {n: 0})
+        assert got[5] == ref[0] and got[9] == ref[1]
+        assert h._raw_walks([9])[9] == ref[1]          # served from the stored result
+
+
 # ---------------------------------------------------------------------------
 # Identical results to the old walk-per-request behaviour
 # ---------------------------------------------------------------------------

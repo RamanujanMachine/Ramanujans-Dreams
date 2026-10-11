@@ -20,6 +20,22 @@ Supported nodes: integers, rationals, floats, π, e, γ (Euler), Catalan, the
 golden ratio, ``+``, ``×``, powers (integer exponents; rational exponents of
 positive bases), ``exp``, ``log``, ``zeta``, ``Ei``, ``polylog``, ``gamma``,
 ``Abs``, ``sin``/``cos``/``atan`` and generalized hypergeometric ``hyper``.
+
+**Resolved errors** (:func:`resolved_error`).  The constant ``C`` is used rounded
+to ``P = dps_to_prec(digits)`` bits (≈ digits·log2(10) + 4; 10 000 digits =
+33 223 bits).  ``|estimate − C|`` is then uncertain by ~1–2 units in the last
+place (ulp) of ``C`` — ½ ulp rounding the estimate, ½ ulp for a correctly
+rounded ``C`` (arb), up to 1 ulp for sympy, whose ``evalf`` rounds twice (at
+``P + 4`` bits, then ``P``).  An error that small is noise: the estimate agrees
+with the constant beyond ``P`` bits.  The error is therefore trusted only when it
+is at least ``2**ERROR_MARGIN_BITS`` ulps (40 bits ≈ 12 digits before the end of
+``C``); then its relative uncertainty is ≤ 2**-39 and, since
+``δ = −1 − ln(err)/ln(q)``, δ is off by at most 2**-39 / ln(q).  Otherwise the
+precision doubles, up to ``search.MAX_CONSTANT_RESOLUTION``.  The old rule
+(escalate only on err == 0) took a 1-ulp sympy error as the error and produced
+spurious δ on long trajectories.  Verified: ζ(3) at 80 000 digits from an
+independent exact-integer series (Amdeberhan–Zeilberger) equals arb's value bit
+for bit; 15 other constants agree with sympy bit for bit.
 """
 
 from __future__ import annotations
@@ -33,6 +49,12 @@ from mpmath.libmp import dps_to_prec, normalize, round_nearest
 _GUARD_BITS = 64
 #: Attempts (doubling the guard bits each time) before falling back to evalf.
 _MAX_ATTEMPTS = 4
+
+
+def _check_digits(digits) -> None:
+    """Guardrail: *digits* must be a positive integer."""
+    if isinstance(digits, bool) or not isinstance(digits, (int, sp.Integer)) or int(digits) < 1:
+        raise ValueError(f"digits must be a positive integer, got {digits!r}")
 
 
 class Unsupported(Exception):
@@ -127,11 +149,16 @@ def _ball_to_float(ball, prec: int) -> sp.Float:
 def arb_value(expr: sp.Expr, digits: int) -> sp.Float:
     """Evaluate *expr* to *digits* decimal digits with arb (no fallback).
 
+    :param expr: Numeric sympy expression.
+    :param digits: Decimal digits (positive integer).
+    :raises ValueError: if *digits* is not a positive integer.
+
     :raises Unsupported: the expression cannot be evaluated with arb, or the
         ball did not reach the requested accuracy (e.g. the value is 0).
     """
     from flint import ctx
 
+    _check_digits(digits)
     target = dps_to_prec(int(digits))
     expr = sp.sympify(expr)
     old_prec = ctx.prec
@@ -152,11 +179,17 @@ def arb_value(expr: sp.Expr, digits: int) -> sp.Float:
 def high_precision(expr: sp.Expr, digits: int) -> sp.Float:
     """``expr.evalf(digits)``, computed with arb whenever possible.
 
+    :param expr: Numeric sympy expression (no free symbols).
+    :param digits: Decimal digits (positive integer).
+    :raises ValueError: if *digits* is not a positive integer.
+    :return: A ``Float`` with binary precision ``dps_to_prec(digits)``.
+
     Same result type and binary precision as ``expr.evalf(digits)``; values
     agree to the requested precision (verified against sympy at 80 000 digits
     for every ready-made constant).  Cached per process (16 entries, a few
     tens of KB each at 10⁵ digits).
     """
+    _check_digits(digits)
     try:
         return arb_value(expr, digits)
     except Unsupported:
@@ -178,6 +211,11 @@ def error_is_resolved(err: sp.Expr, reference: sp.Float, margin_bits: int = ERRO
     estimate agrees with the constant *at least* to the reference's precision.
     Requiring ``err >= 2**margin_bits`` ulps makes the relative uncertainty of
     ``err`` at most ~``2**(1 - margin_bits)``.
+
+    :param err: The computed ``|estimate − reference|``.
+    :param reference: The constant as a sympy ``Float`` (its precision defines the ulp).
+    :param margin_bits: Required distance, in bits, above one ulp.
+    :return: ``True`` if *err* is at least ``2**margin_bits`` ulps of *reference*.
     """
     e = sp.Float(err, reference._prec)._mpf_
     if e[1] == 0:                                    # exactly zero (Float(0) != 0 in sympy)
@@ -194,10 +232,17 @@ def resolved_error(estimate: sp.Expr, constant: sp.Expr, digits: int, max_digits
     """``|estimate − constant|`` at the first precision (doubling from *digits*,
     capped at *max_digits*) where it is a real error (:func:`error_is_resolved`).
 
+    :param estimate: The rational estimate (exact).
+    :param constant: The constant's sympy expression.
+    :param digits: Starting precision in decimal digits (positive).
+    :param max_digits: Precision cap in decimal digits (positive).
+    :raises ValueError: if *digits* or *max_digits* is not a positive integer.
     :return: ``(err, digits_used, reference)``; ``err`` is ``None`` when even
         *max_digits* digits cannot resolve it (the estimate agrees with the
         constant beyond *max_digits* digits).
     """
+    _check_digits(digits)
+    _check_digits(max_digits)
     digits = int(min(digits, max_digits))
     while True:
         reference = high_precision(constant, digits)
