@@ -1,4 +1,4 @@
-from dreamer import System, config, analysis, search, extraction, post_process, log
+from dreamer import System, config, analysis, search, extraction, post_process, log, pi
 from dreamer.loading import pFq
 
 
@@ -9,7 +9,7 @@ def trajectory_compute_func(d):
     :param d: CMF dimensionality.
     :return: Trajectory count (``max(10**d, 10)``).
     """
-    return max(5 * 10 ** d, 10)
+    return max(10 ** d, 10)
 
 
 def trajectory_compute_func_analysis(d):
@@ -30,7 +30,8 @@ if __name__ == '__main__':
             'PATH_TO_SEARCHABLES': './spaces',                       # export all shard to this directory: ./spaces
             'EXPORT_ANALYSIS_PRIORITIES_FORMAT': 'json',
             'EXPORT_SEARCHABLES_FORMAT': 'json',
-            'EXPORT_SEARCH_RESULTS_FORMAT': 'json'
+            'EXPORT_SEARCH_RESULTS_FORMAT': 'json',
+            'OPTIMIZATION_OBJECTIVE': 'delta',
         },
         analysis={
             # ignore shards with less than 0.1% identified trajectories as converge to the constant
@@ -59,7 +60,7 @@ if __name__ == '__main__':
             # number of trajectories to be auto-generated in search if needed by the module
             'NUM_TRAJECTORIES_FROM_DIM': trajectory_compute_func,
             'DEFAULT_USES_INV_T': False,
-            'MAX_TRAJECTORY_LENGTH': 15,
+            'MAX_TRAJECTORY_LENGTH': 20,
             'SAMPLING_METHOD': 'pt'
         },
         logging={
@@ -79,13 +80,13 @@ if __name__ == '__main__':
             #       ('delta_sequence', 'top 10 highest delta in shard'),
             #       ('relation', 'max_degree below 4'),
             #   ),
-            'TIER3_ATTRIBUTES': ()
+            'TIER3_ATTRIBUTES': (('relation', 'if_identified'),)
         },
         # Post-process graphing (writes under system.EXPORT_GRAPHS; all off by default).
         graph={
-            'PLOT_BEST_DELTA_SEQUENCE': True,   # δ-sequence of the best trajectory per (CMF, constant)
-            'PLOT_DELTA_HISTOGRAMS': True,      # δ histograms per shard and per CMF
-            'WRITE_BUMPINESS_TABLE': True,      # per-shard δ non-smoothness (semivariogram + δ-seq TV)
+            'PLOT_BEST_DELTA_SEQUENCE': False,   # δ-sequence of the best trajectory per (CMF, constant)
+            'PLOT_DELTA_HISTOGRAMS': False,      # δ histograms per shard and per CMF
+            'WRITE_BUMPINESS_TABLE': False,      # per-shard δ non-smoothness (semivariogram + δ-seq TV)
             'DELTA_SEQUENCE_DEPTH': 1000,
         },
     )

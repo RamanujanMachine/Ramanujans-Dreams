@@ -164,6 +164,11 @@ def tier1_config_fingerprint(walk_depth: int) -> str:
     * ``CONSTANT_NO_DIGITS_HIGH_RES`` / ``CONSTANT_NO_DIGITS_LOW_RES`` — the
       precision the target constant is evaluated at for identification and δ.
 
+    Deliberately **excluded**: ``IDENTIFY_DEPTH``.  It only changes *where* the
+    (depth-independent) p/q relation is identified, with a fallback to the full
+    depth on failure, so it never changes the stored Tier-1 values — including it
+    would spuriously invalidate every cached record.
+
     :param walk_depth: The walk depth used (or to be used) for this trajectory.
     :return: A 16-hex-char stable fingerprint string.
     """
@@ -1167,8 +1172,9 @@ class TrajectoryAttributesHandler:
                 if self._constant_resolution == search_config.MAX_CONSTANT_RESOLUTION:
                     Logger(
                         f'Guardrail reached - could not approximate with constant at resolution: '
-                        f'{search_config.MAX_CONSTANT_RESOLUTION}',
-                        Logger.Levels.debug,
+                        f'{search_config.MAX_CONSTANT_RESOLUTION}'
+                        f'\nYou might want to rerun the search with a higher constant resolution to get a better approximation.',
+                        Logger.Levels.warning,
                     ).log()
                     break
                 self._constant_resolution = min(
@@ -1191,7 +1197,10 @@ class TrajectoryAttributesHandler:
             depth = list(range(1, depth + 1))
 
         def compute():
-            vectors, effective_walk_values = self._pq_vector(depth[-1])
+            # Identification is depth-independent and cached (see _pq_vector); the
+            # returned walk column is at the identification depth, so it is NOT used
+            # for the δ values here — each requested depth walks its own column.
+            vectors, _ = self._pq_vector()
             if vectors is None:
                 return []
             p, q = vectors
@@ -1208,7 +1217,12 @@ class TrajectoryAttributesHandler:
                     success, delta = self.__compute_delta(p, q, walk_values, self.constant())
                     deltas.append(float(delta.evalf(10)) if success else delta)
             else:
-                success, delta = self.__compute_delta(p, q, effective_walk_values, self.constant())
+                # Single depth: walk the requested depth's column explicitly (the
+                # identification walk may have been at a shallower IDENTIFY_DEPTH).
+                walk_values, _ = self._effective_walk_values(depth[0])
+                if walk_values is None:
+                    return []
+                success, delta = self.__compute_delta(p, q, walk_values, self.constant())
                 deltas.append(float(delta.evalf(10)) if success else delta)
             return deltas
         
@@ -1273,24 +1287,56 @@ class TrajectoryAttributesHandler:
         return self.__get(f"delta_prediction_{depth}", compute)
 
     def gcd_slope(self, depth: int = 20):
-        """
-        Linear fit slope of log(q̃_n) = log(q_n / gcd(p_n, q_n)).
-        This measures how fast the reduced denominator grows.
+        r"""
+        Linear fit slope of ``log(q̃_n) = log(q_n / gcd(p_n, q_n))``.
+        This measures how fast the **reduced denominator** of the convergents
+        grows, and it is the denominator of the kamidelta formula
+        (``δ ≈ -1 + log|λ₁/λ₂| / gcd_slope``).
 
-        Used internally by delta_prediction, but also useful on its own.
-        Returns ``None`` for an unidentified trajectory (no p/q vectors) or when
-        the underlying ramanujantools fit fails.
+        IMPORTANT — must use the **same walk as δ**.  ``ramanujantools.Matrix.gcd_slope``
+        walks the reduced-denominator sequence starting at ``{n: 1}``, whereas this
+        handler identifies p/q and computes δ on the walk starting at ``{n: 0}``
+        (see :meth:`_limits` / :meth:`_walked_matrix`) and, for ``walk_type == 1``,
+        applies ``inv().T`` to each walked matrix.  Those are *different* integer
+        sequences: the identified p/q vectors belong to the ``{n: 0}`` walk, so
+        projecting them onto the ``{n: 1}`` walk yields a mismatched fraction with
+        far less gcd cancellation and a denominator that grows ~30 % faster.  Using
+        the ramanujantools slope therefore drove kamidelta far below the true δ
+        (e.g. δ≈0.26 but kamidelta≈-0.03).  We instead fit ``log(q̃_n)`` over the
+        **identical** ``Limit`` objects δ uses (:meth:`_limits`), so the eigenvalue
+        ratio and the denominator slope refer to the same convergents.
+
+        Used by :meth:`delta_prediction`.  Returns ``None`` for an unidentified
+        trajectory (no p/q vectors) or when the walk/fit fails.
         """
         def compute():
-            initial_values = self._initial_values()
-            if initial_values is None:
+            import numpy as np
+
+            if self._initial_values() is None:
                 return None  # not identified — nothing to fit
+            depths = list(range(1, depth))
+            if len(depths) < 2:
+                return None
             try:
-                return self.trajectory_matrix_typed.gcd_slope(
-                    depth,
-                    initial_values=initial_values,
-                    final_projection=self._final_projection(),
-                )
+                # Same walk δ uses (start {n: 0}, walk_type-aware) so the reduced
+                # denominator matches the convergents δ / the p/q vectors live on.
+                limits = self._limits(depths)
+                if not limits:
+                    return None
+                xs, ys = [], []
+                for d, lim in zip(depths, limits):
+                    try:
+                        q = lim.as_rational().q
+                        ys.append(float(sp.log(q).evalf(30)))
+                        xs.append(d)
+                    except Exception:
+                        continue  # degenerate step — skip this depth
+                if len(xs) < 2:
+                    return None
+                import mpmath as mp
+                slope = np.polyfit(np.asarray(xs, dtype=float),
+                                   np.asarray(ys, dtype=float), 1)[0]
+                return mp.mpf(float(slope))
             except Exception as e:
                 Logger(
                     f'gcd_slope failed at depth {depth}: {e} {self._trajectory_repr()}',
@@ -1533,9 +1579,23 @@ class TrajectoryAttributesHandler:
     # ==================================================================
 
     def _pq_vector(self, depth: Optional[int] = None) -> Tuple[Tuple[list, list], list] | Tuple[None, None]:
-        """Numerator and denominator projection vectors (p, q) such that constant = p·walk / q·walk."""
-        depth = depth or self._depth
+        """Numerator and denominator projection vectors (p, q) such that constant = p·walk / q·walk.
 
+        The (p, q) integer relation is **depth-independent**, so it is identified
+        once (via LIReC) at the cheap fixed depth ``search.IDENTIFY_DEPTH`` and then
+        cached and reused for the deeper δ / spectral computations.  LIReC — and the
+        walk that feeds it (whose convergents are huge rationals that must be
+        ``evalf``'d) — get much more expensive at large depth, so this avoids a
+        redundant deep identification walk.  If identification fails at that depth
+        (a slow-converging trajectory whose convergents are not yet accurate enough
+        there), it falls back to the full walk depth, so the result is **identical**
+        to identifying at the full depth — only faster in the common case.
+
+        The ``depth`` argument is retained for API compatibility but no longer
+        selects the identification depth (that is ``min(IDENTIFY_DEPTH, walk_depth)``);
+        callers that need a walk column at a specific depth use
+        :meth:`_effective_walk_values` directly.
+        """
         def compute():
             if self.constant() is None:
                 # No target constant ⇒ identification cannot run (it needs the
@@ -1545,76 +1605,89 @@ class TrajectoryAttributesHandler:
                 # ``constant=None`` handler the analyzer builds before injecting
                 # constants via ``compute_for_constant``).
                 return None, None
-            walk_values, _ = self._effective_walk_values(depth)
-            if walk_values is None:
-                # Walk failed (singular matrix, ZeroDivisionError, …) — no
-                # identification possible.  ``identified()`` reads this as
-                # False; ``p_vector``/``q_vector`` propagate ``None``.
-                return None, None
-            low_res_constant = self.constant().evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES)
-            walk_col = sp.Matrix(walk_values)
-
-            # If searchable is provided, try to find a cached p/q pair that matches the effective walk values.
-            if self._searchable:
-                def matcher(v):
-                    v1, v2 = v
-                    v1 = sp.Matrix(v1).T
-                    v2 = sp.Matrix(v2).T
-                    numerator = v1.dot(walk_col)
-                    denom = v2.dot(walk_col)
-                    err = sp.Abs(sp.Abs(sp.Rational(numerator, denom)) - low_res_constant)
-                    return sp.N(err, 25) < search_config.CACHE_ACCEPTANCE_THRESHOLD
-
-                if matched := self._searchable.cache.find(matcher):
-                    # Cache hit: matcher verified this (p, q) reconstructs the
-                    # constant.  Returning a non-None result is itself the
-                    # signal that identification succeeded (see ``identified``).
-                    return matched, walk_values
-            
-            # Compute p, q using LIReC
-            try:
-                res = db.identify(
-                    [low_res_constant] + [v.evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES) for v in walk_values[1:]]
-                )
-            except Exception as e:
-                Logger(f'Error while identifying constant. LIReC failed with: "{e}"', Logger.Levels.warning).log()
-                return None, walk_values
-
-            # LIReC may also return an empty list when it cannot identify the constant
-            if len(res) == 0:
-                return None, walk_values
-
-            # extract p, q from LIReC result
-            res = res[0]
-            res.include_isolated = 0
-            estimated_expr = sp.nsimplify(str(res).rsplit(' ', 1)[0], rational=True)
-            numerator, denom = sp.fraction(estimated_expr)
-            p_dict = numerator.as_coefficients_dict()
-            q_dict = denom.as_coefficients_dict()
-            syms = sp.symbols(f'c:{self.traj_size()}')[1:]
-            ext_syms = [1] + list(syms)
-            # Keep coefficients as sympy Numbers — they can be Rational
-            # (e.g. ``1/2``) and ``int(Rational)`` raises.  JSON-safety is
-            # handled at the DTO boundary by ``_pq_to_jsonsafe``.
-            p = [p_dict[sym] for sym in ext_syms]
-            q = [q_dict[sym] for sym in ext_syms]
-
-            estimated = estimated_expr.subs({sym: v for sym, v in zip(ext_syms, list(walk_values))})
-            err = sp.Abs(estimated - self.constant())
-            if sp.N(err, 15) > search_config.IDENTIFY_CHECK_THRESHOLD:
-                # Logger(
-                #     f'Unexpected - LIReC provided bad combination. '
-                #     f'Could not approximate constant {self.constant()} with p/q. Error: {err}'
-                #     f'Please contact developers.',
-                #     Logger.Levels.warning
-                # ).log()
-                return None, walk_values
-
-            if self._searchable:
-                self._searchable.cache.append((tuple(p), tuple(q)))
-            return (p, q), walk_values
+            id_depth = min(int(search_config.IDENTIFY_DEPTH), int(self._depth))
+            vectors, walk_values = self._identify_at(id_depth)
+            if vectors is None and self._depth > id_depth:
+                # Cheap identification failed — retry at the full walk depth so a
+                # slow-converging trajectory still identifies (result-preserving).
+                vectors, walk_values = self._identify_at(self._depth)
+            return vectors, walk_values
 
         return self.__get_utility("pq_vector", compute)
+
+    def _identify_at(self, depth: int):
+        """Identify the (p, q) integer relation from the walk column at ``depth``.
+
+        :return: ``((p, q), walk_values)`` on success; ``(None, walk_values)`` when
+            the walk succeeded but no verified relation was found (LIReC error /
+            empty / failed the ``IDENTIFY_CHECK_THRESHOLD`` reconstruction check);
+            ``(None, None)`` when the walk itself failed.  ``walk_values`` is the
+            effective walk column at ``depth``.
+        """
+        walk_values, _ = self._effective_walk_values(depth)
+        if walk_values is None:
+            # Walk failed (singular matrix, ZeroDivisionError, …) — no
+            # identification possible.  ``identified()`` reads this as False;
+            # ``p_vector``/``q_vector`` propagate ``None``.
+            return None, None
+        low_res_constant = self.constant().evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES)
+        walk_col = sp.Matrix(walk_values)
+
+        # If searchable is provided, try to find a cached p/q pair that matches the effective walk values.
+        if self._searchable:
+            def matcher(v):
+                v1, v2 = v
+                v1 = sp.Matrix(v1).T
+                v2 = sp.Matrix(v2).T
+                numerator = v1.dot(walk_col)
+                denom = v2.dot(walk_col)
+                err = sp.Abs(sp.Abs(sp.Rational(numerator, denom)) - low_res_constant)
+                return sp.N(err, 25) < search_config.CACHE_ACCEPTANCE_THRESHOLD
+
+            if matched := self._searchable.cache.find(matcher):
+                # Cache hit: matcher verified this (p, q) reconstructs the
+                # constant.  Returning a non-None result is itself the
+                # signal that identification succeeded (see ``identified``).
+                return matched, walk_values
+
+        # Compute p, q using LIReC (values evaluated at CONSTANT_NO_DIGITS_LOW_RES).
+        try:
+            res = db.identify(
+                [low_res_constant] + [v.evalf(search_config.CONSTANT_NO_DIGITS_LOW_RES) for v in walk_values[1:]]
+            )
+        except Exception as e:
+            Logger(f'Error while identifying constant. LIReC failed with: "{e}"', Logger.Levels.warning).log()
+            return None, walk_values
+
+        # LIReC may also return an empty list when it cannot identify the constant
+        if len(res) == 0:
+            return None, walk_values
+
+        # extract p, q from LIReC result
+        res = res[0]
+        res.include_isolated = 0
+        estimated_expr = sp.nsimplify(str(res).rsplit(' ', 1)[0], rational=True)
+        numerator, denom = sp.fraction(estimated_expr)
+        p_dict = numerator.as_coefficients_dict()
+        q_dict = denom.as_coefficients_dict()
+        syms = sp.symbols(f'c:{self.traj_size()}')[1:]
+        ext_syms = [1] + list(syms)
+        # Keep coefficients as sympy Numbers — they can be Rational
+        # (e.g. ``1/2``) and ``int(Rational)`` raises.  JSON-safety is
+        # handled at the DTO boundary by ``_pq_to_jsonsafe``.
+        p = [p_dict[sym] for sym in ext_syms]
+        q = [q_dict[sym] for sym in ext_syms]
+
+        estimated = estimated_expr.subs({sym: v for sym, v in zip(ext_syms, list(walk_values))})
+        err = sp.Abs(estimated - self.constant())
+        if sp.N(err, 15) > search_config.IDENTIFY_CHECK_THRESHOLD:
+            # LIReC provided a combination that does not reconstruct the constant
+            # to tolerance (spurious relation) — treat as not identified.
+            return None, walk_values
+
+        if self._searchable:
+            self._searchable.cache.append((tuple(p), tuple(q)))
+        return (p, q), walk_values
 
     def p_vector(self, depth: Optional[int] = None) -> list:
         """Projection vector p such that p·walk gives the numerator sequence."""
