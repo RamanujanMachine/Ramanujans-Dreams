@@ -20,7 +20,7 @@ from dreamer.utils.types import CMFData
 from .utils import initial_points as init_points
 from .v2 import ExtractionManager, LrslibExtractor, RayShootingExtractor
 from .v2 import symmetry_for_cmf
-from .determinants import axis_determinant
+from .meijer_g_determinant import meijer_g_determinant
 
 import os.path
 import sympy as sp
@@ -29,6 +29,7 @@ import math
 from collections import defaultdict
 from functools import partial
 from ramanujantools.cmf import pFq as rt_pFq
+from ramanujantools.cmf import MeijerG as rt_MeijerG
 from ramanujantools import Position
 from typing import Dict, List, Optional, Set, Tuple, Union
 
@@ -93,8 +94,13 @@ def extract_cmf_hyperplanes(cmf_data: CMFData) -> List[Hyperplane]:
     hps: Set[Hyperplane] = set()
 
     for s in symbols:
-        # Closed form for pFq / MeijerG (a symbolic det() does not finish for MG55+).
-        det = axis_determinant(cmf, s)
+        if isinstance(cmf, rt_pFq):
+            det = rt_pFq.determinant(cmf.p, cmf.q, cmf.z, s)
+        elif isinstance(cmf, rt_MeijerG):
+            # Closed form (a symbolic det() does not finish for MG55+); to move into RT.
+            det = meijer_g_determinant(cmf.m, cmf.n, cmf.p, cmf.q, cmf.z, s)
+        else:
+            det = cmf.matrices[s].det()
         zeros = sp.solve(det)
         zeros = [Hyperplane(lhs - rhs, symbols) for sol in zeros for lhs, rhs in sol.items()]
         hps.update(zeros)

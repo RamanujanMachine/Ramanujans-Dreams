@@ -1,4 +1,9 @@
-"""Closed-form determinants of CMF axis matrices (for hyperplane extraction).
+"""Closed-form determinant of Meijer-G CMF axis matrices (for hyperplane extraction).
+
+Self-contained (depends only on ramanujantools + sympy) and written to be moved
+into ramanujantools as ``MeijerG.determinant(m, n, p, q, z, axis)``, mirroring
+``pFq.determinant``; RD will then call RT's version the same way it calls
+``pFq.determinant`` in ``extract_cmf_hyperplanes``.
 
 A generic symbolic ``Matrix.det()`` does not finish for large D-finite CMFs (the
 first axis of ``MeijerG(5, 2, 5, 5, 1)`` ran for more than 4 minutes).  For D-finite
@@ -20,14 +25,12 @@ s = ±1 the axis sign of ``MeijerG.construct_matrix`` and d = deg P:
 
 The shift a → a+1 applies to LC too: when z = ±1 makes the top coefficient
 cancel (e.g. MG55 at z = 1, where d drops from 5 to 4) the new leading coefficient
-depends on the a's.  pFq uses RT's own hard-coded ``pFq.determinant``.
-Verified against ``det()`` in ``tests/test_cmf_determinants.py``.
+depends on the a's.  Verified against ``det()`` in ``tests/test_cmf_determinants.py``.
 """
 from __future__ import annotations
 
 import sympy as sp
 from ramanujantools.cmf import MeijerG as rt_MeijerG
-from ramanujantools.cmf import pFq as rt_pFq
 from ramanujantools.cmf.d_finite import theta
 
 
@@ -56,12 +59,3 @@ def meijer_g_determinant(m: int, n: int, p: int, q: int, z, axis: sp.Symbol) -> 
         return sp.factor(factor * monic.subs(theta, axis))
     lowered = monic.subs(axis, axis + 1).subs(theta, axis)
     return sp.factor(1 / (factor * lowered))
-
-
-def axis_determinant(cmf, axis: sp.Symbol) -> sp.Expr:
-    """Determinant of ``cmf.matrices[axis]``: closed form when known, else ``det()``."""
-    if isinstance(cmf, rt_pFq):
-        return rt_pFq.determinant(cmf.p, cmf.q, cmf.z, axis)
-    if isinstance(cmf, rt_MeijerG):
-        return meijer_g_determinant(cmf.m, cmf.n, cmf.p, cmf.q, cmf.z, axis)
-    return cmf.matrices[axis].det()

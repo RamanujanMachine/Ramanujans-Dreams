@@ -1,4 +1,4 @@
-"""Closed-form CMF axis determinants (``dreamer.extraction.determinants``).
+"""Closed-form Meijer-G axis determinants (``dreamer.extraction.meijer_g_determinant``).
 
 Same strategy as RT's ``pfq_test.py``: compare the closed form with the actual
 ``Matrix.det()`` — symbolically where ``det()`` is cheap, and exactly at random
@@ -9,9 +9,9 @@ import random
 import pytest
 import sympy as sp
 from sympy.abc import z
-from ramanujantools.cmf import MeijerG, pFq
+from ramanujantools.cmf import MeijerG
 
-from dreamer.extraction.determinants import axis_determinant, meijer_g_axis_sign, meijer_g_determinant
+from dreamer.extraction.meijer_g_determinant import meijer_g_axis_sign, meijer_g_determinant
 
 
 def _axes(cmf):
@@ -62,21 +62,6 @@ def test_axis_sign_matches_rt():
 def test_rejects_non_axis():
     with pytest.raises(ValueError):
         meijer_g_determinant(1, 1, 2, 2, z, sp.Symbol("x0"))
-
-
-def test_dispatch():
-    x0 = sp.Symbol("x0")
-    assert axis_determinant(pFq(3, 2, 1), x0) == pFq.determinant(3, 2, 1, x0)
-    a0 = sp.Symbol("a0")
-    assert axis_determinant(MeijerG(1, 1, 2, 2, z), a0) == meijer_g_determinant(1, 1, 2, 2, z, a0)
-
-
-def test_dispatch_falls_back_to_det():
-    from ramanujantools import Matrix
-    from ramanujantools.cmf import CMF
-    x, y = sp.symbols("x y")
-    cmf = CMF({x: Matrix([[1, x], [0, y]]), y: Matrix([[y, 0], [1, x]])}, validate=False)
-    assert axis_determinant(cmf, x) == y
 
 
 @pytest.mark.timeout(300)
