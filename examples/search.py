@@ -206,8 +206,6 @@ class MySearchMod(SearcherModScheme):
             return
 
         os.makedirs(sys_config.EXPORT_SEARCH_RESULTS, exist_ok=True)
-        num_workers = 0  # unused: the sink writes directly (no background queue)
-        config_overrides = config.export_configurations()
 
         # Deduplicate shards by shard_id (one shard can appear under several
         # constants) and remember which constants each shard was identified for —
@@ -223,16 +221,12 @@ class MySearchMod(SearcherModScheme):
         for shard_id, shard in SmartTQDM(
                 shard_by_id.items(), desc='Searching shards: ', **sys_config.TQDM_CONFIG,
         ):
-            self._run_shard(
-                shard, list(shard_identified[shard_id]), num_workers, config_overrides,
-            )
+            self._run_shard(shard, list(shard_identified[shard_id]))
 
     def _run_shard(
         self,
         shard: Shard,
         identified_consts: List[Constant],
-        num_workers: int,
-        config_overrides: dict,
     ) -> None:
         """Open the shard's JSONL store and run the method for each constant."""
         cmf_id, shard_id, shard_encoding_str = derive_cmf_and_shard_ids(shard)
@@ -246,12 +240,9 @@ class MySearchMod(SearcherModScheme):
         # line in this process (Tier-2 attributes are already inside each DTO —
         # they are computed together with the walk, see MySearchMethod.run).
         with worker_pool(
-            num_workers=num_workers,
             worker_fn=sink_item_dto,
             writer_fn=write_jsonl_line,
             output_path=output_path,
-            config_overrides=config_overrides,
-            parallel=False,
         ) as push:
             for const in identified_consts:
                 MySearchMethod(shard, const, use_LIReC=self.use_LIReC).run(

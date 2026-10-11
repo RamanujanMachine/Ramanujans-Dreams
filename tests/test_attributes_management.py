@@ -1964,11 +1964,6 @@ class TestDirectWritePath:
             return original_process(*args, **kwargs)
 
         monkeypatch.setattr("multiprocessing.Process", spy_process)
-        # ``worker_pool`` creates Process via ``mp.Process`` in multi_processing.py.
-        monkeypatch.setattr(
-            "dreamer.utils.multi_processing.mp.Process",
-            spy_process,
-        )
 
         from dreamer.configs.system import sys_config
         monkeypatch.setattr(sys_config, "EXPORT_SEARCH_RESULTS", str(tmp_path))
@@ -1977,8 +1972,6 @@ class TestDirectWritePath:
         searcher._run_shard(
             shard=simple_shard,
             identified_consts=list(simple_shard.consts),
-            num_workers=4,  # ignored on the direct-write path
-            config_overrides=config.export_configurations(),
         )
 
         assert process_calls[0] == 0, (
@@ -2371,10 +2364,8 @@ class TestAnalyzerDedup:
 
 
 # ---------------------------------------------------------------------------
-# 15. worker_pool generic abstraction
+# 15. worker_pool — the main-process result writer
 # ---------------------------------------------------------------------------
-
-# Module-level worker/writer fns so multiprocessing can pickle them.
 
 def _double_worker(item):
     """Worker for tests: returns ``(label, value*2)``."""
@@ -2382,151 +2373,61 @@ def _double_worker(item):
     return (label, value * 2)
 
 
-def _id_worker(item):
-    return item
-
-
 def _write_repr(item, fout):
     fout.write(repr(item) + "\n")
 
 
 class TestWorkerPool:
-    """Generic queue/process abstraction must run both direct and MPMC modes."""
+    """``worker_pool`` writes ``writer_fn(worker_fn(item))`` per push, in the
+    calling process (its multi-process mode was removed — unused)."""
 
-    def test_direct_mode_no_subprocess(self, tmp_path, monkeypatch):
-        """``worker_fn=None`` runs producer → writer on the main thread."""
-        from dreamer.configs import config
+    def test_identity_transform(self, tmp_path):
+        """``worker_fn=None`` writes each item unchanged, in push order."""
         from dreamer.utils.multi_processing import worker_pool
 
-        process_calls = [0]
-
-        def spy_process(*args, **kwargs):
-            process_calls[0] += 1
-            raise AssertionError("Direct mode must not spawn subprocesses")
-
-        monkeypatch.setattr("dreamer.utils.multi_processing.mp.Process", spy_process)
-
         output = tmp_path / "out.txt"
-        with worker_pool(
-            num_workers=4,
-            worker_fn=None,
-            writer_fn=_write_repr,
-            output_path=str(output),
-            config_overrides=config.export_configurations(),
-        ) as push:
+        with worker_pool(worker_fn=None, writer_fn=_write_repr, output_path=str(output)) as push:
             push(("a", 1))
             push(("b", 2))
+        assert output.read_text().strip().splitlines() == ["('a', 1)", "('b', 2)"]
 
-        assert process_calls[0] == 0
-        lines = output.read_text().strip().splitlines()
-        assert lines == ["('a', 1)", "('b', 2)"]
-
-    def test_parallel_false_runs_worker_fn_inline(self, tmp_path, monkeypatch):
-        """``parallel=False`` applies the worker_fn on the main thread.
-
-        Crucial for the Search direct-write path: the producer pushes
-        ``(traj_matrix, payload)`` tuples that the worker must unwrap
-        before they reach the writer — and this still has to happen
-        when no subprocess is created.
-        """
-        from dreamer.configs import config
+    def test_worker_fn_applied_before_writing(self, tmp_path):
+        """The Search sink path: the producer pushes tuples the worker unwraps."""
         from dreamer.utils.multi_processing import worker_pool
 
-        def spy_no_process(*args, **kwargs):
-            raise AssertionError("parallel=False must not spawn subprocesses")
-
-        monkeypatch.setattr(
-            "dreamer.utils.multi_processing.mp.Process", spy_no_process,
-        )
-
         output = tmp_path / "out.txt"
-        with worker_pool(
-            num_workers=4,
-            worker_fn=_double_worker,
-            writer_fn=_write_repr,
-            output_path=str(output),
-            config_overrides=config.export_configurations(),
-            parallel=False,
-        ) as push:
+        with worker_pool(worker_fn=_double_worker, writer_fn=_write_repr, output_path=str(output)) as push:
             push(("x", 1))
             push(("x", 2))
+        assert output.read_text().strip().splitlines() == ["('x', 2)", "('x', 4)"]
 
-        lines = output.read_text().strip().splitlines()
-        assert lines == ["('x', 2)", "('x', 4)"]
-
-    def test_mpmc_mode_applies_worker_fn(self, tmp_path):
-        """MPMC mode pipes every item through ``worker_fn`` before writing."""
-        from dreamer.configs import config
-        from dreamer.utils.multi_processing import worker_pool
-
-        output = tmp_path / "out.txt"
-        with worker_pool(
-            num_workers=2,
-            worker_fn=_double_worker,
-            writer_fn=_write_repr,
-            output_path=str(output),
-            config_overrides=config.export_configurations(),
-        ) as push:
-            for i in range(5):
-                push(("x", i))
-
-        lines = output.read_text().strip().splitlines()
-        # Order across workers is not guaranteed — compare as a set.
-        assert set(lines) == {
-            "('x', 0)", "('x', 2)", "('x', 4)", "('x', 6)", "('x', 8)",
-        }
-
-    def test_mpmc_subprocesses_cleaned_up_even_if_producer_raises(self, tmp_path):
-        """The finally-block must drain queues and join workers + writer."""
-        from dreamer.configs import config
+    def test_producer_error_propagates_and_keeps_written_lines(self, tmp_path):
+        """Failure path: a raising producer surfaces its error; lines pushed
+        before it are on disk (the file is closed, hence flushed)."""
         from dreamer.utils.multi_processing import worker_pool
 
         output = tmp_path / "out.txt"
         with pytest.raises(RuntimeError, match="producer-side"):
-            with worker_pool(
-                num_workers=2,
-                worker_fn=_id_worker,
-                writer_fn=_write_repr,
-                output_path=str(output),
-                config_overrides=config.export_configurations(),
-            ) as push:
+            with worker_pool(worker_fn=None, writer_fn=_write_repr, output_path=str(output)) as push:
                 push(("x", 1))
                 raise RuntimeError("producer-side failure")
-        # Reaching this line proves all subprocesses joined (the with-block
-        # would hang on __exit__ otherwise).
+        assert output.read_text().strip().splitlines() == ["('x', 1)"]
 
     def test_empty_producer_writes_no_lines(self, tmp_path):
         """No ``push`` calls → output file is created but empty."""
-        from dreamer.configs import config
         from dreamer.utils.multi_processing import worker_pool
 
         output = tmp_path / "empty.txt"
-        with worker_pool(
-            num_workers=2,
-            worker_fn=_id_worker,
-            writer_fn=_write_repr,
-            output_path=str(output),
-            config_overrides=config.export_configurations(),
-        ) as _push:
-            pass  # nothing pushed
+        with worker_pool(worker_fn=None, writer_fn=_write_repr, output_path=str(output)):
+            pass
+        assert output.exists() and output.read_text() == ""
 
-        # The writer opens the file in append mode, so it exists even with no input.
-        assert output.exists()
-        assert output.read_text() == ""
-
-    def test_direct_mode_batches_flushes(self, tmp_path, monkeypatch):
-        """Direct mode flushes every WRITER_BATCH_SIZE items, not per push.
-
-        We monkeypatch ``builtins.open`` to wrap the returned file so we can
-        count ``flush`` calls.  With ``WRITER_BATCH_SIZE=3``, three pushes
-        should produce exactly one flush — not three.
-        """
-        from dreamer.configs import config
+    def test_batches_flushes(self, tmp_path, monkeypatch):
+        """Flushes every WRITER_BATCH_SIZE items, not per push."""
         from dreamer.configs.system import sys_config
         from dreamer.utils.multi_processing import worker_pool
 
         monkeypatch.setattr(sys_config, "WRITER_BATCH_SIZE", 3)
-
         flush_calls = [0]
         real_open = open
 
@@ -2542,31 +2443,19 @@ class TestWorkerPool:
                 return self
             def __exit__(self, *a):
                 return self._f.__exit__(*a)
-            def close(self):
-                return self._f.close()
-
-        def counting_open(*args, **kwargs):
-            return FlushCountingFile(real_open(*args, **kwargs))
 
         monkeypatch.setattr(
-            "dreamer.utils.multi_processing.open", counting_open, raising=False,
+            "dreamer.utils.multi_processing.open",
+            lambda *a, **k: FlushCountingFile(real_open(*a, **k)), raising=False,
         )
-
         output = tmp_path / "batched.txt"
-        with worker_pool(
-            num_workers=1,
-            worker_fn=None,
-            writer_fn=_write_repr,
-            output_path=str(output),
-            config_overrides=config.export_configurations(),
-            parallel=False,
-        ) as push:
+        with worker_pool(worker_fn=None, writer_fn=_write_repr, output_path=str(output)) as push:
             push(("x", 1))
             push(("x", 2))
             assert flush_calls[0] == 0, "Pre-batch pushes must not flush"
-            push(("x", 3))  # third push fills the batch → exactly one flush
+            push(("x", 3))
             assert flush_calls[0] == 1
-            push(("x", 4))  # fourth starts a new batch — no extra flush yet
+            push(("x", 4))
             assert flush_calls[0] == 1
 
 
@@ -2629,13 +2518,13 @@ class TestTier3PostProcess:
             }) + "\n"
         )
 
-        # Spy on subprocess spawn — we must not even enter the worker_pool MPMC path.
+        # Spy on subprocess spawn — a fully covered shard must not start a pool.
         process_calls = [0]
         original = mp.Process
         def counting_process(*args, **kwargs):
             process_calls[0] += 1
             return original(*args, **kwargs)
-        monkeypatch.setattr("dreamer.utils.multi_processing.mp.Process", counting_process)
+        monkeypatch.setattr("multiprocessing.Process", counting_process)
 
         Tier3PostProcessModV1({e: [simple_shard]}).execute()
 
