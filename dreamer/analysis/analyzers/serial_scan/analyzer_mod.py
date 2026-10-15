@@ -33,12 +33,13 @@ passes for none of its constants is discarded entirely.
 
 import json
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 from dreamer.utils.schemes.analysis_scheme import AnalyzerModScheme
 from dreamer.utils.ui.tqdm_config import SmartTQDM
+from dreamer.utils import monitoring
 from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.logger import Logger
 from dreamer.utils.schemes.module import CatchErrorInModule
@@ -175,12 +176,21 @@ class AnalyzerModV1(AnalyzerModScheme):
             with StagePool([r.shard for r in runs], workers=workers) as pool, \
                     BufferedJsonlWriter() as writer:
                 results = pool.imap(_analysis_walk_task(), tasks)
-                for task, res in zip(
-                    tasks,
-                    SmartTQDM(results, total=len(tasks), desc='Analyzing trajectories',
-                              **sys_config.TQDM_CONFIG),
-                ):
-                    self._absorb_result(runs[task.shard_idx], task, res, writer)
+                # Run-monitor shard level: tasks of all shards stream through one
+                # pool, so report shards completed (all their walks absorbed) and
+                # the shard of the latest result next to the trajectory count.
+                left_per_shard = Counter(t.shard_idx for t in tasks)
+                shards_done = sum(1 for r in runs if r.index not in left_per_shard)
+                bar = SmartTQDM(results, total=len(tasks), desc='Analyzing trajectories',
+                                **sys_config.TQDM_CONFIG)
+                node = monitoring.progress()
+                for task, res in zip(tasks, bar):
+                    run = runs[task.shard_idx]
+                    self._absorb_result(run, task, res, writer)
+                    left_per_shard[task.shard_idx] -= 1
+                    if left_per_shard[task.shard_idx] == 0:
+                        shards_done += 1
+                    node.metric(shards=f"{shards_done}/{len(runs)}", shard=run.shard_id[:12])
 
         # Phase 3 — per-shard summaries + threshold filtering.
         shard_const_best: Dict[str, Dict[Constant, Optional[float]]] = {

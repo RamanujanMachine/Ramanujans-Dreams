@@ -52,6 +52,7 @@ summary of the knobs you are most likely to touch, not an exhaustive dump.
 | `config.post_process` | `post_process.py` | Tier-3 attributes |
 | `config.graph` | `graph.py` | post-process graphing |
 | `config.logging` | `logging.py` | logging / profiling / watchdogs |
+| `config.monitor` | `monitor.py` | live run monitor (event log, progress, resources, walltime) |
 
 The plumbing — `config_manager.py` (the `ConfigManager` facade) and
 `configurable.py` (the `Configurable` base giving every category `display()` /
@@ -214,3 +215,20 @@ See the [graphing README](../graphing/README.md) for what each artefact means.
 | `PROFILE` / `PROFILE_SUMMARY` | Per-timer profiling output. |
 | `WATCHDOG_ENABLED` / `WATCHDOG_*_SECONDS` | Hang-detection warnings for long-running trajectory/attribute computations. |
 | `EXCEPTION_SHOW_TRACE` / `DEBUG_SHOW_TRACE` | Include stack traces in logs. |
+
+## `monitor`
+
+The live run monitor (`runmon`): one sleeping thread in the main process records a
+searchable event log, progress per stage / shard, CPU and memory of every process
+against the run's allocation, hang watchdogs and the batch job's walltime. Watch a
+run with `python -m runmon watch <RUN_DIR>/latest`.
+
+| Field | Meaning |
+|-------|---------|
+| `ENABLED` | Run the monitor (default `True`). Set `False` to run without it, e.g. quick local runs. |
+| `RUN_DIR` | One sub-directory per run (`events.jsonl`, `status.json`, workers' event files); `latest` points at the newest. |
+| `EVENT_LOG_LEVEL` / `WORKER_EVENT_LOG_LEVEL` | Lowest level of main-process / worker log lines copied into the event log (structured events are always kept). |
+| `SAMPLE_SECONDS` / `HEARTBEAT_SECONDS` | Resource sampling interval; compact snapshots written into the event log for replay. |
+| `STALL_SECONDS` | Warn when no progress was reported for this long. |
+| `WALLTIME_GRACE_SECONDS` | Inside a PBS/Slurm job: flush every log to disk this long before the walltime deadline. |
+

@@ -49,15 +49,24 @@ class WorkerInitError(RuntimeError):
     """The pool's worker initializer raised — a code/config bug, not a lost worker."""
 
 
-def _guarded_init(initializer, initargs):
+def _guarded_init(initializer, initargs, monitor_dir=None):
     """Run the real initializer; on failure keep the worker alive and remember why.
 
     ``ProcessPoolExecutor`` reports a failed initializer exactly like a killed
     worker (``BrokenProcessPool``), which would be mistaken for out-of-memory
     and retried.  Instead the first task in this worker raises
     :class:`WorkerInitError` with the original traceback.
+
+    With a run monitor active in the parent, ``monitor_dir`` is its run
+    directory: the worker writes its own event file there.
     """
     global _INIT_ERROR
+    if monitor_dir:
+        try:
+            from dreamer.utils.monitoring import init_worker
+            init_worker(monitor_dir)
+        except Exception:      # monitoring must never stop a worker
+            pass
     if initializer is None:
         return
     try:
@@ -169,6 +178,7 @@ class ResilientPool:
         ):
             self._processes = slow
         self.peak_worker_mb = 0.0
+        self.completed = 0
         self._initializer = initializer
         self._initargs = initargs
         self._on_death = on_death
@@ -185,6 +195,26 @@ class ResilientPool:
         self._completed_since_resize = 0
         self._submitted_since_check = 0
         self._executor = self._new_executor(self._processes)
+        from dreamer.utils import monitoring
+        from dreamer.utils.logger import Logger
+        self._monitor_handle = monitoring.register_pool(self)
+        Logger.event(
+            "pool_created",
+            f"[{self._name}] {self._processes} worker(s) (requested {self._requested})",
+            Logger.Levels.debug if self._processes <= 1 else Logger.Levels.info,
+            pool=self._name, workers=self._processes, requested=self._requested,
+        )
+
+    def monitor_info(self) -> dict:
+        """State for the run monitor (read from the monitor thread; plain reads only)."""
+        procs = getattr(self._executor, "_processes", None) or {}
+        return {
+            "name": self._name, "workers": self._processes, "requested": self._requested,
+            "in_flight": sum(1 for t in list(self._outstanding.values()) if not t.done),
+            "completed": self.completed, "deaths": self.deaths, "shrinks": self.shrinks,
+            "grows": self.grows, "peak_mb": round(self.peak_worker_mb, 1),
+            "pids": list(procs), "closed": self._closed,
+        }
 
     # ------------------------------------------------------------------
     # Executor management
@@ -195,11 +225,12 @@ class ResilientPool:
 
     def _new_executor(self, workers: int) -> ProcessPoolExecutor:
         from dreamer.utils.mp_context import pool_context
+        from dreamer.utils.monitoring import worker_run_dir
         kwargs = dict(
             max_workers=workers,
             mp_context=pool_context(),
             initializer=_guarded_init,
-            initargs=(self._initializer, tuple(self._initargs or ())),
+            initargs=(self._initializer, tuple(self._initargs or ()), worker_run_dir()),
         )
         if self._max_tasks and kwargs["mp_context"].get_start_method() != "fork":
             kwargs["max_tasks_per_child"] = self._max_tasks
@@ -272,21 +303,25 @@ class ResilientPool:
         ex._max_workers = self._processes
         self._last_resize = time.time()
         self._completed_since_resize = 0
-        Logger(
+        Logger.event(
+            "pool_grow",
             f"[{self._name}] warm workers measure ~{per_worker:.0f} MB each and more fit; "
             f"growing to {self._processes} worker(s)",
             Logger.Levels.info,
-        ).log()
+            pool=self._name, workers=self._processes, per_worker_mb=round(per_worker),
+        )
 
     def _shrink_drain(self, workers: int, reserve: float) -> None:
         """Shrink without ever running more processes than before (see above)."""
         import time
         from dreamer.utils.logger import Logger
-        Logger(
+        Logger.event(
+            "pool_shrink",
             f"[{self._name}] available memory below the {reserve:.0f} MB reserve; "
             f"draining running tasks and shrinking to {workers} worker(s)",
             Logger.Levels.warning,
-        ).log()
+            pool=self._name, workers=workers, reserve_mb=reserve,
+        )
         waiting = [t for t in self._outstanding.values()
                    if not t.done and t.future is not None and not t.future.running() and t.future.cancel()]
         old = self._executor
@@ -312,12 +347,15 @@ class ResilientPool:
             t.suspicions += 1
         broken.shutdown(wait=False, cancel_futures=True)
         self._processes = max(1, self._processes // 2)
-        Logger(
+        unfinished = sum(1 for t in self._outstanding.values() if not t.done)
+        Logger.event(
+            "worker_died",
             f"[{self._name}] a worker process died (likely out of memory); restarting "
-            f"with {self._processes} worker(s) and resubmitting "
-            f"{sum(1 for t in self._outstanding.values() if not t.done)} unfinished task(s)",
+            f"with {self._processes} worker(s) and resubmitting {unfinished} unfinished task(s)",
             Logger.Levels.warning,
-        ).log()
+            pool=self._name, workers=self._processes, unfinished=unfinished,
+            suspects=[t.seq for t in running],
+        )
         self._executor = self._new_executor(self._processes)
         for t in sorted(self._outstanding.values(), key=lambda t: t.seq):
             if t.done:
@@ -331,15 +369,21 @@ class ResilientPool:
         """Run a twice-suspected task alone; a third death marks it as failed."""
         from dreamer.utils.logger import Logger
 
+        Logger.event(
+            "task_isolated",
+            f"[{self._name}] task {task.seq} was running at two worker deaths; running it alone",
+            Logger.Levels.warning, pool=self._name, task=task.seq,
+        )
         solo = self._new_executor(1)
         try:
             task.result = solo.submit(_measured_call, task.fn, task.args).result()[0]
         except BrokenProcessPool:
-            Logger(
+            Logger.event(
+                "task_lost",
                 f"[{self._name}] task {task.seq} killed its worker again when run "
                 f"alone — giving up on it ({_DEATH_MESSAGE})",
-                Logger.Levels.warning,
-            ).log()
+                Logger.Levels.warning, pool=self._name, task=task.seq,
+            )
             if self._on_death is None:
                 self._outstanding.pop(task.seq, None)
                 raise WorkerDeathError(f"[{self._name}] {_DEATH_MESSAGE}")
@@ -356,6 +400,7 @@ class ResilientPool:
                 value, peak_mb = task.future.result(timeout=timeout)
                 task.result = value
                 task.done = True
+                self.completed += 1
                 self._completed_since_resize += 1
                 self.peak_worker_mb = max(self.peak_worker_mb, peak_mb)
             except BrokenProcessPool:
@@ -429,6 +474,21 @@ class ResilientPool:
                 pending.remove(r)
                 yield r.get()
 
+    def _retire(self) -> None:
+        """Leave the run monitor's pool list (once)."""
+        handle = getattr(self, "_monitor_handle", None)
+        if handle is not None:
+            self._monitor_handle = None
+            from dreamer.utils import monitoring
+            from dreamer.utils.logger import Logger
+            monitoring.unregister_pool(handle)
+            Logger.event(
+                "pool_closed",
+                f"[{self._name}] closed after {self.completed} task(s), {self.deaths} worker death(s)",
+                Logger.Levels.debug, pool=self._name, completed=self.completed, deaths=self.deaths,
+                shrinks=self.shrinks, grows=self.grows, peak_mb=round(self.peak_worker_mb, 1),
+            )
+
     def close(self) -> None:
         """No new tasks; workers finish what is outstanding."""
         self._closed = True
@@ -436,6 +496,7 @@ class ResilientPool:
     def join(self) -> None:
         """Wait for the workers to exit (after :meth:`close`)."""
         self._executor.shutdown(wait=True)
+        self._retire()
 
     def terminate(self) -> None:
         """Stop now, discarding outstanding tasks."""
@@ -449,6 +510,7 @@ class ResilientPool:
                 p.terminate()
         for p in procs:
             p.join(timeout=5)
+        self._retire()
 
     def __enter__(self) -> "ResilientPool":
         return self

@@ -37,6 +37,8 @@ from dreamer.search.methods.flatland.parallel_eval import WalkPrefetcher, evalua
 from dreamer.utils.rand import derive_py_random
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
+from dreamer.utils import monitoring
+from runmon.estimators import sa_estimator
 from dreamer.utils.schemes.searcher_scheme import SearchMethod
 from dreamer.utils.storage.trajectory_attributes import TrajectoryAttributesHandler
 
@@ -236,6 +238,11 @@ class SimulatedAnnealingSearch(SearchMethod):
         #: diagnostics and tests.
         self.lookahead_stats = prefetcher.stats if prefetcher is not None else None
 
+        # Run-monitor progress of this shard × constant.  SA has no fixed length: it
+        # ends at the first exhausted budget — accepted moves (max_iters, or the move
+        # count at which T reaches Tmin) or the total-step cap (runmon.estimators).
+        progress = monitoring.progress()
+
         while iter_left > 0 and T > Tmin:
             total_steps += 1
             if total_steps > max_total_steps:
@@ -245,6 +252,12 @@ class SimulatedAnnealingSearch(SearchMethod):
                     Logger.Levels.warning,
                 ).log()
                 break
+            est = sa_estimator(max_iters - iter_left, total_steps, T0=T0, Tmin=Tmin,
+                               max_iters=max_iters, max_total_steps=max_total_steps,
+                               schedule=schedule)
+            progress.estimate(est.fraction(), T=float(T), best=float(best_delta),
+                              accepted=max_iters - iter_left, steps=total_steps,
+                              clock=est.dominant())
 
             # Generate in-cone, non-tabu, within-traj-length neighbours.
             neighbours: List[np.ndarray] = []

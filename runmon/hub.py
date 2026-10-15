@@ -89,6 +89,10 @@ class HubConfig:
     memory_probe: Optional[Callable[[], float]] = None
     #: ``(label, elapsed, detail) -> None`` for watchdog fires; default publishes an event.
     on_watchdog: Optional[Callable[[str, float, Optional[str]], None]] = None
+    #: Event listeners and grace-period callbacks registered *before* the thread
+    #: starts (its first tick may already publish or reach the grace period).
+    listeners: List[Callable[[Dict[str, Any]], None]] = field(default_factory=list)
+    grace_callbacks: List[Callable[[], None]] = field(default_factory=list)
     meta: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -119,8 +123,8 @@ class Hub:
         self._pools: Dict[int, "weakref.ref"] = {}
         self._pool_ids = itertools.count()
         self._tailers: Dict[str, FileTailer] = {}
-        self._grace_callbacks: List[Callable[[], None]] = []
-        self._listeners: List[Callable[[Dict[str, Any]], None]] = []
+        self._grace_callbacks: List[Callable[[], None]] = list(self.cfg.grace_callbacks)
+        self._listeners: List[Callable[[Dict[str, Any]], None]] = list(self.cfg.listeners)
         self.last_sample: Optional[Dict[str, Any]] = None
         self.deadline: Optional[wt.Deadline] = None
         self._deadline_checked = 0.0

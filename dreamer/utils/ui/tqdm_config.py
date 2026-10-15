@@ -3,6 +3,10 @@ from dreamer.utils.logger import Logger
 
 
 class SmartTQDM(tqdm):
+    """Project progress bar: nests (only the top level stays on screen), logs every
+    10 %, and mirrors its count into the run monitor's progress tree (a node per
+    bar, nested under the current stage / shard)."""
+
     _depth = 0
 
     def __init__(self, *args, **kwargs):
@@ -16,12 +20,18 @@ class SmartTQDM(tqdm):
 
         # Determine the step size for 10% jumps if 'total' is known
         self.min_log_step = 0
+        known_total = None
         if 'total' in kwargs and kwargs['total']:
-            self.min_log_step = max(1, kwargs['total'] // 10)
+            known_total = kwargs['total']
         elif len(args) > 0 and hasattr(args[0], '__len__'):
-            self.min_log_step = max(1, len(args[0]) // 10)
+            known_total = len(args[0])
+        if known_total:
+            self.min_log_step = max(1, known_total // 10)
 
         super().__init__(*args, **kwargs)
+        from dreamer.utils import monitoring
+        name = (self.progress_desc or "progress").strip().rstrip(":").strip()
+        self._monitor_node = monitoring.open_node(name, getattr(self, "total", None) or known_total)
         self.last_print_func = Logger.print_func
         Logger.print_func = self.write
         self._last_logged_n = 0
@@ -31,6 +41,7 @@ class SmartTQDM(tqdm):
         Overrides update to force a flush every 10%.
         """
         displayed = super().update(n)
+        self._monitor_node.set(done=self.n)
 
         # Check if we crossed the next 10% threshold
         if self.min_log_step > 0:
@@ -44,7 +55,20 @@ class SmartTQDM(tqdm):
                 self._last_logged_n = self.n
         return displayed
 
+    def __iter__(self):
+        # tqdm's iterator advances ``n`` without calling ``update`` (and writes it
+        # back only when it redraws): count here, after each loop body ran.
+        node = self._monitor_node
+        done = self.n
+        for obj in super().__iter__():
+            yield obj
+            done += 1
+            node.set(done=done)
+
     def close(self):
+        node = getattr(self, "_monitor_node", None)
+        if node is not None:
+            node.close()
         SmartTQDM._depth -= 1
         Logger.print_func = self.last_print_func
         super().close()

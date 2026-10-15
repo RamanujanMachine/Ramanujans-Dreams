@@ -96,7 +96,8 @@ so events are flushed as they are written; `ERROR` events are written synchronou
 
 ## Status
 
-Phase 1 is done: the core (events, progress, estimators, sampler, watchdog,
-walltime, lifecycle, hub). Next: the TCP server, the terminal client
-(`runmon watch`, including `--ssh` through a cluster login node) and the
-`runmon query` CLI.
+Done: the core (events, progress, estimators, sampler, watchdog, walltime,
+lifecycle, hub), the terminal view in file mode (`python -m runmon watch RUN_DIR`),
+a simulated run (`python -m runmon demo`), and the Ramanujan's Dreams wiring
+(`dreamer/utils/monitoring.py`). Next: the TCP server and live client, `runmon
+watch --ssh` through a cluster login node, and `runmon query`.

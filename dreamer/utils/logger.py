@@ -354,6 +354,14 @@ class Logger:
             yield
             return
 
+        # With the run monitor active in this process (main or pool worker), its
+        # single deadline heap watches the block — no thread per call.
+        from dreamer.utils import monitoring
+        with monitoring.watch(label, threshold_seconds, detail=detail, repeat=repeat) as handled:
+            if handled:
+                yield
+                return
+
         done = threading.Event()
         start = time.perf_counter()
 
@@ -379,6 +387,28 @@ class Logger:
             yield
         finally:
             done.set()
+
+    @classmethod
+    def event(cls, kind: str, msg: str, level: "Logger.Levels" = None, **fields):
+        """Log a **structured event**: a normal log line (console / run.log) that the
+        run monitor also records as ``kind`` with ``fields`` in its event log.
+
+        :param kind: Machine-readable event type (``pool_created``, ``worker_died`` ...).
+        :param msg: Human-readable message.
+        :param level: ``Logger.Levels`` member (default ``info``).
+        :param fields: JSON-friendly structured data.
+        """
+        cls._ensure_backend_configured()
+        level = level or cls.Levels.info
+        levelno = {
+            cls.Levels.debug: logging.DEBUG, cls.Levels.message: MESSAGE_LEVEL,
+            cls.Levels.info: logging.INFO, cls.Levels.warning: logging.WARNING,
+            cls.Levels.exception: logging.ERROR, cls.Levels.fatal: logging.CRITICAL,
+        }.get(level, logging.INFO)
+        # No GENERATE_LOGS gate (unlike debug lines): the handlers filter by level
+        # (console INFO+, run.log only when enabled), and the run monitor keeps
+        # every structured event.
+        sys_logger.log(levelno, msg, extra={"event": kind, "fields": fields})
 
     @classmethod
     def timer_summary(cls):

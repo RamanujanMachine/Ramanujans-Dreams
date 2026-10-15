@@ -10,6 +10,7 @@ from dreamer.utils.schemes.searchable import Searchable
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.storage import Exporter, Formats
 from dreamer.utils.ui.tqdm_config import SmartTQDM
+from dreamer.utils import monitoring
 
 
 class GeneticSearchMod(SearcherModScheme):
@@ -66,6 +67,7 @@ class GeneticSearchMod(SearcherModScheme):
                     find_gcd_slope=search_config.COMPUTE_GCD_SLOPE,
                     use_LIReC=self.use_LIReC,
                 )
-                res = searcher.search()
+                with monitoring.shard(getattr(space, "cmf_name", "?"), space.const):
+                    res = searcher.search()
                 space: Searchable
                 write_chunk(res, space.cmf_name)

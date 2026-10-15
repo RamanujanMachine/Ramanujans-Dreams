@@ -33,6 +33,7 @@ from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.storage.trajectory_attributes import derive_cmf_and_shard_ids
 from dreamer.utils.ui.tqdm_config import SmartTQDM
+from dreamer.utils import monitoring
 from dreamer.utils.multi_processing import (
     sink_item_dto,
     load_seen_trajectories_for_search,
@@ -125,19 +126,20 @@ class GradientAscentMod(SearcherModScheme):
                     method = GradientAscentSearch(shard, const, use_LIReC=self.use_LIReC)
                     stats = EvalStats(seen_trajectories, const.name)
                     try:
-                        method.run(
-                            constant=const,
-                            cmf_id=cmf_id,
-                            shard_id=shard_id,
-                            shard_encoding_str=shard_encoding_str,
-                            sink=push,
-                            seen_trajectories=seen_trajectories,
-                            handler_cache=handler_cache,
-                            stats=stats,
-                            geom=geom,
-                            start=start,
-                            pool=eval_pool,
-                        )
+                        with monitoring.shard(shard_id, const):
+                            method.run(
+                                constant=const,
+                                cmf_id=cmf_id,
+                                shard_id=shard_id,
+                                shard_encoding_str=shard_encoding_str,
+                                sink=push,
+                                seen_trajectories=seen_trajectories,
+                                handler_cache=handler_cache,
+                                stats=stats,
+                                geom=geom,
+                                start=start,
+                                pool=eval_pool,
+                            )
                     except (NoInitialIdentification, SearchStalled) as e:
                         Logger(str(e), Logger.Levels.warning).log()
                         continue
