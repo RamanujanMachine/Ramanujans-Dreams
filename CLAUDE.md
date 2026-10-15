@@ -33,7 +33,7 @@
 - **Test everything** — see [context/COVERAGE_POLICY.md](context/COVERAGE_POLICY.md).
 - **Follow Definition of Done** — see [context/DEFINITION_OF_DONE.md](context/DEFINITION_OF_DONE.md).
 - **Use `ramanujantools`** as the primary library for CMF/PCF work.
-- **Load skills** from `skills/` based on the task before proceeding.
+- **Load skills** from `.claude/skills/` based on the task before proceeding.
 
 ## Task Workflow
 

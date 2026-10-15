@@ -17,3 +17,4 @@ experiments/
 context/
 temp/
 .claude/
+.env/
