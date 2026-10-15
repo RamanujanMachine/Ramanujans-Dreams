@@ -21,7 +21,7 @@ from collections import Counter
 from typing import Dict, Iterable, Optional
 
 from dreamer.configs import config
-from dreamer.utils.multi_processing import load_seen_trajectories
+from dreamer.utils.multi_processing import SLIM_VALUE_CHARS, load_seen_trajectories
 from dreamer.utils.storage.attribute_fingerprints import (
     TIER1,
     attribute_fingerprint,
@@ -50,7 +50,7 @@ def attribute_report(
     keep = reuse_policy() == "keep"
     report: Dict[str, Counter] = {TIER1: Counter(), **{a: Counter() for a in attributes}}
     for path in sorted(glob.glob(os.path.join(results_dir, "*.jsonl"))):
-        for by_const in load_seen_trajectories(path).values():
+        for by_const in load_seen_trajectories(path, omit_values_over=SLIM_VALUE_CHARS).values():
             for rec in by_const.values():
                 depth = rec.get("walk_depth")
                 t1 = tier1_record_fresh(rec, attribute_fingerprint(TIER1, depth))

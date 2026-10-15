@@ -1,17 +1,17 @@
 # Global Test Report
 
-Last full-suite run: **2026-10-11** (branch `feat/reuse-counts-architecture`; also run as CI does — bare `pytest`, only `dreamer` importable — on every PR branch) (`rama` env, Python 3.12.15, sympy 1.14.0,
+Last full-suite run: **2026-10-16** (branch `fix/memory-and-idle-cores`) (`rama` env, Python 3.12.15, sympy 1.14.0,
 python-flint 0.9.0, mpmath 1.3.0, macOS, 18 cores).
 
 | Metric | Value |
 |---|---|
-| Command | `python -m pytest tests -v --ignore=tests/pocs --cov=dreamer --cov-branch --cov-report=term-missing` |
-| Collected | 1163 |
-| Passed | 1161 |
+| Command | `python -m pytest tests -q --cov=dreamer --cov-branch --cov-report=term-missing` |
+| Collected | 1427 |
+| Passed | 1423 |
 | Failed | 0 |
-| Skipped | 2 |
+| Skipped | 4 |
 | Warnings | 2 |
-| Line+branch coverage (`--cov=dreamer --cov-branch`) | 73% (11540 statements, 4032 branches) |
+| Line+branch coverage (`--cov=dreamer --cov-branch`) | 74% (12462 statements, 4302 branches) |
 
 ## Failing tests
 
@@ -25,6 +25,11 @@ None.
    making the fixture a `@classmethod` before pytest 10.
 
 ## Uncovered cases / known gaps
+
+- `ResilientPool._ensure_workers`: the early returns for `fork`, unknown executor internals and a
+  shutting-down executor are defensive and untested.
+- `parallel_eval._wait_any`: the real-future path is exercised only by the real-pool SA test and the
+  benchmarks; unit tests use the in-process pool double (fallback path).
 
 - `dreamer/utils/schemes/searchable.py` (legacy `DataManager` path) is at 54%: the δ code
   changed on 2026-10-11 is covered (`tests/test_high_precision.py::test_legacy_calc_delta_*`),

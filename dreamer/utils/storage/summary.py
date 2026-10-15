@@ -39,7 +39,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Mapping, Optional, Set, Tuple
 
-from dreamer.utils.multi_processing import load_seen_trajectories
+from dreamer.utils.multi_processing import SLIM_VALUE_CHARS, load_seen_trajectories
 from dreamer.utils.storage.optimization_objectives import (
     objective_display_label,
     record_raw_value,
@@ -259,7 +259,9 @@ def _collect_shard_stats(
 
         cmf_id = shard_id.rsplit("__", 1)[0] if "__" in shard_id else shard_id
         # merged: {trajectory_id: {constant: flat_record}}
-        merged = load_seen_trajectories(os.path.join(search_results_root, fname))
+        merged = load_seen_trajectories(
+            os.path.join(search_results_root, fname), omit_values_over=SLIM_VALUE_CHARS,
+        )
         if not merged:
             continue
 

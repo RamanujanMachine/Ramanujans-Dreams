@@ -210,11 +210,23 @@ class ResilientPool:
         procs = getattr(self._executor, "_processes", None) or {}
         return {
             "name": self._name, "workers": self._processes, "requested": self._requested,
-            "in_flight": sum(1 for t in list(self._outstanding.values()) if not t.done),
+            "in_flight": self.in_flight(),
             "completed": self.completed, "deaths": self.deaths, "shrinks": self.shrinks,
             "grows": self.grows, "peak_mb": round(self.peak_worker_mb, 1),
             "pids": list(procs), "closed": self._closed,
         }
+
+    def in_flight(self) -> int:
+        """Tasks submitted and not yet finished (running or queued)."""
+        return sum(
+            1 for t in list(self._outstanding.values())
+            if not t.done and not (t.future is not None and t.future.done())
+        )
+
+    def idle_slots(self) -> int:
+        """Workers that would start a newly submitted task right away
+        (current worker limit minus tasks in flight; never negative)."""
+        return max(0, self._processes - self.in_flight())
 
     # ------------------------------------------------------------------
     # Executor management
@@ -238,10 +250,49 @@ class ResilientPool:
 
     def _submit(self, task: _Task) -> None:
         task.future = self._executor.submit(_measured_call, task.fn, task.args)
+        self._ensure_workers()
         self._submitted_since_check += 1
         if self._submitted_since_check >= max(4, 2 * self._processes):
             self._submitted_since_check = 0
             self._check_memory()
+
+    def _ensure_workers(self) -> None:
+        """Start the worker processes the executor should have but did not start.
+
+        ``ProcessPoolExecutor`` starts a worker on ``submit`` (and replaces a
+        recycled one, ``max_tasks_per_child``) only when its *idle-worker
+        semaphore* is empty.  That semaphore gains one token per completed task
+        and loses one only when a submit finds it non-empty, so tokens pile up
+        while the pool runs below its limit (slow start).  After the limit is
+        raised in place (:meth:`_check_memory`), or after a worker exits by
+        recycling, every submit consumes a stale token, believes a worker is
+        idle, and starts nothing: measured 2026-10-15, an 18-worker eval pool
+        ran on 2 (look-ahead) or 11 processes for a whole search.
+
+        This tops the executor up to ``min(max_workers, outstanding tasks)``
+        processes — never more processes than there is work for, so start-up
+        stays lazy.  Only with ``spawn`` / ``forkserver`` (``fork`` must not
+        start processes once the executor's thread runs).
+        """
+        ex = self._executor
+        if not getattr(ex, "_safe_to_dynamically_spawn_children", False):
+            return
+        procs = getattr(ex, "_processes", None)
+        spawn = getattr(ex, "_spawn_process", None)
+        lock = getattr(ex, "_shutdown_lock", None)
+        if procs is None or spawn is None or lock is None:
+            return                       # unknown executor internals: keep its behaviour
+        want = min(int(ex._max_workers), len(self._outstanding))
+        if len(procs) >= want:
+            return
+        with lock:
+            if getattr(ex, "_shutdown_thread", False) or getattr(ex, "_broken", False):
+                return
+            while len(procs) < want:
+                spawn()
+        wakeup = getattr(ex, "_executor_manager_thread_wakeup", None)
+        if wakeup is not None:           # let the manager thread watch the new workers
+            wakeup.wakeup()
 
     def _check_memory(self) -> None:
         """Adapt the worker count to memory, in both directions, without overlap.
@@ -259,8 +310,9 @@ class ResilientPool:
           worker *peak* RSS any task reached (reported by the workers) x 1.25
           is the per-worker cost; if more such workers fit above the reserve —
           after setting aside what live workers need to climb back to that peak — the executor's worker limit is raised
-          **in place** (new processes start lazily on the next submissions — no
-          executor replacement, no overlap).  Only possible where workers can be
+          **in place** (new processes start on the next submissions, as many as
+          there are outstanding tasks — see :meth:`_ensure_workers`; no executor
+          replacement, no overlap).  Only possible where workers can be
           started dynamically (``spawn`` / ``forkserver``); with ``fork`` the
           conservative start-up cap stands.  At most one step per
           ``_GROW_INTERVAL`` seconds.

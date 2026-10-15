@@ -287,13 +287,15 @@ class SearchConfig(Configurable):
         metadata={"description": (
             "Speculative one-step look-ahead for simulated annealing. While a step's "
             "neighbours are walked, idle eval workers already walk the neighbourhoods "
-            "of every possible next center (each neighbour = accept, the doubled "
-            "current = reject); the next step then often finds its walks done. The "
-            "search path and the written rows are identical to the plain loop (results "
-            "are committed only when the loop requests them); only idle capacity is "
-            "used. 'auto' enables it when the eval pool has at least 2 * (2 * d_flat) "
-            "workers (room for one step's neighbours plus one full speculative "
-            "neighbourhood); 'on' whenever a multi-process pool exists; 'off' disables it."
+            "of the possible next centers (each neighbour = accept, the doubled "
+            "current = reject), most likely first and re-ranked as the step's walks "
+            "finish; the next step then often finds its walks done. Workers are idle "
+            "both beyond the step's <= 2*d_flat walks and while the step waits for its "
+            "slowest walk, and both are filled. The search path and the written rows "
+            "are identical to the plain loop (results are committed only when the loop "
+            "requests them); only idle workers are used. 'auto' enables it when the "
+            "eval pool may run more than d_flat workers; 'on' whenever a multi-process "
+            "pool exists; 'off' disables it."
         )},
     )
 

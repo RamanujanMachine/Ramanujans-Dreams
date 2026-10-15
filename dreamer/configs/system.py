@@ -210,13 +210,16 @@ class SystemConfig(Configurable):
         )},
     )
     POOL_MAX_TASKS_PER_CHILD: Optional[int] = field(
-        default=None,
+        default=300,
         metadata={
             "description": (
                 "Recycle each pool worker after this many tasks (None = never). "
-                "Bounds slow memory growth of long-lived workers on large CMFs, at "
-                "the cost of re-spawning workers (each re-imports dreamer). Not "
-                "available with the 'fork' start method (ignored there)."
+                "Bounds memory that long-lived workers never give back: python-flint "
+                "<= 0.9.0 leaks the C string of every str() of a polynomial, which "
+                "ramanujantools triggers thousands of times per walk (~0.3-0.5 MB per "
+                "walk; 300 tasks cap it at ~150 MB per worker). A recycle costs ~0.4 s "
+                "plus a slower first task (~1% at 300). Not available with the 'fork' "
+                "start method (ignored there)."
             )
         },
     )
