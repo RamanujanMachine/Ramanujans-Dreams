@@ -129,8 +129,10 @@ def _resources(s: Dict[str, Any], max_procs: int = 12) -> Group:
     tot, alloc, mach = res.get("totals") or {}, res.get("allocation") or {}, res.get("machine") or {}
     head = Text()
     if tot:
-        head.append(f"CPU {tot['cpu_percent'] / 100:.1f} of {alloc.get('cores')} cores "
-                    f"({alloc.get('cores_source')})  ")
+        pw = (res.get("pool_workers") or {}).get("workers")
+        head.append(f"CPU {tot['cpu_percent'] / 100:.1f} cores; "
+                    + (f"{pw} pool worker(s), " if pw else "")
+                    + f"budget {alloc.get('cores')} ({alloc.get('cores_source')})  ")
         head.append_text(_bar(min(1.0, tot.get("cpu_util", 0)), 15))
         head.append(f"\nRSS {tot['rss_mb']:.0f} MB")
         if alloc.get("memory_mb"):

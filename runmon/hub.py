@@ -349,10 +349,17 @@ class Hub:
         return out
 
     def _sample(self) -> None:
-        for info in self.pools_info():
+        pools = self.pools_info()
+        for info in pools:
             for pid in info.get("pids", ()) or ():
                 self.sampler.label(pid, f"{info.get('name', 'pool')} worker")
         s = self.sampler.sample()
+        # What the program actually allowed itself (pools start small, grow and
+        # shrink with memory) — next to the allocation budget.
+        open_pools = [p for p in pools if not p.get("closed")]
+        s["pool_workers"] = {"workers": sum(int(p.get("workers") or 0) for p in open_pools),
+                             "requested": sum(int(p.get("requested") or 0) for p in open_pools),
+                             "pools": len(open_pools)}
         self.last_sample = s
         t = s["totals"]
         over = []
@@ -463,6 +470,7 @@ class Hub:
         res = snap.get("resources") or {}
         self.event("heartbeat", "", "DEBUG", stage=snap["stage"], current=snap["current"],
                    tasks=snap["tasks"], totals=res.get("totals"), allocation=res.get("allocation"),
+                   pool_workers=res.get("pool_workers"),
                    machine=res.get("machine"), pools=snap["pools"], walltime=snap["walltime"],
                    alerts=snap["alerts"])
 

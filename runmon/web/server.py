@@ -73,7 +73,8 @@ class WebApp:
                 t = f.get("totals") or {}
                 if t:
                     out.append({"ts": e.get("ts"), "cpu_percent": t.get("cpu_percent"),
-                                "rss_mb": t.get("rss_mb"), "allocation": f.get("allocation")})
+                                "rss_mb": t.get("rss_mb"), "allocation": f.get("allocation"),
+                                "pool_workers": (f.get("pool_workers") or {}).get("workers")})
         except OSError:
             return []
         return out

@@ -105,6 +105,9 @@ header.card { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center
 /* tables */
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th { text-align: left; font-weight: 600; color: var(--text-secondary); padding: 4px 8px; border-bottom: 1px solid var(--axis); cursor: default; }
+th.sortable { cursor: pointer; user-select: none; } th.sortable:hover { color: var(--text-primary); }
+th[aria-sort="ascending"]::after { content: " ▲"; font-size: 10px; } th[aria-sort="descending"]::after { content: " ▼"; font-size: 10px; }
+.grow { color: var(--serious); font-weight: 600; }
 td { padding: 4px 8px; border-bottom: 1px solid var(--grid); }
 td.r, th.r { text-align: right; font-variant-numeric: tabular-nums; }
 .scroll { max-height: 360px; overflow: auto; }
@@ -157,16 +160,29 @@ tr.ERROR td, tr.CRITICAL td { background: color-mix(in srgb, var(--critical) 8%,
     <button data-win="600" aria-pressed="true">Last 10 min</button>
     <button data-win="3600">Last hour</button>
     <button data-win="0">Whole run</button>
+    <span class="secondary" style="margin-left:12px">Smoothing:</span>
+    <button data-smooth="0" aria-pressed="true">Off</button>
+    <button data-smooth="10">10 s average</button>
+    <button data-smooth="60">60 s average</button>
   </div>
   <section class="row">
-    <div class="card"><h2>CPU — cores in use</h2><div class="chart" id="c-cpu"></div></div>
+    <div class="card"><h2>CPU — cores in use <span class="muted" style="font-weight:400">· dashed: budget · dotted: pool workers</span></h2><div class="chart" id="c-cpu"></div></div>
     <div class="card"><h2>Memory — resident, all processes</h2><div class="chart" id="c-mem"></div></div>
   </section>
 
   <section class="row">
     <div class="card"><h2>Processes <span class="muted" style="font-weight:400">· cores: 1.00 = one full core; above 1 = several threads busy</span></h2>
-      <div class="scroll"><table><thead><tr><th class="r">pid</th><th>role</th><th class="r">cores</th>
-      <th class="r">threads</th><th class="r">RSS MB</th><th>state</th></tr></thead><tbody id="procs"></tbody></table></div></div>
+      <div class="filters" style="margin-bottom:6px">
+        <input id="p-filter" type="search" placeholder="Filter pid or role" size="18" aria-label="Filter processes">
+        <label class="secondary"><input id="p-idle" type="checkbox"> hide idle</label>
+        <span class="muted" id="p-summary"></span>
+      </div>
+      <div class="scroll"><table><thead><tr id="p-head">
+        <th class="r sortable" data-key="pid">pid</th><th class="sortable" data-key="role">role</th>
+        <th class="r sortable" data-key="cores">cores</th><th class="r sortable" data-key="threads">threads</th>
+        <th class="r sortable" data-key="rss_mb">RSS MB</th>
+        <th class="r sortable" data-key="growth" title="Change of resident memory since this page first saw the process">RSS growth</th>
+        <th class="r sortable" data-key="age">age</th><th>state</th></tr></thead><tbody id="procs"></tbody></table></div></div>
     <div class="card"><h2>Pools</h2>
       <div class="scroll"><table><thead><tr><th>pool</th><th class="r">workers</th><th class="r">in flight</th>
       <th class="r">done</th><th class="r">deaths</th><th class="r">shrinks</th><th class="r">grows</th><th class="r">peak MB</th></tr></thead>
@@ -225,15 +241,15 @@ try {
 } catch (e) {}
 
 // ---------------- state ----------------
-let snap = null, live = true, windowSec = 600;
+let snap = null, live = true, windowSec = 600, smoothSec = 0;
 const history = [];                 // {ts, cores, rss, allocCores, allocMem}
 let lastSampleTs = 0;
 
-function addSample(ts, cpuPercent, rss, alloc) {
+function addSample(ts, cpuPercent, rss, alloc, poolWorkers) {
   if (!ts || ts <= lastSampleTs) return;
   lastSampleTs = ts;
   history.push({ts, cores: (cpuPercent || 0) / 100, rss: rss || 0,
-    allocCores: alloc && alloc.cores, allocMem: alloc && alloc.memory_mb});
+    allocCores: alloc && alloc.cores, allocMem: alloc && alloc.memory_mb, workers: poolWorkers || null});
   if (history.length > 20000) history.splice(0, history.length - 20000);
 }
 
@@ -256,7 +272,8 @@ function render(data) {
   renderStages(); renderAlerts(); renderTiles(); renderTree(); renderTables();
   if (live) renderEvents(snap.events || []);
   const res = snap.resources;
-  if (res && res.totals) addSample(res.ts, res.totals.cpu_percent, res.totals.rss_mb, res.allocation);
+  if (res && res.totals) addSample(res.ts, res.totals.cpu_percent, res.totals.rss_mb, res.allocation,
+                                   (res.pool_workers || {}).workers);
   drawCharts();
 }
 
@@ -289,9 +306,12 @@ function meter(id, frac, over) {
 function renderTiles() {
   const res = snap.resources || {}, t = res.totals || {}, a = res.allocation || {}, m = res.machine || {};
   if (t.cpu_percent != null) {
-    $("t-cpu").textContent = `${(t.cpu_percent / 100).toFixed(1)} of ${a.cores} cores`;
-    $("t-cpu-sub").textContent = `${a.cores_source === "allocation" ? "allocation" : "machine"} · machine has ${m.cores} cores`;
-    meter("m-cpu", t.cpu_util, t.over_cpu);
+    const pw = res.pool_workers || {};
+    const target = pw.workers || a.cores;
+    $("t-cpu").textContent = `${(t.cpu_percent / 100).toFixed(1)} of ${target} cores`;
+    $("t-cpu-sub").textContent = (pw.workers ? `${pw.workers} pool worker(s) now · ` : "no pool open · ")
+      + `budget ${a.cores} (${a.cores_source === "allocation" ? "allocation" : "machine"}) · machine ${m.cores}`;
+    meter("m-cpu", t.cpu_percent / 100 / target, t.over_cpu);
     $("t-mem").textContent = mb(t.rss_mb) + (a.memory_mb ? ` of ${mb(a.memory_mb)}` : "");
     $("t-mem-sub").textContent = `machine: ${mb(m.mem_available_mb)} free of ${mb(m.mem_total_mb)}`;
     meter("m-mem", a.memory_mb ? t.rss_mb / a.memory_mb : t.mem_util, t.over_mem);
@@ -340,15 +360,45 @@ function renderTree() {
   if (!box.children.length) box.append(el("span", {class: "muted"}, "No progress reported yet."));
 }
 
+const firstSeen = {};                        // pid -> {rss, started}: baseline for "RSS growth"
+let procSort = {key: "cores", dir: -1};
+for (const th of document.querySelectorAll("#p-head .sortable")) th.onclick = () => {
+  const key = th.dataset.key;
+  procSort = {key, dir: procSort.key === key ? -procSort.dir : (key === "role" || key === "pid" ? 1 : -1)};
+  snap && renderTables();
+};
+$("p-filter").oninput = $("p-idle").onchange = () => snap && renderTables();
+
 function renderTables() {
-  const res = snap.resources || {};
-  const procs = [...(res.processes || [])].sort((a, b) => (a.role !== "main") - (b.role !== "main") || b.cpu - a.cpu);
+  const res = snap.resources || {}, now = snap.ts || Date.now() / 1000;
+  const all = (res.processes || []).map((p) => {
+    const f = firstSeen[p.pid] && firstSeen[p.pid].started === p.started ? firstSeen[p.pid]
+      : (firstSeen[p.pid] = {rss: p.rss_mb, started: p.started});      // pid reuse resets the baseline
+    return {...p, cores: p.cores != null ? p.cores : p.cpu / 100, growth: p.rss_mb - f.rss,
+            age: p.started ? now - p.started : null};
+  });
+  const text = $("p-filter").value.trim().toLowerCase(), hideIdle = $("p-idle").checked;
+  const procs = all.filter((p) => (!text || `${p.pid} ${p.role}`.toLowerCase().includes(text))
+    && (!hideIdle || p.cores >= 0.05 || p.role === "main"));
+  const {key, dir} = procSort;
+  procs.sort((a, b) => { const x = a[key], y = b[key];
+    return (typeof x === "string" ? x.localeCompare(y) : (x ?? -Infinity) - (y ?? -Infinity)) * dir || a.pid - b.pid; });
+  for (const th of document.querySelectorAll("#p-head .sortable"))
+    th.setAttribute("aria-sort", th.dataset.key === key ? (dir > 0 ? "ascending" : "descending") : "none");
+  // memory by role: where the resident memory sits
+  const byRole = {};
+  for (const p of all) { const r = p.role.replace(/ worker$/, " workers"); (byRole[r] = byRole[r] || {n: 0, rss: 0}).n++; byRole[r].rss += p.rss_mb; }
+  $("p-summary").textContent = Object.entries(byRole).sort((a, b) => b[1].rss - a[1].rss)
+    .map(([r, v]) => `${r}${v.n > 1 ? ` ×${v.n}` : ""}: ${mb(v.rss)}`).join(" · ");
   const pt = $("procs"); pt.replaceChildren();
   for (const p of procs) {
-    const tr = el("tr"), cores = p.cores != null ? p.cores : p.cpu / 100;
+    const tr = el("tr");
+    const g = p.growth, gtxt = Math.abs(g) < 1 ? "0" : `${g > 0 ? "+" : ""}${Math.round(g)}`;
     tr.append(el("td", {class: "r"}, p.pid), el("td", {}, p.role),
-      el("td", {class: "r" + (cores > 1.05 ? " hot" : ""), title: `${p.cpu}% of one core`}, cores.toFixed(2)),
-      el("td", {class: "r"}, p.threads ?? ""), el("td", {class: "r"}, Math.round(p.rss_mb)), el("td", {}, p.status));
+      el("td", {class: "r" + (p.cores > 1.05 ? " hot" : ""), title: `${p.cpu}% of one core`}, p.cores.toFixed(2)),
+      el("td", {class: "r"}, p.threads ?? ""), el("td", {class: "r"}, Math.round(p.rss_mb)),
+      el("td", {class: "r" + (g > 100 ? " grow" : ""), title: "MB since this page first saw the process"}, gtxt),
+      el("td", {class: "r muted"}, p.age != null ? dur(p.age) : ""), el("td", {}, p.status));
     pt.append(tr);
   }
   const pl = $("pools"); pl.replaceChildren();
@@ -356,7 +406,7 @@ function renderTables() {
     const tr = el("tr");
     tr.append(el("td", {}, p.name), el("td", {class: "r"}, `${p.workers}/${p.requested ?? p.workers}`),
       el("td", {class: "r"}, p.in_flight ?? ""), el("td", {class: "r"}, p.completed ?? ""),
-      el("td", {class: "r" + (p.deaths ? " hot" : "")}, p.deaths ?? 0), el("td", {class: "r"}, p.shrinks ?? ""),
+      el("td", {class: "r" + (p.deaths ? " grow" : "")}, p.deaths ?? 0), el("td", {class: "r"}, p.shrinks ?? ""),
       el("td", {class: "r"}, p.grows ?? ""), el("td", {class: "r"}, p.peak_mb ? Math.round(p.peak_mb) : ""));
     pl.append(tr);
   }
@@ -402,7 +452,19 @@ const css = (name) => getComputedStyle(document.documentElement).getPropertyValu
 function niceStep(max) { const raw = Math.max(max, 1e-9) / 4, p = 10 ** Math.floor(Math.log10(raw));
   for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= raw) return m * p; return 10 * p; }
 
-function drawChart(boxId, pts, valueKey, refKey, fmtVal, refLabel) {
+// Time-based moving average over the previous `sec` seconds (raw value kept as `raw`).
+function smooth(pts, key, sec) {
+  if (!sec) return pts.map((p) => ({...p, raw: p[key]}));
+  const out = []; let j = 0, sum = 0;
+  for (let i = 0; i < pts.length; i++) {
+    sum += pts[i][key];
+    while (pts[i].ts - pts[j].ts > sec) sum -= pts[j++][key];
+    out.push({...pts[i], raw: pts[i][key], [key]: sum / (i - j + 1)});
+  }
+  return out;
+}
+
+function drawChart(boxId, pts, valueKey, refKey, fmtVal, refLabel, stepRef) {
   const box = $(boxId); box.replaceChildren();
   const W = Math.max(280, box.clientWidth), H = 180, L = 48, R = 12, T = 10, B = 24;
   const svg = svgEl("svg", {viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": box.previousElementSibling.textContent});
@@ -410,7 +472,8 @@ function drawChart(boxId, pts, valueKey, refKey, fmtVal, refLabel) {
   if (pts.length < 2) { const t = svgEl("text", {x: L, y: H / 2, fill: css("--text-muted"), "font-size": 12}); t.textContent = "Collecting samples…"; svg.append(t); return; }
   const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts;
   const ref = pts[pts.length - 1][refKey];
-  const step = niceStep(Math.max(...pts.map((p) => p[valueKey]), ref ? ref * 1.05 : 0));
+  const stepMax = stepRef ? Math.max(0, ...pts.map((p) => p[stepRef.key] || 0)) : 0;
+  const step = niceStep(Math.max(...pts.map((p) => p[valueKey]), ref ? ref * 1.05 : 0, stepMax * 1.05));
   const ymax = step * 4;
   const x = (ts) => L + (W - L - R) * (t1 === t0 ? 1 : (ts - t0) / (t1 - t0));
   const y = (v) => T + (H - T - B) * (1 - v / ymax);
@@ -427,6 +490,18 @@ function drawChart(boxId, pts, valueKey, refKey, fmtVal, refLabel) {
   }
   const d = pts.map((p, i) => `${i ? "L" : "M"}${x(p.ts).toFixed(1)},${y(p[valueKey]).toFixed(1)}`).join("");
   svg.append(svgEl("path", {d, fill: "none", stroke: css("--series-1"), "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round"}));
+  if (stepRef && stepMax > 0) {                       // what the program allowed itself: a step line over time
+    let dd = "", prev = null;
+    for (const p of pts) {
+      const v = p[stepRef.key]; if (v == null) { prev = null; continue; }
+      dd += prev == null ? `M${x(p.ts).toFixed(1)},${y(v).toFixed(1)}` : `H${x(p.ts).toFixed(1)}V${y(v).toFixed(1)}`;
+      prev = v;
+    }
+    svg.append(svgEl("path", {d: dd, fill: "none", stroke: css("--text-secondary"), "stroke-width": 1.5, "stroke-dasharray": "1 3", "stroke-linecap": "round"}));
+    const last = [...pts].reverse().find((p) => p[stepRef.key] != null);
+    if (last) { const lab = svgEl("text", {x: L + 4, y: y(last[stepRef.key]) - 5, fill: css("--text-secondary"), "font-size": 11});
+      lab.textContent = stepRef.label(last[stepRef.key]); svg.append(lab); }
+  }
   if (ref) {                                          // allocation reference, drawn over the data so it stays visible
     svg.append(svgEl("line", {x1: L, x2: W - R, y1: y(ref), y2: y(ref), stroke: css("--text-secondary"), "stroke-width": 1, "stroke-dasharray": "4 4"}));
     const lab = svgEl("text", {x: W - R, y: y(ref) - 5, "text-anchor": "end", fill: css("--text-secondary"), "font-size": 11});
@@ -447,7 +522,10 @@ function drawChart(boxId, pts, valueKey, refKey, fmtVal, refLabel) {
     for (const [e, a] of [[cross, {x1: px, x2: px}], [dot, {cx: px, cy: py}]]) { for (const [k, v] of Object.entries(a)) e.setAttribute(k, v); e.setAttribute("visibility", "visible"); }
     tip.replaceChildren();
     const strong = el("strong", {}, fmtVal(best[valueKey], false)); const key = el("span", {class: "key"});
-    tip.append(key, strong, el("br"), el("span", {class: "muted"}, clock(best.ts)));
+    tip.append(key, strong);
+    if (smoothSec && best.raw != null) tip.append(el("span", {class: "muted"}, `  (${smoothSec} s avg; now ${fmtVal(best.raw, false)})`));
+    if (stepRef && best[stepRef.key] != null) tip.append(el("br"), el("span", {class: "secondary"}, stepRef.label(best[stepRef.key])));
+    tip.append(el("br"), el("span", {class: "muted"}, clock(best.ts)));
     tip.style.display = "block";
     const left = px * r.width / W; tip.style.left = `${Math.min(left + 12, r.width - tip.offsetWidth)}px`; tip.style.top = `${py * r.height / H - 40}px`;
   };
@@ -462,12 +540,13 @@ function drawCharts() {
   const now = history.length ? history[history.length - 1].ts : 0;
   const pts = windowSec ? history.filter((p) => p.ts >= now - windowSec) : history;
   const tickNum = (v, step) => String(+v.toFixed(Math.max(0, -Math.floor(Math.log10(step)) + 1)));
-  drawChart("c-cpu", pts, "cores", "allocCores",
-    (v, tick, step) => tick ? tickNum(v, step) : `${v.toFixed(2)} cores`, (r) => `allocation ${r} cores`);
+  drawChart("c-cpu", smooth(pts, "cores", smoothSec), "cores", "allocCores",
+    (v, tick, step) => tick ? tickNum(v, step) : `${v.toFixed(2)} cores`, (r) => `budget ${r} cores`,
+    {key: "workers", label: (w) => `pool workers ${w}`});
   // Memory: pick the unit first (GB from 2 GB up) so the ticks are round in that unit.
   const peak = Math.max(0, ...pts.map((p) => Math.max(p.rss, p.allocMem || 0)));
   const gb = peak >= 2048, div = gb ? 1024 : 1, unit = gb ? "GB" : "MB";
-  const memPts = pts.map((p) => ({ts: p.ts, rss: p.rss / div, allocMem: p.allocMem ? p.allocMem / div : null}));
+  const memPts = smooth(pts.map((p) => ({ts: p.ts, rss: p.rss / div, allocMem: p.allocMem ? p.allocMem / div : null})), "rss", smoothSec);
   drawChart("c-mem", memPts, "rss", "allocMem",
     (v, tick, step) => tick ? `${tickNum(v, step)} ${unit}` : mb(v * div),
     (r) => `allocation ${mb(r * div)}`);
@@ -477,13 +556,18 @@ for (const b of document.querySelectorAll("[data-win]")) b.onclick = () => {
   for (const o of document.querySelectorAll("[data-win]")) o.setAttribute("aria-pressed", String(o === b));
   drawCharts();
 };
+for (const b of document.querySelectorAll("[data-smooth]")) b.onclick = () => {
+  smoothSec = +b.dataset.smooth;
+  for (const o of document.querySelectorAll("[data-smooth]")) o.setAttribute("aria-pressed", String(o === b));
+  drawCharts();
+};
 addEventListener("resize", drawCharts);
 
 // ---------------- data ----------------
 async function loadHistory() {
   try {
     const r = await (await fetch("/api/history")).json();
-    for (const h of r.history || []) addSample(h.ts, h.cpu_percent, h.rss_mb, h.allocation);
+    for (const h of r.history || []) addSample(h.ts, h.cpu_percent, h.rss_mb, h.allocation, h.pool_workers);
     drawCharts();
   } catch (e) {}
 }

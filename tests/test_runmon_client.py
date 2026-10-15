@@ -60,7 +60,7 @@ def _text(renderable, width=120):
 def test_render_snapshot():
     out = _text(render(SNAPSHOT, "test"))
     for needle in ("demo-1", "n017", "▶ search", "✓ loading", "~ 42.0%", "T=0.123",
-                   "best_delta=0.0168", "eval worker", "of 4 cores (allocation)", "of 8192 MB", "0.99",
+                   "best_delta=0.0168", "eval worker", "budget 4 (allocation)", "of 8192 MB", "0.99",
                    "80 cores", "2/4", "worker_died", "walltime left 10m00s", "of 1d00h",
                    "no progress for 31m00s"):
         assert needle in out, needle
