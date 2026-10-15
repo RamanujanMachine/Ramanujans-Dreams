@@ -42,6 +42,9 @@ dependencies = [
     "psutil"
 ]
 
+[tool.setuptools.package-data]
+runmon = ["web/*.html"]
+
 [project.scripts]
 runmon = "runmon.__main__:main"
 

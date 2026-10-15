@@ -41,6 +41,15 @@ def main(argv=None) -> int:
     w.add_argument("--token", help="token for host:port targets")
     w.add_argument("--refresh", type=float, default=0.5)
 
+    wb = sub.add_parser("web", help="live view of a run in your browser (local HTTP server)",
+                        description="Same TARGET forms as `watch`. Serves http://127.0.0.1:PORT/ "
+                                    "on this machine only.")
+    wb.add_argument("target", nargs="?")
+    wb.add_argument("--ssh", metavar="USER@LOGIN", help="reach the run through this SSH login host")
+    wb.add_argument("--token", help="token for host:port targets")
+    wb.add_argument("--port", type=int, default=8765, help="local port (next free one if taken)")
+    wb.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
+
     q = sub.add_parser("query", help="search a run's event log")
     q.add_argument("path", help="run directory or events.jsonl")
     q.add_argument("--ssh", metavar="USER@LOGIN", help="read the log on this SSH host")
@@ -65,6 +74,20 @@ def main(argv=None) -> int:
     if args.cmd == "watch":
         from runmon.client.tui import watch
         watch(_watch_source(args), args.refresh)
+        return 0
+
+    if args.cmd == "web":
+        from runmon import query as qmod
+        from runmon.web.server import serve
+        source = _watch_source(args)
+        run_dir = args.target or "runs/latest"
+        if args.ssh:
+            lines = lambda: qmod._lines_ssh(args.ssh, run_dir)              # noqa: E731
+        elif os.path.isdir(run_dir):
+            lines = lambda: qmod._lines_local(run_dir)                      # noqa: E731
+        else:
+            lines = None                                                    # host:port only
+        serve(source, lines=lines, port=args.port, open_browser=not args.no_browser)
         return 0
 
     if args.cmd == "query":

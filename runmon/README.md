@@ -102,8 +102,26 @@ runmon watch ~/work/myrun/runs/latest --ssh me@login.cluster   # run in a batch 
 runmon watch node17:41237 --token …           # a server directly (token is in monitor.json)
 runmon query runs/latest --level WARNING --since 2h
 runmon query ~/work/myrun/runs/latest --ssh me@login.cluster --kind worker_died
+runmon web runs/latest                        # the same live view in your browser (localhost)
+runmon web ~/work/myrun/runs/latest --ssh me@login.cluster
 runmon demo                                   # a simulated run, to try it out
 ```
+
+**Browser view.** `runmon web` starts a small HTTP server on your own machine, on
+`http://127.0.0.1:8765/` (or the next free port), and opens the page. It takes the
+same targets as `watch`, so it also works for a cluster run over `--ssh`. The page:
+
+- **Status:** stages, alerts, and tiles for CPU in cores against the allocation,
+  memory against the allocation, walltime left and processes.
+- **Progress tree:** estimates are striped and marked `~`.
+- **Charts:** CPU and memory, with the allocation as a dashed line. History covers the
+  whole run, rebuilt from heartbeats.
+- **Tables:** processes and pools.
+- **Events:** filterable, with a "search full log" button that runs `runmon query`.
+
+The page has no external dependencies and follows the system's light or dark theme
+(override with `?theme=light` or `?theme=dark`). The server is read-only, listens on
+the loopback address only, and refuses requests whose `Host` is not local.
 
 **Live server.** Start with `server=True`. The hub thread then also serves clients over
 TCP and writes `monitor.json` (mode 0600) with the host, port and a random token. A
