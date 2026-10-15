@@ -51,6 +51,20 @@ from runmon.sampler import ProcessSampler
 from runmon.watchdog import DeadlineWatcher
 
 STATUS_FILE = "status.json"
+
+
+def fmt_duration(seconds: float) -> str:
+    """``2d03h`` / ``4h05m`` / ``12m30s`` / ``45s`` (negative → ``0s``)."""
+    s = int(max(0, seconds))
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    if d:
+        return f"{d}d{h:02d}h"
+    if h:
+        return f"{h}h{m:02d}m"
+    return f"{m}m{s:02d}s" if m else f"{s}s"
+
 EVENTS_FILE = "events.jsonl"
 WORKER_GLOB = "events.w*.jsonl"
 
@@ -290,7 +304,7 @@ class Hub:
         running = any(r.status == "running" for r in list(self.tree.roots))
         idle = time.time() - self.tree.last_progress
         if running and idle > self.cfg.stall_s:
-            self.alerts["stall"] = f"no progress for {idle / 60:.0f} min ({self.tree.active_path()})"
+            self.alerts["stall"] = f"no progress for {fmt_duration(idle)} ({self.tree.active_path()})"
             if not self._stall_alerted:
                 self._stall_alerted = True
                 self.event("stall", f"no progress reported for {idle:.0f}s", "WARNING",
@@ -309,7 +323,7 @@ class Hub:
             self.deadline = wt.detect(start=self.started) or self.deadline
             if self.deadline and (old is None or abs(old.end - self.deadline.end) > 60):
                 self.event("walltime", f"job deadline {time.ctime(self.deadline.end)} "
-                           f"({self.deadline.remaining(now) / 3600:.2f} h left, from {self.deadline.source})",
+                           f"({fmt_duration(self.deadline.remaining(now))} left, from {self.deadline.source})",
                            end=self.deadline.end, source=self.deadline.source, limit=self.deadline.limit)
         if self.deadline is None:
             return
@@ -317,12 +331,12 @@ class Hub:
         for mark in self.cfg.walltime_warn_s:
             if left <= mark and mark not in self._walltime_warned:
                 self._walltime_warned.add(mark)
-                self.event("walltime_warning", f"{left / 60:.0f} min of walltime left", "WARNING",
+                self.event("walltime_warning", f"{fmt_duration(left)} of walltime left", "WARNING",
                            remaining_s=left)
         if left <= self.cfg.walltime_grace_s and not self._grace_done:
             self._grace_done = True
-            self.alerts["walltime"] = f"walltime ends in {left / 60:.1f} min"
-            self.event("walltime_grace", f"walltime grace period: {left:.0f}s left — flushing",
+            self.alerts["walltime"] = f"walltime ends in {fmt_duration(left)}"
+            self.event("walltime_grace", f"walltime grace period: {fmt_duration(left)} left — flushing",
                        "WARNING", remaining_s=left)
             for cb in list(self._grace_callbacks):
                 try:

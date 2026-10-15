@@ -26,6 +26,22 @@ import psutil
 
 _MB = 1024 * 1024
 
+#: Command-line markers of multiprocessing's helper processes.
+_HELPERS = (("resource_tracker", "resource tracker"), ("forkserver", "fork server"),
+            ("multiprocessing.managers", "manager"), ("SyncManager", "manager"))
+
+
+def _helper_role(proc: "psutil.Process") -> str:
+    """Role of an unlabelled child from its command line (``child`` if unknown)."""
+    try:
+        cmd = " ".join(proc.cmdline())
+    except psutil.Error:
+        return "child"
+    for marker, role in _HELPERS:
+        if marker in cmd:
+            return role
+    return "child"
+
 
 class ProcessSampler:
     """Sample a process tree.
@@ -45,6 +61,7 @@ class ProcessSampler:
         self.memory_mb = memory_mb
         self.memory_probe = memory_probe
         self.labels: Dict[int, str] = {}       # pid -> role label (pool name ...)
+        self._auto: Dict[int, str] = {}        # pid -> role guessed once from the command line
         self._procs: Dict[int, psutil.Process] = {}
         self._root = psutil.Process(self.root_pid)
         self._root.cpu_percent(None)           # prime
@@ -64,8 +81,10 @@ class ProcessSampler:
             if cached is None:
                 p.cpu_percent(None)            # prime: first reading is 0
                 cached = p
+                self._auto[p.pid] = _helper_role(p)
             live[p.pid] = cached
         self._procs = live
+        self._auto = {pid: r for pid, r in self._auto.items() if pid in live}
         return list(live.values())
 
     def sample(self) -> Dict[str, Any]:
@@ -79,7 +98,7 @@ class ProcessSampler:
                     procs.append({
                         "pid": p.pid,
                         "ppid": p.ppid(),
-                        "role": "main" if p.pid == self.root_pid else self.labels.get(p.pid, "child"),
+                        "role": "main" if p.pid == self.root_pid else self.labels.get(p.pid, self._auto.get(p.pid, "child")),
                         "name": p.name(),
                         "cpu": round(p.cpu_percent(None), 1),
                         "rss_mb": round(mem.rss / _MB, 1),
