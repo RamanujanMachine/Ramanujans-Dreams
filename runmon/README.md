@@ -94,10 +94,41 @@ Normal exit, `SIGTERM`, `SIGINT`, `SIGHUP` and `SIGUSR1` all write a final
 `finally` blocks still run, and the exit code is 143. `SIGKILL` cannot be caught,
 so events are flushed as they are written; `ERROR` events are written synchronously.
 
+## Watching and searching a run
+
+```bash
+runmon watch runs/latest                      # local run: live server, else status.json
+runmon watch ~/work/myrun/runs/latest --ssh me@login.cluster   # run in a batch job on a cluster
+runmon watch node17:41237 --token …           # a server directly (token is in monitor.json)
+runmon query runs/latest --level WARNING --since 2h
+runmon query ~/work/myrun/runs/latest --ssh me@login.cluster --kind worker_died
+runmon demo                                   # a simulated run, to try it out
+```
+
+**Live server.** Start with `server=True`. The hub thread then also serves clients over
+TCP and writes `monitor.json` (mode 0600) with the host, port and a random token. A
+client must send the token first. It then receives a snapshot every second and every
+event as it happens, and `bye` when the run ends. The server is read-only. Each client
+has a bounded buffer, so a slow client cannot stall the run. `host="auto"` binds
+127.0.0.1, except inside a PBS/Slurm job, where it binds all interfaces and advertises
+the node's name. Those runs need that, because nothing but the login node can reach
+a compute node.
+
+**Watching a cluster run over SSH.** `--ssh USER@LOGIN`:
+
+1. Reads the run's `monitor.json` through the login node.
+2. Opens `ssh -N -L 127.0.0.1:<free port>:<node>:<port> USER@LOGIN`. The **login node**
+   forwards to the compute node, so you never SSH into the node.
+3. Connects to that forwarded port.
+
+If the run has no live server, or the tunnel fails, it streams `status.json` over the
+same SSH connection instead. Your `~/.ssh/config` (keys, ProxyJump, ControlMaster)
+applies.
+
 ## Status
 
 Done: the core (events, progress, estimators, sampler, watchdog, walltime,
-lifecycle, hub), the terminal view in file mode (`python -m runmon watch RUN_DIR`),
-a simulated run (`python -m runmon demo`), and the Ramanujan's Dreams wiring
-(`dreamer/utils/monitoring.py`). Next: the TCP server and live client, `runmon
-watch --ssh` through a cluster login node, and `runmon query`.
+lifecycle, hub), the live server, the terminal client (local, `host:port`, `--ssh`),
+`runmon query`, the simulated run, and the Ramanujan's Dreams wiring
+(`dreamer/utils/monitoring.py`). Later: a web view, either served by the same hub or
+as a client of the same protocol.

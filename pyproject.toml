@@ -42,6 +42,9 @@ dependencies = [
     "psutil"
 ]
 
+[project.scripts]
+runmon = "runmon.__main__:main"
+
 [project.optional-dependencies]
 # Terminal client for the live run monitor (`runmon watch`); not needed by runs.
 monitor = ["rich"]

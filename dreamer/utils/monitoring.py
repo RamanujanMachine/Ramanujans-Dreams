@@ -134,14 +134,17 @@ def start_run(run_id: str, meta: Optional[Dict[str, Any]] = None) -> Optional[st
         cores=available_cores(), memory_mb=allocated_memory_mb(),
         sample_s=float(cfg.SAMPLE_SECONDS), heartbeat_s=float(cfg.HEARTBEAT_SECONDS),
         stall_s=float(cfg.STALL_SECONDS), walltime_grace_s=float(cfg.WALLTIME_GRACE_SECONDS),
+        server=bool(cfg.SERVER), host=str(cfg.HOST), port=int(cfg.PORT or 0),
         on_watchdog=_log_watchdog, listeners=[_echo], grace_callbacks=[_flush_logs], meta=meta,
     )
     _run_dir = hub.run_dir
     _handler = _EventHandler(runmon.publish, level_value(cfg.EVENT_LOG_LEVEL))
     _sys_logger().addHandler(_handler)
     _point_latest(base, directory)
-    Logger(f"Run monitor: {directory}  (watch: python -m runmon watch {directory})",
-           Logger.Levels.info).log()
+    hint = f"runmon watch {directory}"
+    if hub.server is not None and hub.server.bind != "127.0.0.1":
+        hint += f"   or from your machine: runmon watch {directory} --ssh <user>@<login node>"
+    Logger(f"Run monitor: {directory}  (watch: {hint})", Logger.Levels.info).log()
     return directory
 
 

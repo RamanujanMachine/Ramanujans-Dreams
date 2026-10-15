@@ -221,11 +221,14 @@ See the [graphing README](../graphing/README.md) for what each artefact means.
 The live run monitor (`runmon`): one sleeping thread in the main process records a
 searchable event log, progress per stage / shard, CPU and memory of every process
 against the run's allocation, hang watchdogs and the batch job's walltime. Watch a
-run with `python -m runmon watch <RUN_DIR>/latest`.
+run with `runmon watch <RUN_DIR>/latest`. From your laptop, for a run inside a cluster
+job, use `runmon watch <remote RUN_DIR>/latest --ssh user@login-node`. Search a run's
+events with `runmon query`.
 
 | Field | Meaning |
 |-------|---------|
 | `ENABLED` | Run the monitor (default `True`). Set `False` to run without it, e.g. quick local runs. |
+| `SERVER` / `HOST` / `PORT` | Live server for `runmon watch` (token-protected; `monitor.json`). `HOST='auto'`: localhost, or all interfaces inside a PBS/Slurm job so the login node can forward to it. |
 | `RUN_DIR` | One sub-directory per run (`events.jsonl`, `status.json`, workers' event files); `latest` points at the newest. |
 | `EVENT_LOG_LEVEL` / `WORKER_EVENT_LOG_LEVEL` | Lowest level of main-process / worker log lines copied into the event log (structured events are always kept). |
 | `SAMPLE_SECONDS` / `HEARTBEAT_SECONDS` | Resource sampling interval; compact snapshots written into the event log for replay. |

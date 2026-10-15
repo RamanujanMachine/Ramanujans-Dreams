@@ -84,6 +84,11 @@ class HubConfig:
     walltime_warn_s: Tuple[float, ...] = (3600.0, 900.0, 300.0)
     walltime_grace_s: float = 300.0
     events_ring: int = 500
+    #: Serve live snapshots/events over TCP (see :mod:`runmon.server`).
+    server: bool = False
+    host: str = "auto"
+    port: int = 0
+    snapshot_s: float = 1.0
     cores: Optional[int] = None
     memory_mb: Optional[float] = None
     memory_probe: Optional[Callable[[], float]] = None
@@ -138,6 +143,7 @@ class Hub:
         self._stopped = False
         self._stop_lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
+        self.server = None
         self.ticks = 0
         self.tick_cost_ms = 0.0
 
@@ -195,6 +201,16 @@ class Hub:
         """Write ``run_start`` and start the hub thread."""
         self.event("run_start", f"run {self.run_id} started on {self.host} (pid {self.pid})",
                    run=self.run_id, host=self.host, run_dir=self.run_dir, meta=self.cfg.meta)
+        if self.cfg.server:
+            try:
+                from runmon.server import MonitorServer
+                self.server = MonitorServer(self, self.cfg.host, self.cfg.port, self.cfg.snapshot_s)
+                self.server.write_info()
+                self.event("server", f"monitor server on {self.server.advertised}:{self.server.port}",
+                           host=self.server.advertised, port=self.server.port, bind=self.server.bind)
+            except Exception as e:       # no server is not a reason to stop the run
+                self.server = None
+                self.event("monitor_error", f"monitor server failed to start: {e!r}", "WARNING")
         self._drain()
         self._thread = threading.Thread(target=self._loop, name="runmon-hub", daemon=True)
         self._thread.start()
@@ -203,6 +219,16 @@ class Hub:
     def wake(self) -> None:
         """Make the hub run its due jobs now."""
         self._wake.set()
+        if self.server is not None:
+            self.server.wake()
+
+    def _wait(self, timeout: float) -> None:
+        """Sleep until the next job — serving clients meanwhile when there is a server."""
+        if self.server is not None and not self.server.closed:
+            self.server.poll(timeout)
+            return
+        self._wake.wait(timeout)
+        self._wake.clear()
 
     def _jobs(self) -> List[List[Any]]:
         c = self.cfg
@@ -238,8 +264,7 @@ class Hub:
             due = self.watcher.next_due()
             if due is not None:
                 waits.append(due)
-            self._wake.wait(max(0.01, min(waits)))
-            self._wake.clear()
+            self._wait(max(0.01, min(waits)))
 
     # ------------------------------------------------------------------
     # Jobs
@@ -378,7 +403,9 @@ class Hub:
             "pools": self.pools_info(),
             "walltime": wall,
             "alerts": dict(self.alerts),
-            "monitor": {"ticks": self.ticks, "tick_ms": round(self.tick_cost_ms, 2)},
+            "monitor": {"ticks": self.ticks, "tick_ms": round(self.tick_cost_ms, 2),
+                        "clients": sum(1 for c in list(self.server.clients.values()) if c.authed)
+                        if self.server is not None and not self.server.closed else 0},
             "events": list(self.ring)[-events:] if events else [],
         }
 
@@ -410,7 +437,7 @@ class Hub:
                 return
             self._stopped = True
         self._stopping.set()
-        self._wake.set()
+        self.wake()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout)
         for node in list(self.tree.roots):
@@ -428,4 +455,9 @@ class Hub:
             self.write_status()
         except Exception:
             pass
+        if self.server is not None:
+            try:
+                self.server.close(reason)          # pushes run_end, then bye
+            except Exception:
+                pass
         self.writer.close()

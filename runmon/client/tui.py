@@ -207,17 +207,29 @@ def read_status(run_dir: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def watch_files(run_dir: str, refresh: float = 1.0, until_ended: bool = False) -> None:
-    """File-mode client: redraw from ``run_dir/status.json`` until Ctrl-C."""
-    snap = None
-    with Live(render(None, run_dir), refresh_per_second=4, screen=True) as live:
+def watch(source, refresh: float = 0.5, until_ended: bool = False) -> None:
+    """Redraw from ``source`` (see :mod:`runmon.client.sources`) until Ctrl-C.
+
+    :param until_ended: Return a few seconds after the run ended.
+    """
+    with Live(render(None, source.label), refresh_per_second=4, screen=True) as live:
         try:
+            ended_at = None
             while True:
-                snap = read_status(run_dir) or snap
-                live.update(render(snap, f"file {run_dir}"))
-                if until_ended and snap and snap.get("run", {}).get("stopped"):
-                    time.sleep(3)
-                    break
+                snap = source.snapshot()
+                live.update(render(snap, f"{source.label} [{source.state}]"))
+                if snap and snap.get("run", {}).get("stopped"):
+                    ended_at = ended_at or time.time()
+                    if until_ended and time.time() - ended_at > 3:
+                        break
                 time.sleep(refresh)
         except KeyboardInterrupt:
             pass
+        finally:
+            source.close()
+
+
+def watch_files(run_dir: str, refresh: float = 1.0, until_ended: bool = False) -> None:
+    """File-mode client: redraw from ``run_dir/status.json`` until Ctrl-C."""
+    from runmon.client.sources import FileSource
+    watch(FileSource(run_dir), refresh, until_ended)

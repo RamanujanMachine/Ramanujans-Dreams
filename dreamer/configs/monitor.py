@@ -20,6 +20,25 @@ class MonitorConfig(Configurable):
             "`python -m runmon watch <RUN_DIR>/latest`."
         )},
     )
+    SERVER: bool = field(
+        default=True,
+        metadata={"description": (
+            "Serve live status to `runmon watch` clients over TCP (token-protected; details in "
+            "the run's monitor.json). Without it, clients read status.json instead."
+        )},
+    )
+    HOST: str = field(
+        default="auto",
+        metadata={"description": (
+            "Address the monitor server binds: 'auto' = 127.0.0.1 normally, all interfaces "
+            "inside a PBS/Slurm job (so the cluster login node can forward to the compute node); "
+            "or an explicit address."
+        )},
+    )
+    PORT: int = field(
+        default=0,
+        metadata={"description": "Monitor server port (0 = any free port; the chosen one is in monitor.json)."},
+    )
     EVENT_LOG_LEVEL: str = field(
         default="INFO",
         metadata={"description": (

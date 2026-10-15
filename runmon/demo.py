@@ -98,7 +98,7 @@ def run(run_dir: str, speed: float = 1.0, workers: int = 4) -> None:
     os.environ["RUNMON_WALLTIME_END"] = str(time.time() + 110 * unit)
     runmon.start(run_dir, run_id=f"demo-{int(time.time())}", cores=workers, memory_mb=4096,
                  walltime_warn_s=(60 * unit, 40 * unit, 20 * unit), walltime_grace_s=10 * unit,
-                 walltime_check_s=0.5,
+                 walltime_check_s=0.5, server=True,
                  stall_s=60, meta={"demo": True, "constant": "zeta(3)"})
     rng = random.Random(7)
     try:

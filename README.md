@@ -187,8 +187,10 @@ directory under `runs/` (`config.monitor.RUN_DIR`; `runs/latest` is the newest),
 and you watch it from another terminal:
 
 ```bash
-python -m runmon watch runs/latest      # stage, progress, CPU/memory per process, pools, events
-python -m runmon demo                   # try the monitor on a simulated run
+runmon watch runs/latest                # stage, progress, CPU/memory per process, pools, events
+runmon watch ~/work/myrun/runs/latest --ssh user@login.cluster   # a run inside a cluster job
+runmon query runs/latest --level WARNING --since 2h               # search the event log
+runmon demo                             # try the monitor on a simulated run
 ```
 
 The run directory holds `events.jsonl` (one JSON event per line: pool and worker
