@@ -66,6 +66,7 @@ def fmt_duration(seconds: float) -> str:
     return f"{m}m{s:02d}s" if m else f"{s}s"
 
 EVENTS_FILE = "events.jsonl"
+WORKER_DIR = "workers"
 WORKER_GLOB = "events.w*.jsonl"
 
 
@@ -99,6 +100,26 @@ class HubConfig:
     listeners: List[Callable[[Dict[str, Any]], None]] = field(default_factory=list)
     grace_callbacks: List[Callable[[], None]] = field(default_factory=list)
     meta: Dict[str, Any] = field(default_factory=dict)
+
+
+def _worker_pid(path: str) -> Optional[int]:
+    """Pid from ``events.w<pid>.jsonl``."""
+    name = os.path.basename(path)
+    try:
+        return int(name[len("events.w"):-len(".jsonl")])
+    except ValueError:
+        return None
+
+
+def _alive(pid: Optional[int]) -> bool:
+    """Is the process running (zombies count as gone)?"""
+    if pid is None:
+        return False
+    try:
+        import psutil
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except Exception:
+        return False
 
 
 class Hub:
@@ -279,19 +300,38 @@ class Hub:
                 break
         self.writer.write_many(batch)
 
-    def _tail_workers(self) -> None:
-        for path in glob.glob(os.path.join(self.run_dir, WORKER_GLOB)):
+    def _tail_workers(self, final: bool = False) -> None:
+        """Merge new worker events; delete a worker's file once it is fully merged
+        and the worker has exited (its events live on in ``events.jsonl``)."""
+        wdir = os.path.join(self.run_dir, WORKER_DIR)
+        for path in glob.glob(os.path.join(wdir, WORKER_GLOB)):
             tailer = self._tailers.get(path)
             if tailer is None:
                 tailer = self._tailers[path] = FileTailer(path)
-            for ev in tailer.read_new():
-                self.ring.append(ev)
-                self._pending.append(ev)
-                for listener in list(self._listeners):
-                    try:
-                        listener(ev)
-                    except Exception:
-                        pass
+            self._merge(tailer.read_new())
+            if tailer.caught_up() and not _alive(_worker_pid(path)):
+                self._drain()                       # merged copy on disk before removing
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                self._tailers.pop(path, None)
+        if final:
+            try:
+                os.rmdir(wdir)                      # only if empty
+            except OSError:
+                pass
+
+    def _merge(self, events: List[Dict[str, Any]]) -> None:
+        """Add worker events to the run's log, ring and listeners."""
+        for ev in events:
+            self.ring.append(ev)
+            self._pending.append(ev)
+            for listener in list(self._listeners):
+                try:
+                    listener(ev)
+                except Exception:
+                    pass
 
     def pools_info(self) -> List[Dict[str, Any]]:
         """``monitor_info()`` of every live registered pool."""
@@ -444,7 +484,7 @@ class Hub:
             if node.status == "running":
                 node.close("stopped")           # never closed by the program
         try:
-            self._tail_workers()
+            self._tail_workers(final=True)
         except Exception:
             pass
         level = "INFO" if reason == "exit" else "WARNING"

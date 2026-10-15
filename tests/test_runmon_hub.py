@@ -87,6 +87,7 @@ def test_status_snapshot(hub):
 
 
 def test_worker_files_are_merged(hub):
+    # pid 99999 is not running: once merged, its file is removed (content kept in events.jsonl).
     w = ev.EventWriter(runmon.worker_file(hub.run_dir, pid=99999))
     e = ev.make_event("task_failed", "bad trajectory", "WARNING", key="t-17")
     e["pid"], e["role"] = 99999, "worker"
@@ -94,6 +95,20 @@ def test_worker_files_are_merged(hub):
     assert _wait(lambda: any(x["kind"] == "task_failed" for x in _events(hub.run_dir)))
     assert any(x["kind"] == "task_failed" for x in hub.ring)
     w.close()
+    assert _wait(lambda: not os.path.exists(runmon.worker_file(hub.run_dir, pid=99999)))
+    assert sum(x["kind"] == "task_failed" for x in _events(hub.run_dir)) == 1
+
+
+def test_live_worker_file_is_kept_and_silent_workers_leave_none(hub):
+    path = runmon.worker_file(hub.run_dir)                    # this (live) process as "worker"
+    w = ev.EventWriter(path, lazy=True)
+    assert not os.path.exists(path)                           # nothing written → no file
+    w.write(ev.make_event("still_working"))
+    assert _wait(lambda: any(x["kind"] == "still_working" for x in _events(hub.run_dir)))
+    time.sleep(0.1)
+    assert os.path.exists(path)                               # writer alive: kept
+    w.close()
+    os.remove(path)
 
 
 def _sleep_child(seconds):
@@ -119,6 +134,8 @@ def test_sampling_sees_and_labels_children(hub):
             p["pid"] == child.pid and p["role"] == "eval worker"
             for p in hub.last_sample["processes"]))
         assert hub.snapshot()["pools"][0]["name"] == "eval"
+        main = next(p for p in hub.last_sample["processes"] if p["role"] == "main")
+        assert main["cores"] == pytest.approx(main["cpu"] / 100, abs=0.01) and main["threads"] >= 1
     finally:
         child.terminate()
         child.join()

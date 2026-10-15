@@ -49,7 +49,8 @@ _MEM_ENV = "RD_ALLOCATED_MEMORY_MB"
 _mem_cache: object = False
 
 #: Threading variables of numeric libraries that schedulers set to the core count.
-THREAD_ENV_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+THREAD_ENV_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                   "VECLIB_MAXIMUM_THREADS")     # the last: Apple Accelerate (macOS numpy)
 
 _UNIT_MB = {"b": 1 / 2**20, "kb": 1 / 1024, "mb": 1.0, "gb": 1024.0, "tb": 1024.0**2}
 

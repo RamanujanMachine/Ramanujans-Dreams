@@ -200,8 +200,8 @@ def on_grace(callback: Callable[[], None]) -> None:
 # ---------------------------------------------------------------------------
 
 def worker_file(run_dir: str, pid: Optional[int] = None) -> str:
-    """Path of a worker's own event file in ``run_dir``."""
-    return os.path.join(os.path.abspath(run_dir), f"events.w{pid or os.getpid()}.jsonl")
+    """Path of a worker's own event file (``<run_dir>/workers/events.w<pid>.jsonl``)."""
+    return os.path.join(os.path.abspath(run_dir), "workers", f"events.w{pid or os.getpid()}.jsonl")
 
 
 def init_worker(run_dir: str, role: str = "worker",
@@ -218,7 +218,7 @@ def init_worker(run_dir: str, role: str = "worker",
     if _worker_writer is not None and _worker_writer.path == path:
         return
     _events.set_role(role)
-    _worker_writer = EventWriter(path)
+    _worker_writer = EventWriter(path, lazy=True)     # no file unless the worker reports
 
     def _fire(label: str, elapsed: float, detail: Optional[str]) -> None:
         event("watchdog", f"[watchdog] {label} still running after {elapsed:.0f}s"

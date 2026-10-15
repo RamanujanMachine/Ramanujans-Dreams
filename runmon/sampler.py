@@ -12,6 +12,10 @@ Utilization is reported against the run's **allocation** (``cores``,
 machine's numbers are irrelevant to whether the run uses what it was given —
 and the sampler flags a run that uses *more* than it was given.
 
+Per process, ``cpu`` is a percentage of **one** core (as in ``top``) and
+``cores`` the same in cores: a process running several threads at once (e.g.
+numpy's BLAS) reads above 100 % / 1 core — real use, not a measurement error.
+
 Cost: one ``children(recursive=True)`` walk plus a few ``/proc`` reads per
 process per sample — milliseconds for dozens of workers.
 """
@@ -79,7 +83,10 @@ class ProcessSampler:
         for p in kids:
             cached = self._procs.get(p.pid)
             if cached is None:
-                p.cpu_percent(None)            # prime: first reading is 0
+                try:
+                    p.cpu_percent(None)        # prime: first reading is 0
+                except psutil.Error:           # exited (or zombie) since it was listed
+                    continue
                 cached = p
                 self._auto[p.pid] = _helper_role(p)
             live[p.pid] = cached
@@ -95,12 +102,17 @@ class ProcessSampler:
             try:
                 with p.oneshot():
                     mem = p.memory_info()
+                    if p.status() == psutil.STATUS_ZOMBIE:
+                        continue               # exited, not yet reaped: uses nothing
+                    cpu = p.cpu_percent(None)
                     procs.append({
                         "pid": p.pid,
                         "ppid": p.ppid(),
                         "role": "main" if p.pid == self.root_pid else self.labels.get(p.pid, self._auto.get(p.pid, "child")),
                         "name": p.name(),
-                        "cpu": round(p.cpu_percent(None), 1),
+                        # % of ONE core (as in `top`): above 100 = several threads busy.
+                        "cpu": round(cpu, 1),
+                        "cores": round(cpu / 100.0, 2),
                         "rss_mb": round(mem.rss / _MB, 1),
                         "status": p.status(),
                         "threads": p.num_threads(),

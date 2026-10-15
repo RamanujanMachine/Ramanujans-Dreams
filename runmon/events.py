@@ -105,13 +105,23 @@ class EventWriter:
     """Append-only JSONL file; thread-safe; every write is flushed to the OS.
 
     :param path: File to append to (parent directories are created).
+    :param lazy: Create the file only at the first write (worker processes that
+        never report anything leave no file behind).
     """
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, lazy: bool = False):
         self.path = os.path.abspath(path)
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         self._lock = threading.RLock()   # re-entrant: shutdown may run in a signal handler
-        self._f = open(self.path, "a", encoding="utf-8")
+        self._f = None
+        self._closed = False
+        if not lazy:
+            self._open()
+
+    def _open(self):
+        if self._f is None:
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+            self._f = open(self.path, "a", encoding="utf-8")
+        return self._f
 
     def write(self, event: Dict[str, Any]) -> None:
         """Append one event and flush it."""
@@ -123,15 +133,16 @@ class EventWriter:
             return
         text = "".join(dumps(e) + "\n" for e in events)
         with self._lock:
-            if self._f.closed:
+            if self._closed:
                 return
-            self._f.write(text)
-            self._f.flush()
+            f = self._open()
+            f.write(text)
+            f.flush()
 
     def sync(self) -> None:
         """Force the file to stable storage (``fsync``)."""
         with self._lock:
-            if not self._f.closed:
+            if self._f is not None and not self._f.closed:
                 self._f.flush()
                 try:
                     os.fsync(self._f.fileno())
@@ -142,7 +153,8 @@ class EventWriter:
         """Flush, sync and close (idempotent)."""
         self.sync()
         with self._lock:
-            if not self._f.closed:
+            self._closed = True
+            if self._f is not None and not self._f.closed:
                 self._f.close()
 
 
@@ -158,6 +170,13 @@ class FileTailer:
         self.path = path
         self._offset = 0
         self._partial = b""
+
+    def caught_up(self) -> bool:
+        """Everything in the file has been read (no torn line pending)."""
+        try:
+            return not self._partial and os.path.getsize(self.path) == self._offset
+        except OSError:
+            return True
 
     def read_new(self, max_bytes: int = 4 << 20) -> List[Dict[str, Any]]:
         """Events appended since the last call (at most ``max_bytes`` read per call)."""

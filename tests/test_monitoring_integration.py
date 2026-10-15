@@ -183,7 +183,9 @@ def test_monitored_system_run(monkeypatch, tmp_path):
     assert {e["f"]["x"] for e in worker_evs} == {0, 1, 2, 3}
     wd = [e for e in evs if e["kind"] == "watchdog"]
     assert wd and all(e["role"] == "worker" for e in wd) and "slow worker step" in wd[0]["msg"]
-    assert any(f.startswith("events.w") for f in os.listdir(run_dir))
+    # Worker files are merged into events.jsonl and removed once their workers exit.
+    assert not os.path.exists(os.path.join(run_dir, "workers"))
+    assert not any(f.startswith("events.w") for f in os.listdir(run_dir))
     # Final progress tree: stages → bar → shard → pool-free inner bar.
     snap = json.load(open(os.path.join(run_dir, "status.json")))
     names = [t["name"] for t in snap["tasks"]]

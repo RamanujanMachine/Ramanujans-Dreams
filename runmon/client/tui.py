@@ -129,8 +129,8 @@ def _resources(s: Dict[str, Any], max_procs: int = 12) -> Group:
     tot, alloc, mach = res.get("totals") or {}, res.get("allocation") or {}, res.get("machine") or {}
     head = Text()
     if tot:
-        head.append(f"CPU {tot['cpu_percent']:.0f}% of {100 * alloc.get('cores', 1)}% "
-                    f"({alloc.get('cores')} cores, {alloc.get('cores_source')})  ")
+        head.append(f"CPU {tot['cpu_percent'] / 100:.1f} of {alloc.get('cores')} cores "
+                    f"({alloc.get('cores_source')})  ")
         head.append_text(_bar(min(1.0, tot.get("cpu_util", 0)), 15))
         head.append(f"\nRSS {tot['rss_mb']:.0f} MB")
         if alloc.get("memory_mb"):
@@ -138,17 +138,20 @@ def _resources(s: Dict[str, Any], max_procs: int = 12) -> Group:
             head.append_text(_bar(min(1.0, tot.get("mem_util") or 0), 15))
         head.append(f"\nmachine: {mach.get('cores')} cores, {mach.get('mem_available_mb')} / "
                     f"{mach.get('mem_total_mb')} MB available", style="dim")
-    table = Table(box=None, expand=True, header_style="bold")
-    for col, kw in (("pid", {"justify": "right"}), ("role", {}), ("cpu %", {"justify": "right"}),
-                    ("RSS MB", {"justify": "right"}), ("state", {})):
+    table = Table(box=None, expand=True, header_style="bold",
+                  caption="cores: per process, 1.00 = one full core; above 1 = several threads busy",
+                  caption_style="dim")
+    for col, kw in (("pid", {"justify": "right"}), ("role", {}), ("cores", {"justify": "right"}),
+                    ("threads", {"justify": "right"}), ("RSS MB", {"justify": "right"}), ("state", {})):
         table.add_column(col, **kw)
     procs = sorted(res.get("processes", []), key=lambda p: (p["role"] != "main", -p["cpu"]))
     for p in procs[:max_procs]:
-        cpu_style = "green" if p["cpu"] > 50 else "yellow" if p["cpu"] > 5 else "dim"
-        table.add_row(str(p["pid"]), p["role"], Text(f"{p['cpu']:.0f}", style=cpu_style),
-                      f"{p['rss_mb']:.0f}", p["status"])
+        cores = p.get("cores", p["cpu"] / 100.0)
+        cpu_style = "magenta" if cores > 1.05 else "green" if cores > 0.5 else "yellow" if cores > 0.05 else "dim"
+        table.add_row(str(p["pid"]), p["role"], Text(f"{cores:.2f}", style=cpu_style),
+                      str(p.get("threads", "")), f"{p['rss_mb']:.0f}", p["status"])
     if len(procs) > max_procs:
-        table.add_row("…", f"{len(procs) - max_procs} more", "", "", "")
+        table.add_row("…", f"{len(procs) - max_procs} more", "", "", "", "")
     return Group(head, table)
 
 
