@@ -251,3 +251,21 @@ class TestFacade:
             runmon._worker_writer = None
             runmon._worker_watcher = None
             ev.set_role("main")
+
+
+def test_stage_nodes_emit_start_and_end_events(hub):
+    with hub.tree.task("analysis", kind="stage"):
+        with hub.tree.task("not a stage", kind="shard"):
+            pass
+    with pytest.raises(RuntimeError):
+        with hub.tree.task("search", kind="stage"):
+            raise RuntimeError("boom")
+    assert _wait(lambda: sum(e["kind"].startswith("stage_") for e in _events(hub.run_dir)) == 4)
+    st = [(e["kind"], e["f"]["stage"], e["f"].get("status")) for e in _events(hub.run_dir)
+          if e["kind"].startswith("stage_")]
+    assert st == [("stage_start", "analysis", None), ("stage_end", "analysis", "done"),
+                  ("stage_start", "search", None), ("stage_end", "search", "failed")]
+    end = next(e for e in _events(hub.run_dir) if e["kind"] == "stage_end" and e["f"]["stage"] == "search")
+    assert end["level"] == "WARNING" and end["f"]["elapsed"] >= 0
+    start = next(e for e in _events(hub.run_dir) if e["kind"] == "stage_start")
+    assert start["ts"] == pytest.approx(hub.snapshot()["tasks"][0]["started"])

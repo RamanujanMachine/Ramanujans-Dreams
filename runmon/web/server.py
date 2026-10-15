@@ -62,22 +62,27 @@ class WebApp:
             snap = self.source.snapshot()
         return {"source": self.source.label, "state": self.source.state, "snapshot": snap}
 
-    def history(self) -> List[Dict[str, Any]]:
-        """Totals from the run's heartbeats (one every ~30 s), oldest first."""
+    def history(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Totals from the run's heartbeats (one every ~30 s) and the stage starts /
+        ends (timeline markers), oldest first — one pass over the event log."""
         if self.lines is None:
-            return []
-        out = []
+            return {"history": [], "stages": []}
+        out, stages = [], []
         try:
-            for e in q.iter_matching(self.lines(), kinds=["heartbeat"]):
+            for e in q.iter_matching(self.lines(), kinds=["heartbeat", "stage_start", "stage_end"]):
                 f = e.get("f") or {}
+                if e.get("kind") != "heartbeat":
+                    stages.append({"ts": e.get("ts"), "kind": e.get("kind"), "stage": f.get("stage"),
+                                   "status": f.get("status")})
+                    continue
                 t = f.get("totals") or {}
                 if t:
                     out.append({"ts": e.get("ts"), "cpu_percent": t.get("cpu_percent"),
                                 "rss_mb": t.get("rss_mb"), "allocation": f.get("allocation"),
                                 "pool_workers": (f.get("pool_workers") or {}).get("workers")})
         except OSError:
-            return []
-        return out
+            pass
+        return {"history": out, "stages": stages}
 
     def query(self, params: Dict[str, str]) -> Dict[str, Any]:
         """Search the event log with the ``runmon query`` filters."""
@@ -139,7 +144,7 @@ def _handler(app: WebApp):
                 elif url.path == "/api/snapshot":
                     self._json(app.snapshot())
                 elif url.path == "/api/history":
-                    self._json({"history": app.history()})
+                    self._json(app.history())
                 elif url.path == "/api/query":
                     self._json(app.query(params))
                 elif url.path == "/api/stream":

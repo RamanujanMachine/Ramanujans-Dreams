@@ -139,7 +139,7 @@ class Hub:
         self.host = socket.gethostname()
         self.pid = os.getpid()
         self.run_id = run_id or f"{self.host}-{self.pid}-{int(self.started)}"
-        self.tree = ProgressTree()
+        self.tree = ProgressTree(on_change=self._on_task_change)
         self.watcher = DeadlineWatcher(self.cfg.on_watchdog or self._on_watchdog)
         self.sampler = ProcessSampler(cores=self.cfg.cores, memory_mb=self.cfg.memory_mb,
                                       memory_probe=self.cfg.memory_probe)
@@ -209,6 +209,22 @@ class Hub:
     def on_grace(self, callback: Callable[[], None]) -> None:
         """Run ``callback()`` (on the hub thread) once the walltime grace period starts."""
         self._grace_callbacks.append(callback)
+
+    def _on_task_change(self, change: str, node) -> None:
+        """Stage nodes leave ``stage_start`` / ``stage_end`` events (timeline markers)."""
+        if node.kind != "stage":
+            return
+        if change == "open":
+            ev = make_event("stage_start", f"stage {node.name} started", stage=node.name)
+            ev["ts"] = node.started
+        else:
+            ev = make_event("stage_end", f"stage {node.name} {node.status} after "
+                            f"{fmt_duration(node.finished - node.started)}",
+                            "INFO" if node.status == "done" else "WARNING",
+                            stage=node.name, status=node.status, elapsed=node.finished - node.started)
+            ev["ts"] = node.finished
+        ev["ctx"] = {"task": node.path()}
+        self.publish(ev)
 
     def _on_watchdog(self, label: str, elapsed: float, detail: Optional[str]) -> None:
         self.event("watchdog", f"[watchdog] {label} still running after {elapsed:.0f}s"

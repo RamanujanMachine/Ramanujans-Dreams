@@ -152,6 +152,7 @@ class TaskNode:
             "done": self.done, "total": self.total, "fraction": self.fraction(),
             "estimated": self.estimated, "eta": self.eta_seconds(now),
             "elapsed": (self.finished or now) - self.started,
+            "started": self.started, "finished": self.finished,
             "metrics": dict(self.metrics),
         }
         if depth > 0:
@@ -162,7 +163,10 @@ class TaskNode:
 class ProgressTree:
     """The run's progress tree with a per-thread stack of open nodes."""
 
-    def __init__(self):
+    def __init__(self, on_change: Optional[Any] = None):
+        """:param on_change: optional ``(event, node)`` callback, ``event`` in
+        ``{"open", "close"}`` (the hub publishes stage start/end from it)."""
+        self.on_change = on_change
         self.roots: List[TaskNode] = []
         self._lock = threading.RLock()   # re-entrant: shutdown may run in a signal handler
         self._local = threading.local()
@@ -188,6 +192,8 @@ class ProgressTree:
             (parent.children if parent is not None else self.roots).append(node)
         st.append(node)
         self.last_progress = node.started
+        if self.on_change is not None:
+            self.on_change("open", node)
         return node
 
     def _close(self, node: TaskNode, status: str) -> None:
@@ -204,6 +210,8 @@ class ProgressTree:
                     break
                 if top.status == "running":
                     top.status, top.finished = "stopped", node.finished
+        if self.on_change is not None:
+            self.on_change("close", node)
         with self._lock:
             siblings = node.parent.children if node.parent is not None else self.roots
             finished = [c for c in siblings if c.status != "running"]

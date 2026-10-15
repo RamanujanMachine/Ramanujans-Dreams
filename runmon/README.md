@@ -116,6 +116,9 @@ same targets as `watch`, so it also works for a cluster run over `--ssh`. The pa
 - **Progress tree:** estimates are striped and marked `~`.
 - **Charts:** CPU and memory, with the allocation as a dashed line. History covers the
   whole run, rebuilt from heartbeats.
+- **Stage markers:** a coloured vertical line with a label where each stage starts, on
+  both charts. Every `kind="stage"` progress node writes `stage_start` / `stage_end`
+  events.
 - **Tables:** processes and pools.
 - **Events:** filterable, with a "search full log" button that runs `runmon query`.
 

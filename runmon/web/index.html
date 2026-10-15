@@ -13,6 +13,8 @@
   --series-1: #2a78d6; --series-1-wash: #cde2fb;
   --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
   --good-text: #006300; --est: #6250d6;
+  /* stage markers: categorical slots 2-6 (slot 1 blue is the data line), violet for others */
+  --stage-1: #eb6834; --stage-2: #1baf7a; --stage-3: #eda100; --stage-4: #e87ba4; --stage-5: #008300; --stage-x: #6250d6;
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
@@ -22,6 +24,7 @@
     --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
     --series-1: #3987e5; --series-1-wash: #184f95;
     --good-text: #0ca30c; --est: #9085e9;
+    --stage-1: #d95926; --stage-2: #199e70; --stage-3: #c98500; --stage-4: #d55181; --stage-5: #008300; --stage-x: #9085e9;
   }
 }
 :root[data-theme="dark"] {
@@ -31,6 +34,7 @@
   --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
   --series-1: #3987e5; --series-1-wash: #184f95;
   --good-text: #0ca30c; --est: #9085e9;
+  --stage-1: #d95926; --stage-2: #199e70; --stage-3: #c98500; --stage-4: #d55181; --stage-5: #008300; --stage-x: #9085e9;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--page); color: var(--text-primary);
@@ -101,6 +105,7 @@ header.card { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center
   border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.12); display: none; white-space: nowrap; }
 .tip strong { font-size: 14px; }
 .tip .key { display: inline-block; width: 12px; height: 2px; background: var(--series-1); vertical-align: middle; margin-right: 6px; }
+.tip .skey { display: inline-block; width: 2px; height: 10px; vertical-align: middle; margin-right: 6px; }
 
 /* tables */
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -242,6 +247,14 @@ try {
 
 // ---------------- state ----------------
 let snap = null, live = true, windowSec = 600, smoothSec = 0;
+const stageMarks = [], stageSeen = new Set();       // {ts, stage}: stage starts (timeline markers)
+function addStageMark(ts, stage) {
+  if (!ts || !stage) return;
+  const key = `${stage}@${Number(ts).toFixed(3)}`;
+  if (stageSeen.has(key)) return;
+  stageSeen.add(key); stageMarks.push({ts, stage}); stageMarks.sort((a, b) => a.ts - b.ts);
+}
+const stageColor = (name) => { const i = STAGES.indexOf(String(name).toLowerCase()); return css(i >= 0 ? `--stage-${i + 1}` : "--stage-x"); };
 const history = [];                 // {ts, cores, rss, allocCores, allocMem}
 let lastSampleTs = 0;
 
@@ -270,6 +283,7 @@ function render(data) {
     + (snap.sample_age != null && snap.sample_age > 10 ? ` · sample ${Math.round(snap.sample_age)} s old` : "");
   document.title = `${snap.stage ? snap.stage + " · " : ""}${run.id || "run"} — Run Monitor`;
   renderStages(); renderAlerts(); renderTiles(); renderTree(); renderTables();
+  for (const e of snap.events || []) if (e.kind === "stage_start") addStageMark(e.ts, (e.f || {}).stage);
   if (live) renderEvents(snap.events || []);
   const res = snap.resources;
   if (res && res.totals) addSample(res.ts, res.totals.cpu_percent, res.totals.rss_mb, res.allocation,
@@ -464,13 +478,15 @@ function smooth(pts, key, sec) {
   return out;
 }
 
-function drawChart(boxId, pts, valueKey, refKey, fmtVal, refLabel, stepRef) {
+function drawChart(boxId, pts, valueKey, refKey, fmtVal, refLabel, stepRef, tFrom) {
   const box = $(boxId); box.replaceChildren();
   const W = Math.max(280, box.clientWidth), H = 180, L = 48, R = 12, T = 10, B = 24;
   const svg = svgEl("svg", {viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": box.previousElementSibling.textContent});
   box.append(svg);
   if (pts.length < 2) { const t = svgEl("text", {x: L, y: H / 2, fill: css("--text-muted"), "font-size": 12}); t.textContent = "Collecting samples…"; svg.append(t); return; }
-  const t0 = pts[0].ts, t1 = pts[pts.length - 1].ts;
+  // The axis starts at the window start / run start (tFrom), not at the first sample this
+  // page happened to receive, so early stage markers stay visible; the line starts with the data.
+  const t1 = pts[pts.length - 1].ts, t0 = Math.min(pts[0].ts, tFrom ?? pts[0].ts);
   const ref = pts[pts.length - 1][refKey];
   const stepMax = stepRef ? Math.max(0, ...pts.map((p) => p[stepRef.key] || 0)) : 0;
   const step = niceStep(Math.max(...pts.map((p) => p[valueKey]), ref ? ref * 1.05 : 0, stepMax * 1.05));
@@ -487,6 +503,21 @@ function drawChart(boxId, pts, valueKey, refKey, fmtVal, refLabel, stepRef) {
     const ts = t0 + (t1 - t0) * frac;
     const lab = svgEl("text", {x: x(ts), y: H - 6, "text-anchor": frac === 0 ? "start" : frac === 1 ? "end" : "middle", fill: css("--text-muted"), "font-size": 11});
     lab.textContent = clock(ts); svg.append(lab);
+  }
+  // Stage starts: a coloured vertical line + label (text ink), staggered in rows so close starts don't collide.
+  const rowsEnd = [-Infinity, -Infinity, -Infinity];
+  for (const m of stageMarks) {
+    if (m.ts < t0 || m.ts > t1) continue;
+    const mx = x(m.ts), color = stageColor(m.stage);
+    svg.append(svgEl("line", {x1: mx, x2: mx, y1: T, y2: H - B, stroke: color, "stroke-width": 1.5}));
+    const label = String(m.stage), w = label.length * 6.2 + 8;
+    let row = rowsEnd.findIndex((end) => mx > end + 4);
+    if (row < 0) continue;                              // no room: the tooltip still names the stage
+    const anchorEnd = mx + w > W - R;                   // keep labels inside the plot
+    rowsEnd[row] = anchorEnd ? mx : mx + w;
+    const lab = svgEl("text", {x: anchorEnd ? mx - 4 : mx + 4, y: T + 10 + row * 13, "text-anchor": anchorEnd ? "end" : "start",
+      fill: css("--text-secondary"), "font-size": 11});
+    lab.textContent = label; svg.append(lab);
   }
   const d = pts.map((p, i) => `${i ? "L" : "M"}${x(p.ts).toFixed(1)},${y(p[valueKey]).toFixed(1)}`).join("");
   svg.append(svgEl("path", {d, fill: "none", stroke: css("--series-1"), "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round"}));
@@ -525,6 +556,11 @@ function drawChart(boxId, pts, valueKey, refKey, fmtVal, refLabel, stepRef) {
     tip.append(key, strong);
     if (smoothSec && best.raw != null) tip.append(el("span", {class: "muted"}, `  (${smoothSec} s avg; now ${fmtVal(best.raw, false)})`));
     if (stepRef && best[stepRef.key] != null) tip.append(el("br"), el("span", {class: "secondary"}, stepRef.label(best[stepRef.key])));
+    let inStage = null; for (const m of stageMarks) if (m.ts <= best.ts) inStage = m; else break;
+    if (inStage) {
+      const sk = el("span", {class: "skey"}); sk.style.background = stageColor(inStage.stage);
+      tip.append(el("br"), sk, el("span", {class: "secondary"}, `${inStage.stage} (from ${clock(inStage.ts)})`));
+    }
     tip.append(el("br"), el("span", {class: "muted"}, clock(best.ts)));
     tip.style.display = "block";
     const left = px * r.width / W; tip.style.left = `${Math.min(left + 12, r.width - tip.offsetWidth)}px`; tip.style.top = `${py * r.height / H - 40}px`;
@@ -539,17 +575,21 @@ function drawChart(boxId, pts, valueKey, refKey, fmtVal, refLabel, stepRef) {
 function drawCharts() {
   const now = history.length ? history[history.length - 1].ts : 0;
   const pts = windowSec ? history.filter((p) => p.ts >= now - windowSec) : history;
+  const runStart = snap && snap.run && snap.run.started;
+  const firstMark = stageMarks.length ? stageMarks[0].ts : null;
+  const earliest = Math.min(...[runStart, firstMark, pts.length ? pts[0].ts : null].filter((v) => v != null));
+  const tFrom = isFinite(earliest) ? Math.max(earliest, windowSec ? now - windowSec : -Infinity) : undefined;
   const tickNum = (v, step) => String(+v.toFixed(Math.max(0, -Math.floor(Math.log10(step)) + 1)));
   drawChart("c-cpu", smooth(pts, "cores", smoothSec), "cores", "allocCores",
     (v, tick, step) => tick ? tickNum(v, step) : `${v.toFixed(2)} cores`, (r) => `budget ${r} cores`,
-    {key: "workers", label: (w) => `pool workers ${w}`});
+    {key: "workers", label: (w) => `pool workers ${w}`}, tFrom);
   // Memory: pick the unit first (GB from 2 GB up) so the ticks are round in that unit.
   const peak = Math.max(0, ...pts.map((p) => Math.max(p.rss, p.allocMem || 0)));
   const gb = peak >= 2048, div = gb ? 1024 : 1, unit = gb ? "GB" : "MB";
   const memPts = smooth(pts.map((p) => ({ts: p.ts, rss: p.rss / div, allocMem: p.allocMem ? p.allocMem / div : null})), "rss", smoothSec);
   drawChart("c-mem", memPts, "rss", "allocMem",
     (v, tick, step) => tick ? `${tickNum(v, step)} ${unit}` : mb(v * div),
-    (r) => `allocation ${mb(r * div)}`);
+    (r) => `allocation ${mb(r * div)}`, null, tFrom);
 }
 for (const b of document.querySelectorAll("[data-win]")) b.onclick = () => {
   windowSec = +b.dataset.win;
@@ -568,6 +608,7 @@ async function loadHistory() {
   try {
     const r = await (await fetch("/api/history")).json();
     for (const h of r.history || []) addSample(h.ts, h.cpu_percent, h.rss_mb, h.allocation, h.pool_workers);
+    for (const s of r.stages || []) if (s.kind === "stage_start") addStageMark(s.ts, s.stage);
     drawCharts();
   } catch (e) {}
 }

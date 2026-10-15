@@ -25,6 +25,8 @@ from runmon.web.server import make_server
 def web(tmp_path):
     h = Hub(str(tmp_path / "run"), "web-test", HubConfig(sample_s=0.05, drain_s=0.02, status_s=0.05,
                                                           heartbeat_s=0.1, walltime_check_s=0.05)).start()
+    with h.tree.task("analysis", kind="stage"):
+        pass
     h.event("worker_died", "a worker died", "WARNING", pool="eval")
     h.event("pool_created", "eval pool", workers=4)
     deadline = time.time() + 10
@@ -70,10 +72,13 @@ def test_foreign_host_refused(web):
     assert _get(port, "/api/snapshot", host="localhost")[0] == 200
 
 
-def test_history_from_heartbeats(web):
+def test_history_from_heartbeats_and_stage_markers(web):
     port, _ = web
-    hist = json.loads(_get(port, "/api/history")[2].read())["history"]
-    assert hist and {"ts", "cpu_percent", "rss_mb"} <= set(hist[0])
+    data = json.loads(_get(port, "/api/history")[2].read())
+    hist = data["history"]
+    assert hist and {"ts", "cpu_percent", "rss_mb", "pool_workers"} <= set(hist[0])
+    assert [(s["kind"], s["stage"]) for s in data["stages"]] == [("stage_start", "analysis"),
+                                                                   ("stage_end", "analysis")]
 
 
 def test_query(web):
