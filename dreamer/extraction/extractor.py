@@ -546,7 +546,8 @@ class ShardExtractor(ExtractionScheme):
         A = np.array([hp.vectors[0] for hp in shifted_hps], dtype=np.int64)
         b = np.array([hp.vectors[1] for hp in shifted_hps], dtype=np.int64)
         S = config.extraction.INIT_POINT_MAX_COORD * 2 + 1
-        cpus = cpus if (cpus := os.cpu_count()) else 1
+        from dreamer.utils.allocation import available_cores
+        cpus = available_cores()
         prefix_dims = max(min(int(round(math.log(cpus, S))), cpus - 1), 1)
 
         symmetries_func = None

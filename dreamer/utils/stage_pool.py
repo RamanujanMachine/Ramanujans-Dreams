@@ -69,13 +69,14 @@ _STAGE_STATE: Dict[str, Any] = {}
 def total_core_budget() -> int:
     """Return the number of cores a stage pool may use.
 
-    ``sys_config.TOTAL_CORES`` (``None`` → ``os.cpu_count()``), floored at 1 —
-    the whole machine, like :func:`dreamer.utils.multi_processing.search_worker_budget`
+    ``sys_config.TOTAL_CORES``, else the run's allocated cores
+    (:func:`dreamer.utils.allocation.available_cores`), floored at 1 — like :func:`dreamer.utils.multi_processing.search_worker_budget`
     (nothing is reserved; Tier-2 runs inside the same tasks as Tier-1).
 
     :return: Worker budget (>= 1).
     """
-    return max(1, sys_config.TOTAL_CORES or os.cpu_count() or 1)
+    from dreamer.utils.allocation import available_cores
+    return available_cores()
 
 
 def resolve_stage_workers(budget: Optional[int] = None) -> int:

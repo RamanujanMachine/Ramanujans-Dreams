@@ -43,8 +43,16 @@ def start_method() -> str:
 
 
 def pool_context():
-    """``multiprocessing`` context for the package's process pools."""
+    """``multiprocessing`` context for the package's process pools.
+
+    Inside a batch job it also makes the workers' numeric libraries
+    single-threaded (see :func:`dreamer.utils.allocation.limit_worker_threads`):
+    the pool is the parallelism, and PBS sets ``OMP_NUM_THREADS`` to the whole
+    allocation.
+    """
     global _preload_set
+    from dreamer.utils.allocation import limit_worker_threads
+    limit_worker_threads()
     method = start_method()
     ctx = mp.get_context(method)
     if method == "forkserver" and not _preload_set:

@@ -9,9 +9,12 @@ Cores say how many workers we *could* run; memory says how many *fit*.  Every
 * ``available_mb`` — memory the OS can give us now: Linux ``MemAvailable``
   (capped by a cgroup v1/v2 limit, which is what SLURM / containers enforce),
   macOS ``vm_stat`` (free + inactive + speculative pages), else half of physical
-  memory.  ``system.MEMORY_LIMIT_MB`` replaces the detection with a budget for
-  this run: available = limit − RSS of the main process and its live workers
-  (shared nodes, reproducible tests).
+  memory.  A **budget** replaces the detection: ``system.MEMORY_LIMIT_MB``, or —
+  inside a PBS/Slurm job — the memory the job requested
+  (:func:`dreamer.utils.allocation.allocated_memory_mb`; batch nodes need not
+  enforce it, so the machine's free memory can be far larger than the job's
+  share).  With a budget, available = budget − RSS of the main process and its
+  live workers.
 * ``per_worker_mb`` — ``system.WORKER_MEMORY_MB`` if set, else the **measured**
   RSS of a fresh worker that imported the trajectory machinery (measured once
   per process, ~130 MB) plus ``system.WORKER_TASK_HEADROOM_MB`` for the task's
@@ -96,13 +99,19 @@ def total_memory_mb() -> float:
 
 def available_memory_mb() -> float:
     """Memory available to this run now (MB); see the module docstring."""
-    override = getattr(config.system, "MEMORY_LIMIT_MB", None)
-    if override:
+    from dreamer.utils.allocation import allocated_memory_mb
+    budget = allocated_memory_mb()
+    if budget:
         # A budget for this run: what is left after the main process and its
         # current worker processes.
         import multiprocessing as mp
         used = rss_mb([os.getpid()] + [p.pid for p in mp.active_children()])
-        return max(0.0, float(override) - used)
+        return max(0.0, float(budget) - used)
+    return _machine_available_mb()
+
+
+def _machine_available_mb() -> float:
+    """Memory the OS can give us now (MB), ignoring any per-run budget."""
     candidates = []
     meminfo = _read("/proc/meminfo")
     if meminfo is not None:

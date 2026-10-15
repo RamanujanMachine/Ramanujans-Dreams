@@ -99,8 +99,12 @@ class SystemConfig(Configurable):
         default=None,
         metadata={
             "description": (
-                "Total CPU cores the pipeline may use. None resolves to "
-                "os.cpu_count() at runtime. Single source of truth for every "
+                "Total CPU cores the pipeline may use. None resolves at runtime to "
+                "the cores this run was allocated: inside a PBS/Slurm job the "
+                "scheduler's request ($NCPUS / $SLURM_CPUS_PER_TASK), capped by the "
+                "CPU affinity mask and os.cpu_count() (dreamer.utils.allocation). "
+                "Batch nodes may not confine jobs, so the machine's core count can "
+                "exceed the allocation. Single source of truth for every "
                 "process pool (stage pools, eval pools, extraction); nothing is "
                 "reserved. See dreamer.utils.multi_processing.search_worker_budget."
             )
@@ -153,8 +157,10 @@ class SystemConfig(Configurable):
     MEMORY_LIMIT_MB: Optional[int] = field(
         default=None,
         metadata={"description": (
-            "Memory (MB) this run may use; None = detect (Linux MemAvailable + cgroup/SLURM "
-            "limit, macOS vm_stat). Set it on shared nodes."
+            "Memory (MB) this run may use; None = the batch job's request when running "
+            "under PBS (qstat Resource_List.mem) or Slurm ($SLURM_MEM_PER_NODE), else "
+            "detect (Linux MemAvailable + cgroup limit, macOS vm_stat). See "
+            "dreamer.utils.allocation."
         )},
     )
     MEMORY_RESERVE_MB: int = field(

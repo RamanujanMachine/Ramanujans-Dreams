@@ -36,14 +36,17 @@ from dreamer.configs.system import sys_config
 def search_worker_budget() -> int:
     """Return the number of cores available to search / analysis pools.
 
-    Single source of truth for sizing every search/eval pool: the whole machine,
-    ``sys_config.TOTAL_CORES`` (``None`` → ``os.cpu_count()``).  Nothing is
+    Single source of truth for sizing every search/eval pool:
+    ``sys_config.TOTAL_CORES``, else the cores this run was *allocated* (batch
+    scheduler request / affinity mask / machine — see
+    :func:`dreamer.utils.allocation.available_cores`).  Nothing is
     reserved any more — Tier-2 attributes are computed inside the same pool
     tasks as Tier-1 (there is no separate background queue).
 
     :return: Worker budget, floored at 1.
     """
-    return max(1, sys_config.TOTAL_CORES or os.cpu_count() or 1)
+    from dreamer.utils.allocation import available_cores
+    return available_cores()
 
 
 # ---------------------------------------------------------------------------
@@ -61,8 +64,15 @@ def _init_worker(config_overrides: dict) -> None:
 
 
 def create_process_pool_executor() -> ProcessPoolExecutor:
-    """Return a ``ProcessPoolExecutor`` whose workers inherit the current config."""
+    """Return a ``ProcessPoolExecutor`` whose workers inherit the current config.
+
+    Sized by :func:`search_worker_budget` — never the executor's default
+    ``os.cpu_count()``, which on an unconfined batch node is the whole machine.
+    """
+    from dreamer.utils.mp_context import pool_context
     return ProcessPoolExecutor(
+        max_workers=search_worker_budget(),
+        mp_context=pool_context(),
         initializer=_init_worker,
         initargs=(config.export_configurations(),),
     )

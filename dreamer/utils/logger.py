@@ -132,6 +132,7 @@ class Logger:
         """
         cls._track_generate_logs_toggle()
         cls._get_or_create_console_handler()
+        cls._announce_batch_allocation()
 
         if not logging_config.GENERATE_LOGS:
             cls._remove_file_handler()
@@ -147,6 +148,21 @@ class Logger:
         cls._force_overwrite_next_file_open = True
         cls._ensure_file_handler()
         cls._log_system_status()
+
+    @classmethod
+    def _announce_batch_allocation(cls):
+        """Inside a PBS/Slurm job, state the resources the run will size itself to.
+
+        Batch nodes may not confine a job, so the machine's cores/memory can far
+        exceed the job's share; saying which numbers are used makes a wrong
+        sizing visible at the top of the job log.
+        """
+        try:
+            from dreamer.utils.allocation import describe, scheduler
+            if scheduler() is not None:
+                sys_logger.info(f"Batch job resources: {describe()}")
+        except Exception as e:  # diagnostics must never break a run
+            sys_logger.debug(f"batch allocation unavailable: {e}")
 
     @classmethod
     def _log_system_status(cls):
@@ -165,6 +181,11 @@ class Logger:
 
         sys_logger.debug("========== SYSTEM STATUS ==========")
         sys_logger.debug(f"cores_available={cpu_count if cpu_count is not None else 'Unknown'}")
+        try:
+            from dreamer.utils.allocation import describe
+            sys_logger.debug(f"allocation: {describe()}")
+        except Exception as e:  # diagnostics must never break a run
+            sys_logger.debug(f"allocation: <unavailable: {e}>")
         sys_logger.debug(f"os={os_name}")
         sys_logger.debug(f"architecture={architecture}")
         sys_logger.debug("configurations:")
