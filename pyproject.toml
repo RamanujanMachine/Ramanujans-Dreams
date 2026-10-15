@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["dreamer*"]
+include = ["dreamer*", "runmon*"]
 
 [project]
 name = "ramanujans-dreams"
@@ -37,10 +37,14 @@ dependencies = [
     # default PostgreSQL driver is psycopg (v3), which LIReC does not declare.
     "psycopg[binary]",
     "cysignals",
-    "fpylll"
+    "fpylll",
+    # runmon: per-process CPU / memory sampling for the live run monitor
+    "psutil"
 ]
 
 [project.optional-dependencies]
+# Terminal client for the live run monitor (`runmon watch`); not needed by runs.
+monitor = ["rich"]
 dev = [
     "pytest>=8.2.0",
     "pytest-cov>=4.0.0",
