@@ -55,7 +55,8 @@ dev = [
     "pytest>=8.2.0",
     "pytest-cov>=4.0.0",
     "nbclient>=0.9.0",  # used by data_utils/generate_system_overview_notebook.py to execute the notebook
-    "ipykernel>=6.0.0"  # kernel nbclient drives when executing the notebook
+    "ipykernel>=6.0.0",  # kernel nbclient drives when executing the notebook
+    "rich"  # terminal view tests (runmon watch); same as the `monitor` extra
 ]
 
 [tool.pytest.ini_options]
