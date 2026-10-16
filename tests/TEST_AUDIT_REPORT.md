@@ -1,3 +1,37 @@
+# Test Audit Report (2026-10-16, b)
+
+Bottom line: post-process no longer keeps up to 128 relation matrices per worker alive. A worker
+doing Tier-3 `relation` tasks grew 121 → 607 MB over 150 tasks because
+`ramanujantools.Matrix._companionization` (an `lru_cache(128)`, ~3.7 MB per entry) kept every
+trajectory's result although no other trajectory can hit it; it now keeps at most 4. Same stage on the
+real shard: peak 6.8 → 4.8 GB, 86 → 74 s, output byte-identical. Full suite: `1457 passed, 4 skipped`
+(74 % line+branch).
+
+## Touched Modules (Detailed Review)
+
+| Touched module | Changes made | Coverage evidence | Challenge rubric (/5) | Regression evidence |
+|---|---|---|---:|---|
+| `dreamer/utils/task_memory.py` | `clear_trajectory_caches(keep=4)` after **every** task (any duration) via `release_task_memory`; explicit list `_PER_TRAJECTORY_CACHES` of caches keyed by one trajectory's own matrix; sympy rule and `_walk_inner` untouched. | `tests/test_task_memory.py` (14, was 5); 96 %. | 5 | Within-keep entries survive and still hit; over-keep cleared; `keep=0`; light task still bounds (the 1 s rule never fired for Tier-3); recomputed values equal; **`CMF._calculate_diagonal_matrix` (shared, 50 % hits) untouched**; the list excludes shared caches; missing library classes/methods skipped; decorator runs the real release. |
+| `dreamer/configs/README.md`, `context/system spec/06_INFRASTRUCTURE.md` | Document the bounded caches, the rule and the measurements. | — | — | — |
+
+Measurements behind the "only caches that are never reused" rule (100 real tasks per row):
+
+| Cache | Tier-3 `relation` tasks | Search walks (default Tier-2) | Decision |
+|---|---|---|---|
+| `Matrix._companionization` | 100 computed / 0 reused; repeat of a trajectory: 100 reused (saves ~90 ms of ~330 ms) | not called | bound to 4 recent results |
+| `companion_coboundary_matrix`, `simplify`, `inverse`, `LinearRecurrence._get_reducer*` | not called | not called | same per-trajectory key → same rule |
+| `CMF._calculate_diagonal_matrix` | 0 reused | **610 computed / 610 reused** | keep |
+| sympy global cache | 178 vs 179 MB cleared vs kept, 0 % time | 176 / 181 / 205 MB (every task / ≥ 1 s rule / never), every-task +1 % time | unchanged (≥ 1 s rule) |
+
+## Non-Touched Modules (Repository-Wide Summary)
+
+| Area | Status | Risk / follow-up |
+|---|---|---|
+| Worker baseline | 18 workers × ~165 MB ≈ 3 GB before any task (interpreter, dreamer, sympy imports). | Fewer workers or lighter imports; not a leak. |
+| `ramanujantools` `lru_cache` on instance methods | Library behaviour (128 entries, keys hold the matrix). | Upstream: bound or document. |
+
+---
+
 # Test Audit Report (2026-10-16)
 
 Bottom line: the eval pool now really runs the workers it grows to (it was stuck at 2–12 of 18),

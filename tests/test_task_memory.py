@@ -155,8 +155,8 @@ def test_caches_shared_between_trajectories_are_not_touched():
 
     cmf = pFq(2, 1, -1)
     syms = list(cmf.matrices.keys())
-    ones = Position({s: 1 for s in syms})
-    cmf.trajectory_matrix(Position({syms[0]: 1, syms[1]: 1}), ones)
+    ones = Position({s: 1 for s in syms})        # a simple diagonal (all steps <= 1)
+    cmf.trajectory_matrix(ones, ones)
     before = CMF._calculate_diagonal_matrix.cache_info().currsize
     assert before > 0, "test is vacuous: no diagonal matrix was cached"
     clear_trajectory_caches(keep=0)
@@ -182,22 +182,15 @@ def test_missing_library_caches_are_skipped(monkeypatch):
     assert clear_trajectory_caches(keep=0) == 0
 
 
-@pytest.mark.parametrize("task_name", ["_pool_walk", "_tier3_task", "run_tier1_task"])
-def test_every_worker_task_bounds_trajectory_caches(task_name, empty_caches, monkeypatch):
-    """The worker tasks call ``release_task_memory`` on exit (decorator), which now
-    includes the bound — pinned through the wrapper, not by re-testing each task."""
-    from dreamer.post_process.tier3_post_process_mod import _tier3_task
-    from dreamer.search.methods.flatland.parallel_eval_worker import _pool_walk
-    from dreamer.utils.stage_pool import run_tier1_task
+def test_decorated_task_bounds_trajectory_caches_on_exit(empty_caches):
+    """The worker tasks (``_pool_walk``, ``_tier3_task``, ``run_tier1_task``) are
+    wrapped by ``releases_task_memory`` (see ``test_worker_tasks_are_wrapped``), so
+    the real release — now including the bound — runs when they return, light or not."""
+    @releases_task_memory
+    def task():
+        for k in range(1, 2 * TRAJECTORY_CACHE_KEEP):
+            _companionize(k)
+        return Matrix._companionization.cache_info().currsize
 
-    wrapped = {"_pool_walk": _pool_walk, "_tier3_task": _tier3_task, "run_tier1_task": run_tier1_task}[task_name]
-    inner = wrapped.__wrapped__
-    assert inner is not wrapped
-    for k in range(1, 2 * TRAJECTORY_CACHE_KEEP):
-        _companionize(k)
-    calls = []
-    monkeypatch.setattr(task_memory, "release_task_memory", lambda s: calls.append(s) or clear_trajectory_caches())
-    # Run the real wrapper around a stand-in body so only the release is exercised.
-    stand_in = releases_task_memory(lambda: None)
-    stand_in()
-    assert calls and Matrix._companionization.cache_info().currsize == 0
+    assert task() == 2 * TRAJECTORY_CACHE_KEEP - 1          # all held during the task
+    assert Matrix._companionization.cache_info().currsize == 0

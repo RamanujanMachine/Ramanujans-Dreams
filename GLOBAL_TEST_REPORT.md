@@ -6,12 +6,12 @@ python-flint 0.9.0, mpmath 1.3.0, macOS, 18 cores).
 | Metric | Value |
 |---|---|
 | Command | `python -m pytest tests -q --cov=dreamer --cov-branch --cov-report=term-missing` |
-| Collected | 1427 |
-| Passed | 1423 |
+| Collected | 1461 |
+| Passed | 1457 |
 | Failed | 0 |
 | Skipped | 4 |
 | Warnings | 2 |
-| Line+branch coverage (`--cov=dreamer --cov-branch`) | 74% (12462 statements, 4302 branches) |
+| Line+branch coverage (`--cov=dreamer --cov-branch`) | 74% (12626 statements, 4332 branches) |
 
 ## Failing tests
 
