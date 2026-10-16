@@ -39,6 +39,15 @@ The browser view plots it, so a reopened run shows the curve the live view showe
 (`runmon web` falls back to heartbeats for runs recorded without a timeline). A 14-day
 run is about 20 000 short lines.
 
+**Peak utilization and jitter.** Each timeline record also holds `cpu_util_max` and
+`mem_util_max` (the highest use in the window as a fraction of the run's allocation),
+and, for CPU and memory, `*_std` and `*_jitter`. *Jitter* is the mean absolute change
+between consecutive 1 s samples divided by the mean: 0 is a flat line, 0.5 means a
+typical step is half the level. It measures how spiky a signal is, whereas the standard
+deviation also counts slow drifts. At the end of the run a `resource_summary` event
+(and the `summary` block of `status.json`, shown as a text line in the browser view)
+gives the same figures for the whole run: peak and mean utilization, jitter, spread.
+
 ```bash
 jq -c 'select(.level == "WARNING" or .level == "ERROR")' events.jsonl
 jq -c 'select(.kind == "worker_died") | {ts, msg, pool: .f.pool}' events.jsonl

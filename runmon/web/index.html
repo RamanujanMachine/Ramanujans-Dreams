@@ -174,6 +174,7 @@ tr.ERROR td, tr.CRITICAL td { background: color-mix(in srgb, var(--critical) 8%,
     <div class="card"><h2>CPU — cores in use <span class="muted" style="font-weight:400">· dashed: budget · dotted: pool workers</span></h2><div class="chart" id="c-cpu"></div></div>
     <div class="card"><h2>Memory — resident, all processes</h2><div class="chart" id="c-mem"></div></div>
   </section>
+  <p class="muted" id="t-summary" style="margin:0 0 12px"></p>
 
   <section class="row">
     <div class="card"><h2>Processes <span class="muted" style="font-weight:400">· cores: 1.00 = one full core; above 1 = several threads busy</span></h2>
@@ -282,13 +283,23 @@ function render(data) {
     + (meta.constants ? ` · ${meta.constants.join(", ")}` : "")
     + (snap.sample_age != null && snap.sample_age > 10 ? ` · sample ${Math.round(snap.sample_age)} s old` : "");
   document.title = `${snap.stage ? snap.stage + " · " : ""}${run.id || "run"} — Run Monitor`;
-  renderStages(); renderAlerts(); renderTiles(); renderTree(); renderTables();
+  renderStages(); renderAlerts(); renderTiles(); renderTree(); renderTables(); renderSummary();
   for (const e of snap.events || []) if (e.kind === "stage_start") addStageMark(e.ts, (e.f || {}).stage);
   if (live) renderEvents(snap.events || []);
   const res = snap.resources;
   if (res && res.totals) addSample(res.ts, res.totals.cpu_percent, res.totals.rss_mb, res.allocation,
                                    (res.pool_workers || {}).workers);
   drawCharts();
+}
+
+// Whole-run peaks (share of the allocation) and jitter (0 = flat; 0.5 = a typical 1 s step is half the level).
+function renderSummary() {
+  const s = snap.summary, box = $("t-summary");
+  if (!s || !s.samples) { box.textContent = ""; return; }
+  const pct = (x) => x == null ? "?" : `${Math.round(100 * x)}%`, j = (x) => x == null ? "?" : x.toFixed(2);
+  box.textContent = `Whole run — peak CPU ${pct(s.cpu_util_max)} (mean ${pct(s.cpu_util_mean)}) · peak memory `
+    + `${pct(s.mem_util_max)} (mean ${pct(s.mem_util_mean)}) of the allocation · jitter: CPU ${j(s.cpu_jitter)}, `
+    + `memory ${j(s.rss_jitter)}`;
 }
 
 function renderStages() {

@@ -53,7 +53,7 @@ from runmon import walltime as wt
 from runmon.events import EventWriter, FileTailer, level_value, make_event
 from runmon.progress import ProgressTree
 from runmon.sampler import ProcessSampler
-from runmon.timeline import TIMELINE_FILE, TimelineAggregator, disk_free_mb
+from runmon.timeline import TIMELINE_FILE, RunSummary, TimelineAggregator, disk_free_mb
 from runmon.watchdog import DeadlineWatcher
 
 STATUS_FILE = "status.json"
@@ -70,6 +70,15 @@ def fmt_duration(seconds: float) -> str:
     if h:
         return f"{h}h{m:02d}m"
     return f"{m}m{s:02d}s" if m else f"{s}s"
+
+def _summary_line(s: dict) -> str:
+    """``peak CPU 94% / memory 61% of the allocation; jitter CPU 0.31, memory 0.02``."""
+    pct = lambda x: "?" if x is None else f"{100 * x:.0f}%"        # noqa: E731
+    num = lambda x: "?" if x is None else f"{x:.2f}"               # noqa: E731
+    return (f"peak CPU {pct(s['cpu_util_max'])} (mean {pct(s['cpu_util_mean'])}), memory "
+            f"{pct(s['mem_util_max'])} (mean {pct(s['mem_util_mean'])}) of the allocation; "
+            f"jitter CPU {num(s['cpu_jitter'])}, memory {num(s['rss_jitter'])}")
+
 
 EVENTS_FILE = "events.jsonl"
 WORKER_DIR = "workers"
@@ -160,6 +169,7 @@ class Hub:
         self.writer = EventWriter(os.path.join(self.run_dir, EVENTS_FILE))
         self.timeline_writer = EventWriter(os.path.join(self.run_dir, TIMELINE_FILE), lazy=True)
         self.timeline = TimelineAggregator()
+        self.summary = RunSummary()
         self._mem_alerted = False
         self._disk_alerted = False
         self.ring: Deque[Dict[str, Any]] = deque(maxlen=self.cfg.events_ring)
@@ -397,6 +407,7 @@ class Hub:
                              "pools": len(open_pools)}
         self.last_sample = s
         self.timeline.add(s)
+        self.summary.add(s)
         self.timeline.add_pools(pools)
         t = s["totals"]
         self._check_memory(s)
@@ -531,6 +542,7 @@ class Hub:
             "current": self.tree.active_path(),
             "tasks": self.tree.snapshot(depth),
             "resources": sample,
+            "summary": self.summary.as_dict(),
             "pools": self.pools_info(),
             "walltime": wall,
             "alerts": dict(self.alerts),
@@ -579,6 +591,9 @@ class Hub:
             self._tail_workers(final=True)
         except Exception:
             pass
+        s = self.summary.as_dict()
+        if s["samples"]:
+            self.event("resource_summary", _summary_line(s), **s)
         level = "INFO" if reason == "exit" else "WARNING"
         self.event("run_end", f"run {self.run_id} ended ({reason}) after {time.time() - self.started:.0f}s",
                    level, reason=reason)

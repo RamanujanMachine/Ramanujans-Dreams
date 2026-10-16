@@ -15,7 +15,12 @@ named ``*_max`` / ``*_min``):
 ========================  ====================================================
 ``ts``, ``t0``, ``n``     window end, window start, number of 1 s samples
 ``cpu`` / ``cpu_max``     total CPU of the process tree, % of one core
+``cpu_std``, ``cpu_jitter``  spread of the 1 s samples, and how spiky they are
+                          (mean |step| ÷ mean; 0 = flat, see :class:`_Stat`)
 ``rss_mb`` / ``rss_max``  total resident memory (MB)
+``rss_std``, ``rss_jitter``  the same for memory
+``cpu_util_max``          highest CPU use as a fraction of the allocated cores
+``mem_util_max``          highest memory use as a fraction of the allocated memory
 ``procs`` / ``procs_max`` processes in the tree
 ``workers``/``workers_max`` pool workers the program allowed itself
 ``mem_avail_min``         lowest machine-available memory (MB) in the window
@@ -41,15 +46,26 @@ TIMELINE_FILE = "timeline.jsonl"
 
 
 class _Stat:
-    """Running mean / max / min of a stream of numbers."""
+    """Running mean / max / min, standard deviation and jitter of a stream of numbers.
 
-    __slots__ = ("n", "total", "hi", "lo")
+    *Jitter* is the mean absolute change between consecutive values divided by
+    the mean: 0 for a flat line, ~0.5 when a typical 1 s step is half the level.
+    Unlike the standard deviation it ignores slow drifts and measures how spiky
+    the signal is from one sample to the next.
+    """
+
+    __slots__ = ("n", "total", "hi", "lo", "m2", "mean_", "last", "steps", "step_sum")
 
     def __init__(self):
         self.n = 0
         self.total = 0.0
         self.hi = float("-inf")
         self.lo = float("inf")
+        self.m2 = 0.0            # Welford: sum of squared deviations
+        self.mean_ = 0.0
+        self.last: Optional[float] = None
+        self.steps = 0
+        self.step_sum = 0.0
 
     def add(self, x: Optional[float]) -> None:
         if x is None:
@@ -58,6 +74,13 @@ class _Stat:
         self.total += x
         self.hi = max(self.hi, x)
         self.lo = min(self.lo, x)
+        delta = x - self.mean_
+        self.mean_ += delta / self.n
+        self.m2 += delta * (x - self.mean_)
+        if self.last is not None:
+            self.steps += 1
+            self.step_sum += abs(x - self.last)
+        self.last = x
 
     @property
     def mean(self) -> Optional[float]:
@@ -70,6 +93,17 @@ class _Stat:
     @property
     def min(self) -> Optional[float]:
         return self.lo if self.n else None
+
+    @property
+    def std(self) -> Optional[float]:
+        return (self.m2 / self.n) ** 0.5 if self.n else None
+
+    @property
+    def jitter(self) -> Optional[float]:
+        """Mean absolute step ÷ mean (``None`` with fewer than 2 values or a zero mean)."""
+        if not self.steps or not self.total:
+            return None
+        return (self.step_sum / self.steps) / (self.total / self.n)
 
 
 def _r(x: Optional[float], digits: int = 1) -> Optional[float]:
@@ -93,6 +127,7 @@ class TimelineAggregator:
         self.t0 = t0
         self.n = 0
         self.cpu, self.rss, self.procs = _Stat(), _Stat(), _Stat()
+        self.cpu_util, self.mem_util = _Stat(), _Stat()
         self.workers, self.avail = _Stat(), _Stat()
         self.roles: Dict[str, Dict[str, _Stat]] = {}
         self.alloc: Dict[str, Any] = {}
@@ -109,6 +144,8 @@ class TimelineAggregator:
         self.cpu.add(t.get("cpu_percent"))
         self.rss.add(t.get("rss_mb"))
         self.procs.add(t.get("n"))
+        self.cpu_util.add(t.get("cpu_util"))
+        self.mem_util.add(t.get("mem_util"))
         self.workers.add((sample.get("pool_workers") or {}).get("workers"))
         self.avail.add((sample.get("machine") or {}).get("mem_available_mb"))
         a = sample.get("allocation") or {}
@@ -152,7 +189,10 @@ class TimelineAggregator:
         rec = {
             "ts": now, "t0": self.t0, "n": self.n,
             "cpu": _r(self.cpu.mean), "cpu_max": _r(self.cpu.max),
+            "cpu_std": _r(self.cpu.std), "cpu_jitter": _r(self.cpu.jitter, 3),
             "rss_mb": _r(self.rss.mean), "rss_max": _r(self.rss.max),
+            "rss_std": _r(self.rss.std), "rss_jitter": _r(self.rss.jitter, 3),
+            "cpu_util_max": _r(self.cpu_util.max, 3), "mem_util_max": _r(self.mem_util.max, 3),
             "procs": _r(self.procs.mean), "procs_max": self.procs.max,
             "workers": _r(self.workers.mean), "workers_max": self.workers.max,
             "mem_avail_min": self.avail.min,
@@ -166,6 +206,41 @@ class TimelineAggregator:
         }
         self._reset(None)
         return rec
+
+
+class RunSummary:
+    """Whole-run figures from every 1 s sample (never reset): peaks, averages, jitter.
+
+    ``cpu_util`` / ``mem_util`` are fractions of the run's *allocation* (cores,
+    memory); ``jitter`` is defined at :class:`_Stat`.  Computed from the same
+    samples as the timeline, so it covers the whole run, not just the windows
+    that happened to be written.
+    """
+
+    def __init__(self):
+        self.samples = 0
+        self.cpu, self.rss = _Stat(), _Stat()
+        self.cpu_util, self.mem_util = _Stat(), _Stat()
+
+    def add(self, sample: Dict[str, Any]) -> None:
+        t = sample.get("totals") or {}
+        self.samples += 1
+        self.cpu.add(t.get("cpu_percent"))
+        self.rss.add(t.get("rss_mb"))
+        self.cpu_util.add(t.get("cpu_util"))
+        self.mem_util.add(t.get("mem_util"))
+
+    def as_dict(self) -> Dict[str, Any]:
+        """JSON-ready summary (``None`` fields when nothing was sampled)."""
+        return {
+            "samples": self.samples,
+            "cpu_util_max": _r(self.cpu_util.max, 3), "cpu_util_mean": _r(self.cpu_util.mean, 3),
+            "mem_util_max": _r(self.mem_util.max, 3), "mem_util_mean": _r(self.mem_util.mean, 3),
+            "cpu_max": _r(self.cpu.max), "cpu_mean": _r(self.cpu.mean),
+            "rss_max": _r(self.rss.max), "rss_mean": _r(self.rss.mean),
+            "cpu_jitter": _r(self.cpu.jitter, 3), "rss_jitter": _r(self.rss.jitter, 3),
+            "cpu_std": _r(self.cpu.std), "rss_std": _r(self.rss.std),
+        }
 
 
 def disk_free_mb(path: str) -> Optional[float]:

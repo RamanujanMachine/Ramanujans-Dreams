@@ -170,3 +170,49 @@ def test_aggregator_counts_spawned_processes_and_task_time():
     assert rec["spawned"] == 2 and rec["tasks"] == 9 and rec["task_s"] == 50.0
     agg.add(_sample(6.0, 1, 1, roles=three))
     assert agg.flush(7.0)["spawned"] == 0              # per window, baseline kept across windows
+
+
+def test_jitter_separates_flat_drifting_and_spiky_signals():
+    def jitter(values):
+        agg = tl.TimelineAggregator()
+        for i, v in enumerate(values):
+            agg.add(_sample(float(i), v, 1000))
+        rec = agg.flush(99.0)
+        return rec["cpu_jitter"], rec["cpu_std"]
+
+    flat = jitter([400] * 10)
+    drift = jitter([100 + 10 * i for i in range(10)])            # slow ramp: large spread, small steps
+    spiky = jitter([100, 700] * 5)                                # same mean as 400, huge steps
+    assert flat == (0.0, 0.0)
+    assert drift[0] < 0.1 < spiky[0]
+    assert spiky[0] == pytest.approx(600 / 400)
+    assert spiky[1] == pytest.approx(300)
+    assert tl.TimelineAggregator().flush(1.0) is None
+
+
+def test_utilization_peaks_and_run_summary():
+    agg, summary = tl.TimelineAggregator(), tl.RunSummary()
+    for cpu_util, mem_util in ((0.25, 0.5), (0.75, 0.25), (0.5, 0.25)):
+        s = _sample(1.0, 100, 100)
+        s["totals"].update(cpu_util=cpu_util, mem_util=mem_util)
+        agg.add(s)
+        summary.add(s)
+    rec = agg.flush(2.0)
+    assert (rec["cpu_util_max"], rec["mem_util_max"]) == (0.75, 0.5)
+    out = summary.as_dict()
+    assert out["samples"] == 3 and out["cpu_util_max"] == 0.75 and out["cpu_util_mean"] == 0.5
+    assert out["mem_util_mean"] == pytest.approx(0.333, abs=1e-3)
+    assert tl.RunSummary().as_dict()["cpu_util_max"] is None
+    json.dumps(out)
+
+
+def test_hub_writes_resource_summary_and_snapshot(tmp_path):
+    h = Hub(str(tmp_path / "run"), config=HubConfig(**FAST)).start()
+    assert _wait(lambda: h.summary.samples >= 3)
+    assert h.snapshot()["summary"]["samples"] >= 3
+    h.stop()
+    ev_ = [e for e in _events(h.run_dir) if e["kind"] == "resource_summary"]
+    assert len(ev_) == 1 and "peak CPU" in ev_[0]["msg"] and "jitter" in ev_[0]["msg"]
+    assert ev_[0]["f"]["cpu_util_max"] is not None
+    final = json.load(open(os.path.join(h.run_dir, "status.json")))
+    assert final["summary"]["samples"] >= 3
