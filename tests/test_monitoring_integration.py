@@ -245,7 +245,7 @@ def test_simulated_annealing_reports_estimate(monkeypatch):
     cmf_id, shard_id, enc = derive_cmf_and_shard_ids(shard)
     seen_estimates = []
 
-    monitoring.start_run("sa")
+    sa_dir = monitoring.start_run("sa")
     try:
         with monitoring.stage("search"):
             with monitoring.shard(shard_id, LOG2) as node:
@@ -270,3 +270,7 @@ def test_simulated_annealing_reports_estimate(monkeypatch):
     last = seen_estimates[-1][1]
     assert {"T", "best", "accepted", "steps", "clock"} <= set(last)
     assert last["clock"] in ("accepted", "steps")
+    sa_end = [e for e in _events(sa_dir) if e["kind"] == "sa_end"]
+    assert len(sa_end) == 1 and sa_end[0]["f"]["reason"] in ("accepted_moves", "temperature", "total_steps",
+                                                             "failed_reseeds")
+    assert sa_end[0]["f"]["steps"] >= 1 and "best" in sa_end[0]["f"]

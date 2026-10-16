@@ -39,7 +39,9 @@ from dreamer.extraction.shard import Shard
 from dreamer.search.methods.annealing import annealing_scan as an
 from dreamer.search.methods.annealing.annealing_scan import (
     SimulatedAnnealingSearch,
+    _next_step_candidates,
     _next_step_groups,
+    _ranked_next_groups,
     lookahead_enabled,
 )
 from dreamer.search.methods.flatland import parallel_eval as pe
@@ -164,19 +166,39 @@ class TestWalkPrefetcher:
         assert pf.stats["submitted"] == 2 and pool.calls == 2
         assert sink == [] and ctx["seen_trajectories"] == {}
 
-    def test_group_is_all_or_nothing_and_capacity_bounded(self, shard):
-        """A group larger than the idle capacity is skipped whole; a later group
-        that fits is still submitted."""
+    def test_groups_fill_idle_capacity_partially_and_in_order(self, shard):
+        """Groups are taken in order and may start partially: with 3 idle workers
+        the first group gets 3 walks and the next group none; a freed slot is
+        filled by the next waiting walk."""
         ctx = _ctx(shard, [])
         pool = _InlinePool(shard, ctx["start"], processes=3, pending=True)
         pf = WalkPrefetcher(pool, ctx)
-        pf.speculate([[_vec(1, 2), _vec(2, 1), _vec(1, 3), _vec(3, 1)], [_vec(2, 3), _vec(3, 2)]])
-        assert pf.stats["submitted"] == 2          # big group skipped, small one taken
-        assert pf.outstanding() == 2
-        pf.speculate([[_vec(1, 4), _vec(4, 1)]])   # only 1 slot free -> skipped
-        assert pf.stats["submitted"] == 2
+        first = [_vec(1, 2), _vec(2, 1), _vec(1, 3), _vec(3, 1)]
+        assert pf.speculate([first, [_vec(2, 3), _vec(3, 2)]]) == 3
+        assert pf.outstanding() == 3 and pf.free_slots() == 0
+        assert pf.speculate([[_vec(1, 4), _vec(4, 1)]]) == 0   # no idle worker
         pool.release_all()
-        assert pf.outstanding() == 0
+        assert pf.outstanding() == 0 and pf.free_slots() == 3
+        # The unstarted rest of the first group comes first when slots free up.
+        assert pf.speculate([first, [_vec(2, 3)]]) == 2
+        assert pf.stats["submitted"] == 5
+
+    def test_capacity_counts_every_task_in_flight(self, shard):
+        """With a pool that reports its idle workers (``ResilientPool``), the
+        step's own walks count against the capacity, not only speculation."""
+        ctx = _ctx(shard, [])
+        pool = _InlinePool(shard, ctx["start"], processes=8)
+        pool.idle_slots = lambda: 1            # 7 of 8 workers busy with the step
+        pf = WalkPrefetcher(pool, ctx)
+        assert pf.speculate([[_vec(1, 2), _vec(2, 1), _vec(1, 3)]]) == 1
+
+    def test_worker_count_is_read_live(self, shard):
+        """The pool can grow after the prefetcher is created (slow start)."""
+        ctx = _ctx(shard, [])
+        pool = _InlinePool(shard, ctx["start"], processes=2)
+        pf = WalkPrefetcher(pool, ctx)
+        pool._processes = 12
+        assert pf.workers == 12
 
     def test_skips_known_and_duplicate_directions(self, shard):
         """Already-started, primitive-equal and already-scored directions are not walked again."""
@@ -204,7 +226,10 @@ class TestWalkPrefetcher:
         assert not pf.has(tid) and not isinstance(payload, pe.WalkError)
         pf.speculate([[_vec(2, 1)]])
         pf.speculate([])
-        pf.speculate([])                            # gen advanced past max_age
+        pf.speculate([])                            # refills within a step do not age entries
+        assert len(pf._entries) == 1
+        pf.next_step()
+        pf.next_step()                              # step advanced past max_age
         assert pf._entries == {} and pf.stats["dropped"] == 1
 
     def test_empty_groups(self, shard):
@@ -267,10 +292,11 @@ class TestLookaheadPolicy:
         ("off", 100, 3, False),
         ("on", 2, 11, True),
         ("on", 1, 3, False),        # single worker = serial → nothing idle
-        ("auto", 11, 3, False),     # needs 2 * (2*3) = 12
-        ("auto", 12, 3, True),
-        ("auto", 43, 11, False),    # d_flat = 11 needs 44
-        ("auto", 44, 11, True),
+        ("auto", 3, 3, False),      # needs more than d_flat workers
+        ("auto", 4, 3, True),
+        ("auto", 11, 11, False),
+        ("auto", 12, 11, True),
+        ("auto", 18, 7, True),      # the 2026-10-15 run: 18 cores, d_flat = 7
         ("AUTO", 80, 11, True),     # case-insensitive
     ])
     def test_modes(self, monkeypatch, mode, workers, d, expected):
@@ -284,7 +310,15 @@ class TestLookaheadPolicy:
         monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", (("eigenvalues", "if_identified"),))
         monkeypatch.setattr(config.search, "ANNEAL_LOOKAHEAD", "auto")
         assert lookahead_enabled(_P(80), 3) is True
-        assert lookahead_enabled(_P(11), 3) is False
+        assert lookahead_enabled(_P(3), 3) is False
+
+    def test_auto_uses_requested_not_slow_start_size(self, monkeypatch):
+        """The decision is made when the pool still runs its slow-start workers;
+        it must use the size the pool will grow to."""
+        monkeypatch.setattr(config.search, "ANNEAL_LOOKAHEAD", "auto")
+        pool = _P(2)
+        pool._requested = 18
+        assert lookahead_enabled(pool, 7) is True
 
     def test_no_pool_disables(self, monkeypatch):
         monkeypatch.setattr(config.search, "ANNEAL_LOOKAHEAD", "on")
@@ -317,6 +351,75 @@ class TestNextStepGroups:
         groups = _next_step_groups(cur, nbs, [], geom, 1e9, "linf", doubling_allowed=False)
         assert len(groups) == len(nbs)
         assert _next_step_groups(cur, nbs, [], geom, 0.5, "linf", doubling_allowed=True) == []
+
+
+class TestRankedNextGroups:
+    """Order of the speculative neighbourhoods (affects only which walks start first)."""
+
+    CANDS = [(0, ["g0"]), (1, ["g1"]), (2, ["g2"]), (-1, ["gd"])]
+
+    def test_nothing_known_keeps_neighbour_order_then_doubling(self):
+        rank = _ranked_next_groups(self.CANDS, cur_delta=0.0)
+        assert rank([None, None, None]) == [["g0"], ["g1"], ["g2"], ["gd"]]
+
+    def test_best_known_first_when_it_improves(self):
+        """Best neighbour >= current: it is the likely next center; unknown
+        neighbours (could still win) next; worse known ones; doubling last."""
+        rank = _ranked_next_groups(self.CANDS, cur_delta=0.0)
+        partial = [(-1.0, True), None, (0.5, True)]
+        assert rank(partial) == [["g2"], ["g1"], ["g0"], ["gd"]]
+
+    def test_doubling_second_when_best_known_is_worse(self):
+        """Best neighbour so far < current: a rejection (doubling) is likely."""
+        rank = _ranked_next_groups(self.CANDS, cur_delta=1.0)
+        partial = [(-1.0, True), None, (0.5, True)]
+        assert rank(partial) == [["g2"], ["gd"], ["g1"], ["g0"]]
+
+    def test_without_doubling_candidate(self):
+        rank = _ranked_next_groups(self.CANDS[:3], cur_delta=1.0)
+        assert rank([(0.2, True), None, None]) == [["g0"], ["g1"], ["g2"]]
+
+    def test_candidates_keep_center_keys(self, shard):
+        geom = FlatlandGeometry(shard)
+        cur = _vec(2, 3)
+        nbs = [c for c in geom.perturbations(cur, reduce=False) if geom.is_inside(c)]
+        cands = _next_step_candidates(cur, nbs, [cur.tobytes()], geom, 1e9, "linf",
+                                      doubling_allowed=True)
+        assert [k for k, _g in cands] == list(range(len(nbs))) + [-1]
+        as_bytes = lambda groups: [[c.tobytes() for c in g] for g in groups]  # noqa: E731
+        assert as_bytes(g for _k, g in cands) == as_bytes(_next_step_groups(
+            cur, nbs, [cur.tobytes()], geom, 1e9, "linf", doubling_allowed=True))
+
+
+class TestTailFilling:
+    def test_speculation_is_reranked_as_walks_finish(self, shard):
+        """``speculate`` as a callable is consulted after the step's walks are
+        queued and again after each finishes, with the results known so far;
+        the batch's values and committed rows equal the plain path."""
+        batch = [_vec(1, 2), _vec(2, 1), _vec(1, 3)]
+        ref_sink = []
+        ref_ctx = _ctx(shard, ref_sink)
+        ref = evaluate_batch(batch, eval_ctx=ref_ctx,
+                             pool=_InlinePool(shard, ref_ctx["start"], processes=8))
+
+        sink = []
+        ctx = _ctx(shard, sink)
+        pool = _InlinePool(shard, ctx["start"], processes=8, pending=True)
+        pf = WalkPrefetcher(pool, ctx)
+        seen_partials = []
+
+        def speculate(partial):
+            seen_partials.append(list(partial))
+            return [[_vec(3, 1)], [_vec(2, 3)]]
+
+        out = evaluate_batch(batch, eval_ctx=ctx, pool=pool, prefetcher=pf, speculate=speculate)
+        assert out == ref
+        assert _lines(sink) == _lines(ref_sink)                 # same rows, same order
+        assert seen_partials[0] == [None, None, None]           # before any walk finished
+        known = [sum(p is not None for p in part) for part in seen_partials]
+        assert known == sorted(known) and known[-1] == 3       # filled in as walks finished
+        assert pf.stats["submitted"] == 2                       # both speculative walks started
+        assert ctx["seen_trajectories"].keys() == ref_ctx["seen_trajectories"].keys()
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +509,7 @@ class TestAnnealingEquivalence:
         assert stats_on["taken"] > 0, "look-ahead never served a walk — test is vacuous"
 
     def test_auto_disabled_on_small_pool_is_plain_loop(self, monkeypatch):
-        """``auto`` with too few workers creates no prefetcher and matches ``off``."""
+        """``auto`` with too few workers (<= d_flat = 3) creates no prefetcher and matches ``off``."""
         rows_off, _, rng_off, _, _ = _run_sa("off", monkeypatch, t0=1.0, processes=3)
         rows_auto, _, rng_auto, stats, _ = _run_sa("auto", monkeypatch, t0=1.0, processes=3)
         assert stats is None

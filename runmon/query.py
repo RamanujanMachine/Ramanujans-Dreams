@@ -88,10 +88,10 @@ def _lines_local(path: str) -> Iterator[bytes]:
         yield from f
 
 
-def _lines_ssh(target: str, path: str, ssh: str = "ssh") -> Iterator[bytes]:
+def _lines_ssh(target: str, path: str, ssh: str = "ssh", filename: str = "events.jsonl") -> Iterator[bytes]:
     from runmon.client.sources import remote_path
     cmd = (f'p="$(readlink -f {remote_path(path)})"; '
-           f'if [ -d "$p" ]; then p="$p/events.jsonl"; fi; cat "$p"')
+           f'if [ -d "$p" ]; then p="$p/{filename}"; fi; cat "$p" 2>/dev/null')
     proc = subprocess.Popen([ssh, "-o", "BatchMode=yes", target, cmd], stdout=subprocess.PIPE)
     try:
         yield from proc.stdout

@@ -196,7 +196,57 @@ def write_jsonl_line(item, fout) -> None:
 # Deduplication helpers
 # ---------------------------------------------------------------------------
 
-def load_seen_trajectories(jsonl_path: str) -> Dict[str, Dict[str, dict]]:
+class Omitted:
+    """Stands in for a large stored attribute value dropped on a *slim* load.
+
+    The key stays in the record, so presence / staleness checks
+    (``stale_attributes``, the attribute report) behave exactly as with the
+    value; only the value itself is not held in memory.  Deliberately **not**
+    JSON-serialisable: writing a slim record back to disk raises instead of
+    silently replacing the stored value.
+
+    :param size: Length of the omitted value's JSON text (characters).
+    """
+
+    __slots__ = ("size",)
+
+    def __init__(self, size: int):
+        self.size = size
+
+    def __repr__(self) -> str:
+        return f"<omitted value: {self.size} chars>"
+
+    def __eq__(self, other) -> bool:
+        return isinstance(other, Omitted) and other.size == self.size
+
+    __hash__ = None
+
+
+#: Default ``omit_values_over`` of the stages' slim loads (characters of JSON).
+#: Every scalar metric, start / direction and (p, q) vector is far below it;
+#: symbolic Tier-3 values (e.g. a recurrence ``relation``: 0.3-2 MB per row,
+#: measured 2026-10-15) are far above.
+SLIM_VALUE_CHARS = 4096
+
+
+def _slim(record: dict, limit: int) -> dict:
+    """Replace values longer than *limit* JSON characters by :class:`Omitted`
+    (in place), except Tier-1 core fields and fingerprints."""
+    from dreamer.utils.storage.dtos import TrajectoryDTO
+
+    keep = TrajectoryDTO.CORE_FIELDS
+    for key, value in record.items():
+        if key in keep or key == "fingerprints" or isinstance(value, (int, float, bool)) or value is None:
+            continue
+        size = len(value) if isinstance(value, str) else len(json.dumps(value))
+        if size > limit:
+            record[key] = Omitted(size)
+    return record
+
+
+def load_seen_trajectories(
+    jsonl_path: str, *, omit_values_over: Optional[int] = None,
+) -> Dict[str, Dict[str, dict]]:
     """Read and merge all ``(trajectory, constant)`` rows from a JSONL file.
 
     Each line is a **flat** record (see :class:`TrajectoryDTO`).  Rows are keyed by
@@ -206,7 +256,14 @@ def load_seen_trajectories(jsonl_path: str) -> Dict[str, Dict[str, dict]]:
     config?".  Because the schema is flat, merging a patch into its base row is a
     plain last-write-wins ``dict.update`` (no special-cased nested dict).
 
-    Returns an empty dict if the file does not exist.
+    :param jsonl_path: The per-shard JSONL.
+    :param omit_values_over: *Slim* load: stored values whose JSON text is longer
+        than this many characters are replaced by :class:`Omitted` (Tier-1 core
+        fields and fingerprints are always kept).  For callers that need only
+        Tier-1 values, scalar metrics and *which* attributes exist — a shard
+        whose rows carry Tier-3 ``relation`` strings can be ~1 GB on disk, all of
+        which a full load keeps in memory.  ``None`` (default) keeps everything.
+    :return: The merged map; an empty dict if the file does not exist.
     """
     merged: Dict[str, Dict[str, dict]] = {}
     try:
@@ -223,6 +280,8 @@ def load_seen_trajectories(jsonl_path: str) -> Dict[str, Dict[str, dict]]:
                 const = record.get("constant")
                 if tid is None or const is None:
                     continue
+                if omit_values_over is not None:
+                    _slim(record, omit_values_over)
                 bucket = merged.setdefault(tid, {})
                 if const not in bucket:
                     bucket[const] = record
@@ -261,7 +320,9 @@ def load_seen_trajectories_for_search(output_path: str, shard_id: str) -> Dict[s
     :param shard_id: Structural shard id; names the analysis-store file.
     :return: Merged ``{trajectory_id: {constant: record}}`` cache for the shard.
     """
-    seen = load_seen_trajectories(output_path)
+    # Slim: the search reuses Tier-1 values and scalar metrics only; large Tier-3
+    # values (e.g. ``relation``) would otherwise stay in memory for the whole search.
+    seen = load_seen_trajectories(output_path, omit_values_over=SLIM_VALUE_CHARS)
 
     if not config.analysis.STORE_TRAJECTORIES_SEPARATELY:
         return seen
@@ -286,7 +347,7 @@ def load_seen_trajectories_for_search(output_path: str, shard_id: str) -> Dict[s
         with open(output_path, "a") as fout:
             for rec in carryover:
                 fout.write(json.dumps(rec) + "\n")
-                seen.setdefault(rec["trajectory_id"], {})[rec["constant"]] = rec
+                seen.setdefault(rec["trajectory_id"], {})[rec["constant"]] = _slim(rec, SLIM_VALUE_CHARS)
     return seen
 
 

@@ -56,7 +56,7 @@ from dreamer.utils.storage.trajectory_attributes import (
     tier1_config_fingerprint,
     walk_depth_for,
 )
-from dreamer.utils.multi_processing import load_seen_trajectories
+from dreamer.utils.multi_processing import SLIM_VALUE_CHARS, load_seen_trajectories
 from dreamer.utils.stage_pool import (
     BufferedJsonlWriter,
     StagePool,
@@ -250,7 +250,7 @@ class AnalyzerModV1(AnalyzerModScheme):
             f"(cmf={run.cmf_id}, encoding={run.encoding_str})",
             Logger.Levels.debug,
         ).log()
-        run.seen = load_seen_trajectories(run.jsonl_path)
+        run.seen = load_seen_trajectories(run.jsonl_path, omit_values_over=SLIM_VALUE_CHARS)
 
         # Use the first constant just to drive the SerialSearcher for pair sampling
         # (trajectory sampling is constant-independent).

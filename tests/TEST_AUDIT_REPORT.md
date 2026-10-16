@@ -1,3 +1,68 @@
+# Test Audit Report (2026-10-16, b)
+
+Bottom line: post-process no longer keeps up to 128 relation matrices per worker alive. A worker
+doing Tier-3 `relation` tasks grew 121 → 607 MB over 150 tasks because
+`ramanujantools.Matrix._companionization` (an `lru_cache(128)`, ~3.7 MB per entry) kept every
+trajectory's result although no other trajectory can hit it; it now keeps at most 4. Same stage on the
+real shard: peak 6.8 → 4.8 GB, 86 → 74 s, output byte-identical. Full suite: `1457 passed, 4 skipped`
+(74 % line+branch).
+
+## Touched Modules (Detailed Review)
+
+| Touched module | Changes made | Coverage evidence | Challenge rubric (/5) | Regression evidence |
+|---|---|---|---:|---|
+| `dreamer/utils/task_memory.py` | `clear_trajectory_caches(keep=4)` after **every** task (any duration) via `release_task_memory`; explicit list `_PER_TRAJECTORY_CACHES` of caches keyed by one trajectory's own matrix; sympy rule and `_walk_inner` untouched. | `tests/test_task_memory.py` (14, was 5); 96 %. | 5 | Within-keep entries survive and still hit; over-keep cleared; `keep=0`; light task still bounds (the 1 s rule never fired for Tier-3); recomputed values equal; **`CMF._calculate_diagonal_matrix` (shared, 50 % hits) untouched**; the list excludes shared caches; missing library classes/methods skipped; decorator runs the real release. |
+| `dreamer/configs/README.md`, `context/system spec/06_INFRASTRUCTURE.md` | Document the bounded caches, the rule and the measurements. | — | — | — |
+
+Measurements behind the "only caches that are never reused" rule (100 real tasks per row):
+
+| Cache | Tier-3 `relation` tasks | Search walks (default Tier-2) | Decision |
+|---|---|---|---|
+| `Matrix._companionization` | 100 computed / 0 reused; repeat of a trajectory: 100 reused (saves ~90 ms of ~330 ms) | not called | bound to 4 recent results |
+| `companion_coboundary_matrix`, `simplify`, `inverse`, `LinearRecurrence._get_reducer*` | not called | not called | same per-trajectory key → same rule |
+| `CMF._calculate_diagonal_matrix` | 0 reused | **610 computed / 610 reused** | keep |
+| sympy global cache | 178 vs 179 MB cleared vs kept, 0 % time | 176 / 181 / 205 MB (every task / ≥ 1 s rule / never), every-task +1 % time | unchanged (≥ 1 s rule) |
+
+## Non-Touched Modules (Repository-Wide Summary)
+
+| Area | Status | Risk / follow-up |
+|---|---|---|
+| Worker baseline | 18 workers × ~165 MB ≈ 3 GB before any task (interpreter, dreamer, sympy imports). | Fewer workers or lighter imports; not a leak. |
+| `ramanujantools` `lru_cache` on instance methods | Library behaviour (128 entries, keys hold the matrix). | Upstream: bound or document. |
+
+---
+
+# Test Audit Report (2026-10-16)
+
+Bottom line: the eval pool now really runs the workers it grows to (it was stuck at 2–12 of 18),
+the simulated-annealing look-ahead fills idle workers during each step (−20 % wall time on a
+pFq(4,3,1) shard, identical rows), stages that only need Tier-1 values no longer hold Tier-3
+values in memory (197 MB → 8 MB on a 191 MB shard), and workers are recycled every 300 tasks to
+bound a native leak in python-flint ≤ 0.9.0 (fixed at its ramanujantools trigger on a fork
+branch). Diagnosis: `context/investigations/memory_growth_and_cpu_jitter.md`. Full suite:
+`1423 passed, 4 skipped` (74 % line+branch).
+
+## Touched Modules (Detailed Review)
+
+| Touched module | Changes made | Coverage evidence | Challenge rubric (/5) | Regression evidence |
+|---|---|---|---:|---|
+| `dreamer/utils/resilient_pool.py` | `_ensure_workers()` after every submit (top up to `min(max_workers, outstanding)` processes; fixes in-place grow and unreplaced recycled workers); `in_flight()` / `idle_slots()`. | `tests/test_resilient_pool.py` (+3: `TestWorkerStartAfterGrow`); 87 %. | 5 | The grow test **fails on the old code** (6 tasks on 2 processes) and passes now; laziness pinned (2 tasks start no extra processes); recycling keeps full width. Real SA run: 18 processes (was 2 with look-ahead). |
+| `dreamer/search/methods/flatland/parallel_eval.py` | `WalkPrefetcher`: live capacity from the pool, partial groups, per-step ageing (`next_step`); `evaluate_batch`: collect-as-finished loop with refills, `speculate` may be a ranking callable; `_wait_any`, `_preview_score`. | `tests/test_anneal_lookahead.py` (35, was 29); 93 %. | 5 | End-to-end equivalence (rows, `seen`, RNG; mostly-accept and mostly-reject) and byte-identical JSONL on a real 2-process pool still pass; `TestTailFilling` checks re-ranking with partial results and identical rows; capacity counts every in-flight task. Real shard benchmark: 238 s → 190 s, identical rows. |
+| `dreamer/search/methods/annealing/annealing_scan.py` | `_next_step_candidates` (keyed by center), `_ranked_next_groups`; `auto` = requested workers > d_flat. | `TestRankedNextGroups` (5), policy table updated (+ slow-start case); 86 %. | 4 | Ranking order for improve / reject-likely / unknown cases; candidates equal the old groups. |
+| `dreamer/utils/multi_processing.py` (+ callers: SA/micro-climb search loader, analyzer, Tier-3 planning & top-N, summary, attribute report) | Slim load `omit_values_over` → `Omitted` marker (key kept, not serialisable); Tier-1 core + fingerprints always kept; carry-over still writes full rows. | `tests/test_slim_seen_load.py` (8); 93 %. | 5 | Same staleness answers and same summary statistics as a full load; patch merge identical; `json.dumps` of a slim row raises; carry-over row written in full. Synthetic 191 MB shard: 197 MB → 8 MB held. |
+| `dreamer/configs/system.py`, `search.py`, `configs/README.md` | `POOL_MAX_TASKS_PER_CHILD` 300 (was `None`); look-ahead description. | 100 % / covered. | 3 | Recycle cost measured: 0.4 s start + slower first task (~1 % at 300 tasks). |
+| ramanujantools fork (`fix/flint-str-leak`, separate repo) | `ctx.names()` instead of `str(generator)` in `flint_core/context.py`. | New `context_test.py` (4); 433/433 ramanujantools tests pass. | 5 | The no-stringify test **fails on the old code**. |
+
+## Non-Touched Modules (Repository-Wide Summary)
+
+| Area | Status | Risk / follow-up |
+|---|---|---|
+| Tier-3 `relation` volume | Unchanged by choice: computed/stored as configured (0.3–2 MB per row). | Large JSONL files; the grapher still loads full rows. |
+| `release_task_memory` (sympy cache) | Unchanged; useful for long walks (10⁵–10⁶-digit numbers), no effect on short ones. | — |
+| micro-climb Phase A | No look-ahead yet (roadmap item). | — |
+
+---
+
 # Test Audit Report (2026-10-11, b)
 
 Bottom line: every analysis and search method now reports how its work was served (reused ·

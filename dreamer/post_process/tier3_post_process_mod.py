@@ -43,6 +43,7 @@ from dreamer.configs.system import sys_config
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
 from dreamer.utils.multi_processing import (
+    SLIM_VALUE_CHARS,
     load_seen_trajectories,
     write_jsonl_line,
 )
@@ -282,7 +283,9 @@ class Tier3PostProcessModV1(PostProcessModScheme):
         :param top_n_sets: Phase-1 ``{selector.key: {trajectory_id}}`` membership.
         :return: Tasks for this shard (empty when everything is covered).
         """
-        merged = load_seen_trajectories(jsonl_path)
+        # Slim: planning needs which attributes exist (+ fingerprints) and the
+        # Tier-1 seed fields, not stored Tier-3 values (MBs per row for `relation`).
+        merged = load_seen_trajectories(jsonl_path, omit_values_over=SLIM_VALUE_CHARS)
         if not merged:
             return []
         top_n_sets = top_n_sets or {}
@@ -444,7 +447,9 @@ class Tier3PostProcessModV1(PostProcessModScheme):
                     by_cmf[cmf_id].append(path)
 
             for paths in by_cmf.values():
-                shard_records = {p: load_seen_trajectories(p) for p in paths}
+                shard_records = {
+                    p: load_seen_trajectories(p, omit_values_over=SLIM_VALUE_CHARS) for p in paths
+                }
                 for sel in shard_scope:
                     for recs in shard_records.values():
                         self._rank_into(sets[sel.key], recs, sel, const_name)

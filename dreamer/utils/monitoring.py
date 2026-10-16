@@ -35,7 +35,8 @@ from dreamer.configs import config
 #: Monitor alerts echoed into run.log / the console (they originate in the hub,
 #: not in a log line).
 _ECHO_KINDS = {"walltime", "walltime_warning", "walltime_grace", "stall", "stall_cleared",
-               "over_allocation", "monitor_error"}
+               "over_allocation", "monitor_error", "memory_pressure", "memory_recovered",
+               "disk_low", "disk_recovered", "signal_received"}
 
 _handler: Optional[logging.Handler] = None
 _run_dir: Optional[str] = None
@@ -132,12 +133,13 @@ def start_run(run_id: str, meta: Optional[Dict[str, Any]] = None) -> Optional[st
     hub = runmon.start(
         directory, run_id=run_id,
         cores=available_cores(), memory_mb=allocated_memory_mb(),
-        sample_s=float(cfg.SAMPLE_SECONDS), heartbeat_s=float(cfg.HEARTBEAT_SECONDS),
+        sample_s=float(cfg.SAMPLE_SECONDS), heartbeat_s=float(cfg.HEARTBEAT_SECONDS), timeline_s=float(cfg.TIMELINE_SECONDS),
         stall_s=float(cfg.STALL_SECONDS), walltime_grace_s=float(cfg.WALLTIME_GRACE_SECONDS),
         server=bool(cfg.SERVER), host=str(cfg.HOST), port=int(cfg.PORT or 0),
         on_watchdog=_log_watchdog, listeners=[_echo], grace_callbacks=[_flush_logs], meta=meta,
     )
     _run_dir = hub.run_dir
+    _record_environment()
     _handler = _EventHandler(runmon.publish, level_value(cfg.EVENT_LOG_LEVEL))
     _sys_logger().addHandler(_handler)
     _point_latest(base, directory)
@@ -146,6 +148,27 @@ def start_run(run_id: str, meta: Optional[Dict[str, Any]] = None) -> Optional[st
         hint += f"   or from your machine: runmon watch {directory} --ssh <user>@<login node>"
     Logger(f"Run monitor: {directory}  (watch: {hint})", Logger.Levels.info).log()
     return directory
+
+
+def _record_environment() -> None:
+    """The ``environment`` event: code version, packages, machine, scheduler job, settings."""
+    from dreamer.utils import run_environment
+    try:
+        env = run_environment.collect(config.export_configurations())
+    except Exception:
+        return
+    code = env.get("code") or {}
+    sha = (code.get("commit") or "unknown")[:8] + ("+dirty" if code.get("dirty") else "")
+    runmon.event("environment", f"code {sha} on {(env.get('machine') or {}).get('host', '?')}", **env)
+
+
+def event(kind: str, msg: str = "", level: str = "INFO", **fields: Any) -> None:
+    """Record a structured event in the run's event log (no-op when off).
+
+    Unlike :meth:`Logger.event` it writes no console / ``run.log`` line — for
+    facts worth keeping and searching, not worth printing.
+    """
+    runmon.event(kind, msg, level, **fields)
 
 
 def end_run(reason: str = "exit") -> None:
@@ -159,6 +182,7 @@ def end_run(reason: str = "exit") -> None:
 
 def _flush_logs() -> None:
     """Walltime grace: push every log handler's buffer to disk."""
+    event("flush", "walltime grace: flushing every log handler to disk", "WARNING")
     for h in list(_sys_logger().handlers):
         try:
             h.flush()
@@ -208,10 +232,22 @@ def shard(shard_id: Any, constant: Any = None, total: Optional[float] = None,
 
     :param label: Optional prefix naming the activity (e.g. ``"micro-climb"``).
     """
-    name = (f"{label} " if label else "") + f"shard {shard_id}" + (
-        f" / {getattr(constant, 'name', constant)}" if constant is not None else "")
+    cname = getattr(constant, "name", constant)
+    name = (f"{label} " if label else "") + f"shard {shard_id}" + (f" / {cname}" if constant is not None else "")
+    started = time.time()
+    fields = {"shard": str(shard_id), "constant": None if constant is None else str(cname), "label": label}
+    event("shard_start", f"{name} started", **fields)
+    status = "done"
     with runmon.task(name, total, kind="shard") as node:
-        yield node
+        try:
+            yield node
+        except BaseException:
+            status = "failed"
+            raise
+        finally:
+            event("shard_end", f"{name} {status} after {time.time() - started:.1f}s",
+                  "INFO" if status == "done" else "WARNING", status=status,
+                  elapsed=time.time() - started, metrics=dict(getattr(node, "metrics", None) or {}), **fields)
 
 
 def progress():

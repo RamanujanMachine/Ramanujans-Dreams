@@ -21,6 +21,7 @@ Algorithm is faithful to ``context/resources/code/algos/annealing.py`` and
 """
 
 import math
+import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -223,6 +224,8 @@ class SimulatedAnnealingSearch(SearchMethod):
         doubling_count = 0
         total_steps = 0
         consecutive_failed_reseeds = 0
+        end_reason = None
+        started_at = time.time()
 
         # Tabu: bounded recent-position list (reference update_old_list_neighs).
         old_pos_list: List[bytes] = [cur_z.tobytes()]
@@ -251,6 +254,7 @@ class SimulatedAnnealingSearch(SearchMethod):
                     f"in shard {shard_id} — terminating early.",
                     Logger.Levels.warning,
                 ).log()
+                end_reason = "total_steps"
                 break
             est = sa_estimator(max_iters - iter_left, total_steps, T0=T0, Tmin=Tmin,
                                max_iters=max_iters, max_total_steps=max_total_steps,
@@ -291,6 +295,7 @@ class SimulatedAnnealingSearch(SearchMethod):
                                 f"in shard {shard_id} — terminating early.",
                                 Logger.Levels.debug,
                             ).log()
+                            end_reason = "failed_reseeds"
                             break
                 else:
                     cur_z = cur_z * 2  # no GCD reduce
@@ -303,9 +308,12 @@ class SimulatedAnnealingSearch(SearchMethod):
             # each neighbour is walked serially in this process.
             if pool is not None:
                 speculate = (
-                    _next_step_groups(
-                        cur_z, neighbours, old_pos_list, geom, max_traj_len, traj_norm_name,
-                        doubling_allowed=doubling_count < max_doublings,
+                    _ranked_next_groups(
+                        _next_step_candidates(
+                            cur_z, neighbours, old_pos_list, geom, max_traj_len, traj_norm_name,
+                            doubling_allowed=doubling_count < max_doublings,
+                        ),
+                        cur_delta,
                     )
                     if prefetcher is not None else None
                 )
@@ -368,10 +376,19 @@ class SimulatedAnnealingSearch(SearchMethod):
                                 f"in shard {shard_id} — terminating early.",
                                 Logger.Levels.debug,
                             ).log()
+                            end_reason = "failed_reseeds"
                             break
                 else:
                     cur_z = cur_z * 2  # no GCD reduce
                     doubling_count += 1
+
+        if end_reason is None:
+            end_reason = "accepted_moves" if iter_left <= 0 else "temperature"
+        monitoring.event("sa_end", f"annealing ended ({end_reason}) after {total_steps} steps",
+                         constant=constant.name, reason=end_reason, steps=total_steps,
+                         accepted=max_iters - iter_left, T=float(T), best=float(best_delta),
+                         elapsed=time.time() - started_at)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -452,9 +469,13 @@ class SimulatedAnnealingSearch(SearchMethod):
         :return: New flatland seed vector, or ``None`` if no identifying trajectory found.
         """
         try:
-            return self._select_seed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
+            fresh = self._select_seed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
         except NoInitialIdentification:
-            return None
+            fresh = None
+        monitoring.event("sa_reseed", "annealing " + ("reseeded" if fresh is not None else "found no new seed"),
+                         "INFO" if fresh is not None else "WARNING", ok=fresh is not None,
+                         constant=constant.name)
+        return fresh
 
 
 # ---------------------------------------------------------------------------
@@ -468,13 +489,13 @@ def lookahead_enabled(pool, d_flat: int) -> bool:
 
     * ``"off"`` — never.
     * ``"on"`` — whenever a multi-process eval pool exists.
-    * ``"auto"`` (default) — when the pool has at least ``2 * (2 * d_flat)``
-      workers: room for one step's ``<= 2·d_flat`` neighbours **plus** one full
-      speculative neighbourhood.  With fewer workers almost nothing fits into the
-      idle capacity, so speculation would only add bookkeeping.  (E.g. ``d_flat =
-      11`` needs 44 workers; ``d_flat = 3`` needs 12.)  (Before 2026-10-10 a
-      separate fixed-size Tier-2 queue competed for CPU and ``auto`` stayed off
-      while it was active; Tier-2 now runs inside the walk tasks.)
+    * ``"auto"`` (default) — when the pool may run more than ``d_flat``
+      workers (its *requested* size, not the slow-start size it begins with).
+      Speculation only fills idle workers, and workers are idle twice per step:
+      beyond the step's ``<= 2·d_flat`` walks, and while the step waits for its
+      slowest walk (walk times spread ~7x, so a step takes ~2x its mean walk).
+      With ``<= d_flat`` workers a step keeps every worker busy almost to its
+      end and there is nothing to fill.
 
     :param pool: The eval pool (``None`` → serial evaluation → ``False``).
     :param d_flat: Flatland dimension of the shard.
@@ -484,12 +505,56 @@ def lookahead_enabled(pool, d_flat: int) -> bool:
     mode = str(search_config.ANNEAL_LOOKAHEAD).lower()
     if mode not in ("auto", "on", "off"):
         raise ValueError(f"ANNEAL_LOOKAHEAD must be 'auto', 'on' or 'off', got {mode!r}")
-    workers = int(getattr(pool, "_processes", 0) or 0) if pool is not None else 0
+    if pool is None:
+        return False
+    workers = int(getattr(pool, "_requested", 0) or getattr(pool, "_processes", 0) or 0)
     if mode == "off" or workers <= 1:
         return False
     if mode == "on":
         return True
-    return workers >= 2 * (2 * int(d_flat))
+    return workers > int(d_flat)
+
+
+def _next_step_candidates(
+    cur_z: np.ndarray,
+    neighbours: List[np.ndarray],
+    old_pos_list: List[bytes],
+    geom: FlatlandGeometry,
+    max_traj_len: float,
+    traj_norm_name: str,
+    *,
+    doubling_allowed: bool,
+) -> List[Tuple[int, List[np.ndarray]]]:
+    """Candidate neighbourhoods of every possible next SA center, keyed by center.
+
+    After this step the center is either one of *neighbours* (the best one, if
+    accepted) or ``2 · cur_z`` (on rejection, while doubling is still allowed; a
+    reseed is not predicted).  Each candidate's neighbourhood is filtered like the
+    real loop (in-cone, within the length cap, not tabu); the predicted tabu list
+    is the current one plus this step's neighbours and center.  A mismatch with
+    the real next neighbourhood (e.g. tabu truncation) only costs a cache miss.
+
+    :return: ``(key, group)`` pairs, neighbours first (``key`` = the
+        neighbour's index in *neighbours*), then the doubled center
+        (``key = -1``); empty groups are left out.
+    """
+    tabu = set(old_pos_list)
+    tabu.update(nb.tobytes() for nb in neighbours)
+    tabu.add(cur_z.tobytes())
+    centers = list(enumerate(neighbours))
+    if doubling_allowed:
+        centers.append((-1, cur_z * 2))
+    out: List[Tuple[int, List[np.ndarray]]] = []
+    for key, center in centers:
+        group = [
+            cand for cand in geom.perturbations(center, reduce=False)
+            if geom.is_inside(cand)
+            and cand.tobytes() not in tabu
+            and geom.traj_norm(cand, traj_norm_name) <= max_traj_len
+        ]
+        if group:
+            out.append((key, group))
+    return out
 
 
 def _next_step_groups(
@@ -502,32 +567,49 @@ def _next_step_groups(
     *,
     doubling_allowed: bool,
 ) -> List[List[np.ndarray]]:
-    """Candidate neighbourhoods of every possible next SA center.
+    """The groups of :func:`_next_step_candidates`, in the same order, without keys."""
+    return [
+        group for _key, group in _next_step_candidates(
+            cur_z, neighbours, old_pos_list, geom, max_traj_len, traj_norm_name,
+            doubling_allowed=doubling_allowed,
+        )
+    ]
 
-    After this step the center is either one of *neighbours* (the best one, if
-    accepted) or ``2 · cur_z`` (on rejection, while doubling is still allowed; a
-    reseed is not predicted).  Each candidate's neighbourhood is filtered like the
-    real loop (in-cone, within the length cap, not tabu); the predicted tabu list
-    is the current one plus this step's neighbours and center.  A mismatch with
-    the real next neighbourhood (e.g. tabu truncation) only costs a cache miss.
 
-    :return: One group of directions per candidate center, neighbours first.
+def _ranked_next_groups(candidates: List[Tuple[int, List[np.ndarray]]], cur_delta: float):
+    """Return ``f(partial) -> groups``: the candidate neighbourhoods, most likely
+    next center first, given this step's results so far.
+
+    SA moves to the best neighbour when it is at least as good as the current
+    point (else maybe, by the Metropolis draw), and otherwise doubles the
+    current point.  So, with the neighbours known so far:
+
+    1. the best known neighbour;
+    2. the doubled center, if that neighbour is worse than the current point
+       (a rejection is then likely);
+    3. the neighbours not known yet, in order;
+    4. the remaining known neighbours, best first;
+    5. the doubled center (if not placed yet).
+
+    Only *which walks start first* depends on this; the search does not.
+
+    :param candidates: Output of :func:`_next_step_candidates`.
+    :param cur_delta: Objective value of the current center.
     """
-    tabu = set(old_pos_list)
-    tabu.update(nb.tobytes() for nb in neighbours)
-    tabu.add(cur_z.tobytes())
-    centers = list(neighbours)
-    if doubling_allowed:
-        centers.append(cur_z * 2)
-    groups: List[List[np.ndarray]] = []
-    for center in centers:
-        group = [
-            cand for cand in geom.perturbations(center, reduce=False)
-            if geom.is_inside(cand)
-            and cand.tobytes() not in tabu
-            and geom.traj_norm(cand, traj_norm_name) <= max_traj_len
-        ]
-        if group:
-            groups.append(group)
-    return groups
-
+    def rank(partial: list) -> List[List[np.ndarray]]:
+        known = [(partial[k][0], k) for k, _g in candidates
+                 if k >= 0 and k < len(partial) and partial[k] is not None]
+        known.sort(key=lambda x: -x[0])
+        groups = dict(candidates)
+        order: List[int] = []
+        if known:
+            order.append(known[0][1])
+            if known[0][0] < cur_delta and -1 in groups:
+                order.append(-1)
+        known_keys = {k for _v, k in known}
+        order += [k for k, _g in candidates if k >= 0 and k not in known_keys]
+        order += [k for _v, k in known[1:]]
+        if -1 in groups and -1 not in order:
+            order.append(-1)
+        return [groups[k] for k in order]
+    return rank

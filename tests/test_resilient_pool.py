@@ -270,3 +270,83 @@ class TestPeakMemory:
             monkeypatch.setattr(memory_budget, "available_memory_mb", lambda: 6000.0)
             pool._check_memory()
             assert pool._processes > 2 and pool.grows == 1
+
+
+def _hold(seconds):
+    """Sleep in a worker and report its pid (to count distinct live workers)."""
+    import time
+    time.sleep(seconds)
+    return os.getpid()
+
+
+class TestWorkerStartAfterGrow:
+    """Regression (2026-10-15): after an in-place grow the executor started no new
+    processes, because idle-semaphore tokens collected during slow start made
+    every submit believe a worker was idle.  An 18-worker eval pool ran a whole
+    search on 2 or 11 processes.  These tests pin that the pool really runs as
+    many processes as it is allowed and has work for."""
+
+    def _grown_pool(self, monkeypatch, requested):
+        from dreamer.configs.system import sys_config
+        from dreamer.utils import memory_budget
+
+        monkeypatch.setattr(sys_config, "MEMORY_AWARE_WORKERS", True)
+        monkeypatch.setattr(sys_config, "POOL_SLOW_START", 2)
+        monkeypatch.setattr(sys_config, "WORKER_MEMORY_MB", 1)
+        monkeypatch.setattr(sys_config, "MEMORY_RESERVE_MB", 0)
+        monkeypatch.setattr(memory_budget, "available_memory_mb", lambda: 1e6)
+        pool = ResilientPool(requested, name="t")
+        pool._GROW_INTERVAL = float("inf")
+        list(pool.imap(_square, range(40)))          # many completions at 2 workers -> stale tokens
+        assert pool._processes == 2
+        pool._GROW_INTERVAL = 0.0
+        pool._completed_since_resize = 100
+        pool._check_memory()
+        assert pool._processes == requested
+        return pool
+
+    def test_grown_pool_runs_requested_concurrency(self, monkeypatch):
+        """A batch as large as the grown pool runs fully in parallel: every task
+        lands on its own process, and the batch takes ~one task's time."""
+        import time
+        requested = 6
+        pool = self._grown_pool(monkeypatch, requested)
+        try:
+            t0 = time.perf_counter()
+            handles = [pool.apply_async(_hold, (1.0,)) for _ in range(requested)]
+            pids = {h.get() for h in handles}
+            elapsed = time.perf_counter() - t0
+            assert len(pool._executor._processes) == requested
+            assert len(pids) == requested                # one task per process
+            assert elapsed < 2.5                         # not two rounds of 1 s on fewer workers
+        finally:
+            pool.close()
+            pool.join()
+
+    def test_no_more_processes_than_outstanding_work(self, monkeypatch):
+        """Start-up stays lazy: two outstanding tasks start no extra processes."""
+        pool = self._grown_pool(monkeypatch, 6)
+        try:
+            before = len(pool._executor._processes)
+            handles = [pool.apply_async(_hold, (0.2,)) for _ in range(2)]
+            [h.get() for h in handles]
+            assert len(pool._executor._processes) == max(before, 2)
+        finally:
+            pool.close()
+            pool.join()
+
+    def test_recycled_workers_are_replaced(self):
+        """With ``max_tasks_per_child`` each worker exits after its tasks; the pool
+        must still run at full width (CPython replaces an exited worker only when
+        no stale idle token exists)."""
+        import time
+        from dreamer.utils.mp_context import start_method
+        if start_method() == "fork":
+            pytest.skip("max_tasks_per_child needs spawn/forkserver")
+        with ResilientPool(3, max_tasks_per_child=2, name="t") as pool:
+            for _ in range(4):                           # several recycle rounds
+                t0 = time.perf_counter()
+                handles = [pool.apply_async(_hold, (0.6,)) for _ in range(3)]
+                pids = {h.get() for h in handles}
+                assert len(pids) == 3                    # three processes in parallel
+                assert time.perf_counter() - t0 < 1.6

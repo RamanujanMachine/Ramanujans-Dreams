@@ -59,6 +59,7 @@ from dreamer.utils.logger import Logger
 from dreamer.utils import monitoring
 from dreamer.utils.multi_processing import (
     sink_item_dto,
+    SLIM_VALUE_CHARS,
     load_seen_trajectories,
     worker_pool,
     write_jsonl_line,
@@ -152,7 +153,7 @@ def finalize_best_trajectories(
     if not cfg.ENABLE_MICRO_HILL_CLIMB:
         return
 
-    seen = load_seen_trajectories(output_path)
+    seen = load_seen_trajectories(output_path, omit_values_over=SLIM_VALUE_CHARS)
     if not seen:
         return
 

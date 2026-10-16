@@ -74,10 +74,10 @@ Mostly **where things go** and **how many cores to use**.
 | `*_FORMAT` | `'pkl'` or `'json'` for the corresponding export. |
 | `TOTAL_CORES` | The core budget for every process pool; nothing is reserved. `None` ⇒ the cores this run was allocated: inside a PBS/Slurm job the scheduler's request (`$NCPUS` / `$SLURM_CPUS_PER_TASK`), capped by the CPU affinity mask and the machine's core count. Batch nodes may not confine jobs, so the machine can show far more cores than the job owns. |
 | `MEMORY_AWARE_WORKERS` / `MEMORY_LIMIT_MB` / `MEMORY_RESERVE_MB` / `WORKER_TASK_HEADROOM_MB` | Pools also fit available memory: `min(cores, (available − reserve) / per-worker)`, then grow once warm workers measure smaller and shrink (draining) when memory runs low. `MEMORY_LIMIT_MB` sets a budget for the run; inside a PBS/Slurm job the job's memory request is the budget by default; otherwise available memory is detected, including cgroup limits. Inside a batch job, workers' `OMP_NUM_THREADS`-style variables set to the allocation are reduced to 1. |
-| `POOL_MAX_TASKS_PER_CHILD` | Recycle pool workers after N tasks (bounds slow growth on very long runs). |
+| `POOL_MAX_TASKS_PER_CHILD` | Recycle each pool worker after N tasks (default 300; `None` = never). Bounds memory a long-lived worker never gives back — python-flint ≤ 0.9.0 leaks a little on every `str()` of a polynomial, which ramanujantools does thousands of times per walk. A recycle costs well under a second plus a slower first task (~1% at 300). Ignored with `'fork'`. |
 | `POOL_START_METHOD` | How pool workers are started: `'auto'` (default) = `forkserver` on Linux (no fork-with-threads deadlocks; pools can add workers mid-run) and `spawn` on macOS; or `'spawn'` / `'forkserver'` / `'fork'`. |
 | `POOL_SLOW_START` | Memory-aware pools that can grow start with this many workers (default 2), measure each task's real peak memory, then grow to every core that fits. `0` = start at the full memory cap. |
-| `SYMPY_CACHE_CLEAR_AFTER_SECONDS` | After a trajectory task that took at least this long (default 1 s), clear sympy's global cache, which otherwise keeps the huge numbers of long walks alive (tens of MB per long trajectory, growing per worker). Light tasks skip it. `0` = after every task; `None` = never. |
+| `SYMPY_CACHE_CLEAR_AFTER_SECONDS` | After a trajectory task that took at least this long (default 1 s), clear sympy's global cache, which otherwise keeps the huge numbers of long walks alive (tens of MB per long trajectory, growing per worker). Light tasks skip it. `0` = after every task; `None` = never. Independently of this knob, every task also bounds ramanujantools' per-trajectory result caches (`Matrix._companionization` & co.: ~3.7 MB per entry for a `relation` task, up to 128 per worker, never hit by another trajectory) to a few recent entries. |
 | `REUSE_POLICY` | How stored attributes are reused across runs: `'strict'` (default — per-attribute fingerprints decide, so a config change recomputes exactly the affected attributes), `'keep'` (reuse anything stored), `'recompute'` (ignore earlier runs). |
 | `STAGE_POOL_WORKERS` | Cap for the per-stage trajectory pools (analysis, hedgehog search, Tier-3). `None`/`0` ⇒ full core budget; `1` ⇒ serial in-process. |
 | `STAGE_POOL_CHUNKSIZE` | Trajectories handed to a stage-pool worker at a time (default `1` = full dynamic load balancing). |
@@ -151,7 +151,7 @@ The largest category. Shared knobs plus one block per optimiser
 | `ENABLE_MICRO_HILL_CLIMB` | The shared resolution-doubling finalization endgame after every method. |
 | `GA_*` | Genetic-algorithm knobs. |
 | `SA_*` | Small-Angle search knobs. |
-| `ANNEAL_*` | Simulated-Annealing knobs. `ANNEAL_LOOKAHEAD` (`auto`/`on`/`off`) speculatively pre-walks the next step's candidate neighbourhoods on idle eval workers — same search path and rows, fewer sequential rounds on large machines (`auto` needs ≥ 4·d_flat workers). |
+| `ANNEAL_*` | Simulated-Annealing knobs. `ANNEAL_LOOKAHEAD` (`auto`/`on`/`off`) speculatively pre-walks the next step's candidate neighbourhoods on idle eval workers — same search path and rows; fills both the workers a step does not use and those idle while the step waits for its slowest walk (`auto` = the pool may run more than d_flat workers). |
 | `GRAD_*` | Gradient-Ascent knobs. |
 | `SPSA_*` | Hybrid SPSA + Adam knobs. |
 
@@ -232,6 +232,8 @@ events with `runmon query`.
 | `RUN_DIR` | One sub-directory per run (`events.jsonl`, `status.json`, workers' event files); `latest` points at the newest. |
 | `EVENT_LOG_LEVEL` / `WORKER_EVENT_LOG_LEVEL` | Lowest level of main-process / worker log lines copied into the event log (structured events are always kept). |
 | `SAMPLE_SECONDS` / `HEARTBEAT_SECONDS` | Resource sampling interval; compact snapshots written into the event log for replay. |
+| `TIMELINE_SECONDS` | Seconds per record of `timeline.jsonl`: mean and max of the 1 s CPU / memory samples (what the reopened web view plots). |
+| `SLOW_TASK_SECONDS` | A pool task running at least this long leaves a `slow_task` event (one per pool per minute; `0` = off). |
 | `STALL_SECONDS` | Warn when no progress was reported for this long. |
 | `WALLTIME_GRACE_SECONDS` | Inside a PBS/Slurm job: flush every log to disk this long before the walltime deadline. |
 

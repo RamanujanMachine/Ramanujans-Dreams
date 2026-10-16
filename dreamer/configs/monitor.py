@@ -60,6 +60,20 @@ class MonitorConfig(Configurable):
         default=30.0,
         metadata={"description": "Seconds between compact status snapshots written into events.jsonl (for replay)."},
     )
+    TIMELINE_SECONDS: float = field(
+        default=60.0,
+        metadata={"description": (
+            "Seconds per record of timeline.jsonl: the mean and max of the 1 s CPU / memory samples "
+            "of each window (what the reopened web view plots). Smaller = finer curve, more lines."
+        )},
+    )
+    SLOW_TASK_SECONDS: float = field(
+        default=300.0,
+        metadata={"description": (
+            "A pool task that runs at least this many seconds leaves a slow_task event "
+            "(at most one per pool per minute). 0 turns it off."
+        )},
+    )
     STALL_SECONDS: float = field(
         default=1800.0,
         metadata={"description": "Warn when no progress has been reported for this many seconds."},

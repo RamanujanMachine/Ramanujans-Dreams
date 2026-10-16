@@ -139,7 +139,8 @@ class SimulatedAnnealingMod(SearcherModScheme):
                         Logger(str(e), Logger.Levels.warning).log()
                         continue
                     finally:
-                        log_eval_stats("Simulated Annealing", shard_id, const.name, stats)
+                        log_eval_stats("Simulated Annealing", shard_id, const.name, stats,
+                                       lookahead=getattr(method, "lookahead_stats", None))
 
             # Assurance endgame on the best-δ trajectory(ies): no-op unless
             # ENABLE_MICRO_HILL_CLIMB.  Runs after the result writer has flushed the
