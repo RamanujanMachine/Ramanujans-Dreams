@@ -20,3 +20,4 @@ temp/
 .env/
 runs/
 *.egg-info/
+.pytest_cache/
