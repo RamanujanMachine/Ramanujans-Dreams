@@ -99,8 +99,12 @@ class SystemConfig(Configurable):
         default=None,
         metadata={
             "description": (
-                "Total CPU cores the pipeline may use. None resolves to "
-                "os.cpu_count() at runtime. Single source of truth for every "
+                "Total CPU cores the pipeline may use. None resolves at runtime to "
+                "the cores this run was allocated: inside a PBS/Slurm job the "
+                "scheduler's request ($NCPUS / $SLURM_CPUS_PER_TASK), capped by the "
+                "CPU affinity mask and os.cpu_count() (dreamer.utils.allocation). "
+                "Batch nodes may not confine jobs, so the machine's core count can "
+                "exceed the allocation. Single source of truth for every "
                 "process pool (stage pools, eval pools, extraction); nothing is "
                 "reserved. See dreamer.utils.multi_processing.search_worker_budget."
             )
@@ -153,8 +157,10 @@ class SystemConfig(Configurable):
     MEMORY_LIMIT_MB: Optional[int] = field(
         default=None,
         metadata={"description": (
-            "Memory (MB) this run may use; None = detect (Linux MemAvailable + cgroup/SLURM "
-            "limit, macOS vm_stat). Set it on shared nodes."
+            "Memory (MB) this run may use; None = the batch job's request when running "
+            "under PBS (qstat Resource_List.mem) or Slurm ($SLURM_MEM_PER_NODE), else "
+            "detect (Linux MemAvailable + cgroup limit, macOS vm_stat). See "
+            "dreamer.utils.allocation."
         )},
     )
     MEMORY_RESERVE_MB: int = field(
@@ -204,13 +210,16 @@ class SystemConfig(Configurable):
         )},
     )
     POOL_MAX_TASKS_PER_CHILD: Optional[int] = field(
-        default=None,
+        default=300,
         metadata={
             "description": (
                 "Recycle each pool worker after this many tasks (None = never). "
-                "Bounds slow memory growth of long-lived workers on large CMFs, at "
-                "the cost of re-spawning workers (each re-imports dreamer). Not "
-                "available with the 'fork' start method (ignored there)."
+                "Bounds memory that long-lived workers never give back: python-flint "
+                "<= 0.9.0 leaks the C string of every str() of a polynomial, which "
+                "ramanujantools triggers thousands of times per walk (~0.3-0.5 MB per "
+                "walk; 300 tasks cap it at ~150 MB per worker). A recycle costs ~0.4 s "
+                "plus a slower first task (~1% at 300). Not available with the 'fork' "
+                "start method (ignored there)."
             )
         },
     )

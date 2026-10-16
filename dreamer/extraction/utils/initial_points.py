@@ -383,7 +383,8 @@ def compute_mapping(D: int, S: int, A: np.ndarray, b: np.ndarray, prefix_dims: i
     # Global dictionary to hold the final results
     global_mapping = {}
 
-    num_cores = mp.cpu_count()
+    from dreamer.utils.allocation import available_cores
+    num_cores = available_cores()
     Logger(f"Launching {len(tasks)} jobs across {num_cores} cores...").log()
 
     if filter_func:

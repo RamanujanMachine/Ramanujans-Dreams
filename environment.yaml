@@ -20,7 +20,9 @@ dependencies:
       - numpy
       - pandas
       - peewee
+      - psutil
       - pulp
+      - rich
       - scipy
       - sympy
       - tqdm

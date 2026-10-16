@@ -166,12 +166,11 @@ _PHASE_FACE = 1
 
 
 def _resolve_workers(workers: Optional[int]) -> int:
-    """``None``/``0`` → all cores (``system.TOTAL_CORES`` or ``os.cpu_count()``)."""
+    """``None``/``0`` → all allocated cores (:func:`dreamer.utils.allocation.available_cores`)."""
     if workers:
         return max(1, int(workers))
-    import os
-    from dreamer.configs.system import sys_config
-    return max(1, int(sys_config.TOTAL_CORES or os.cpu_count() or 1))
+    from dreamer.utils.allocation import available_cores
+    return available_cores()
 
 # Per-worker shooting context, set once by the pool initializer.
 _SHOOT_STATE: dict = {}
@@ -311,7 +310,7 @@ class RayShootingExtractor(BaseExtractor):
         independent per cell).  ``>1`` dispatches them across processes;
         ``1`` (default) runs serially; ``None``/``0`` = all cores.
     :param workers: Process count for the shooting phases.  ``None``/``0``
-        = all cores (``system.TOTAL_CORES`` or ``os.cpu_count()``); ``1``
+        = all allocated cores (``system.TOTAL_CORES`` or the run's allocation); ``1``
         (default) runs in-process.  Every ray batch / face subset draws from
         its **own** seeded stream ``(seed, phase, index)`` and results are
         merged strictly in index order, so the output is **identical for any

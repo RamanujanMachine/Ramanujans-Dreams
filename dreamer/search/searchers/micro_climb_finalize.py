@@ -56,8 +56,10 @@ from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.utils.storage.optimization_objectives import score_record
 from dreamer.utils.constants.constant import Constant
 from dreamer.utils.logger import Logger
+from dreamer.utils import monitoring
 from dreamer.utils.multi_processing import (
     sink_item_dto,
+    SLIM_VALUE_CHARS,
     load_seen_trajectories,
     worker_pool,
     write_jsonl_line,
@@ -151,7 +153,7 @@ def finalize_best_trajectories(
     if not cfg.ENABLE_MICRO_HILL_CLIMB:
         return
 
-    seen = load_seen_trajectories(output_path)
+    seen = load_seen_trajectories(output_path, omit_values_over=SLIM_VALUE_CHARS)
     if not seen:
         return
 
@@ -253,11 +255,12 @@ def finalize_best_trajectories(
                 log_eval_stats("Micro-climb", shard_id, const.name, stats)
                 continue
 
-            refined = parallel_micro_climb(
-                anchors,
-                geom=geom, eval_ctx=eval_ctx, max_norm=max_norm,
-                traj_norm=traj_norm, improve_threshold=_IMPROVE_EPS, pool=eval_pool,
-            )
+            with monitoring.shard(shard_id, const, total=len(anchors), label="micro-climb"):
+                refined = parallel_micro_climb(
+                    anchors,
+                    geom=geom, eval_ctx=eval_ctx, max_norm=max_norm,
+                    traj_norm=traj_norm, improve_threshold=_IMPROVE_EPS, pool=eval_pool,
+                )
             improved_to = max([max_delta] + [d for _, d in refined])
             new_walks = sum(1 for by_const in seen.values() if const.name in by_const) - walked_before
             if improved_to > max_delta + _IMPROVE_EPS:

@@ -88,10 +88,41 @@ class System:
 
         constants: List[Constant] = self.__validate_constants(constants)
 
+        # The live run monitor (monitor.ENABLED): event log, progress, resources,
+        # watchdogs, walltime — ended with the right reason however the run ends.
+        from dreamer.utils import monitoring
+        meta = {
+            "constants": [c.name for c in constants],
+            "objective": getattr(sys_config, "OPTIMIZATION_OBJECTIVE", None),
+            "modules": {
+                "extractor": self.__module_name(self.extractor),
+                "analyzers": [self.__module_name(a) for a in self.analyzers],
+                "searcher": self.__module_name(self.searcher),
+                "post_processor": self.__module_name(self.post_processor),
+            },
+        }
+        with monitoring.monitored_run(sys_config.RUN_ID, meta):
+            self.__run_pipeline(constants)
+
+    @staticmethod
+    def __module_name(module) -> Optional[str]:
+        """Readable name of a configured module (class, ``partial`` of a class, or a string)."""
+        if module is None:
+            return None
+        if isinstance(module, str):
+            return module
+        target = getattr(module, "func", module)        # functools.partial
+        return getattr(target, "__name__", None) or type(target).__name__
+
+    def __run_pipeline(self, constants: List[Constant]):
+        """The pipeline stages of :meth:`run` (loading → extraction → analysis → search → post-process)."""
+        from dreamer.utils import monitoring
+
         # ======================================================
         # LOAD STAGE - loading constants (and optional storage)
         # ======================================================
-        cmf_data, cmf_formatters = self.__loading_stage(constants)
+        with monitoring.stage("loading"):
+            cmf_data, cmf_formatters = self.__loading_stage(constants)
         relevant_cmf_names = self.__derive_relevant_cmf_names(constants, cmf_data)
 
         if path := sys_config.EXPORT_CMFS:
@@ -147,7 +178,8 @@ class System:
         # ====================================================
         shard_dict = dict()
         if self.extractor:
-            shard_dict = self.extractor(cmf_data).execute()
+            with monitoring.stage("extraction"):
+                shard_dict = self.extractor(cmf_data).execute()
         elif sys_config.EXPORT_CMFS and os.path.isdir(sys_config.EXPORT_CMFS):
             # Reconstruct shards from JSONL + formatter JSON (no pickle needed).
             shard_dict = load_shards_from_export(
@@ -164,7 +196,8 @@ class System:
         # =======================================================
         self._analysis_constants = constants
         self._analysis_relevant_cmf_names = relevant_cmf_names
-        priorities = self.__analysis_stage(shard_dict)
+        with monitoring.stage("analysis"):
+            priorities = self.__analysis_stage(shard_dict)
         Logger.timer_summary()
 
         # Update found_constants in cmfs.jsonl for every CMF that was
@@ -233,7 +266,8 @@ class System:
         # =======================================================
         if len(filtered_priorities) == 0:
             filtered_priorities = priorities
-        self.__search_stage(filtered_priorities)
+        with monitoring.stage("search"):
+            self.__search_stage(filtered_priorities)
 
         # =======================================================
         # POST-PROCESS STAGE - expensive Tier-3 attributes
@@ -242,7 +276,8 @@ class System:
         # is non-empty.  The module itself short-circuits on the config check,
         # but we also skip the call when no post-processor was supplied.
         if self.post_processor is not None:
-            self.post_processor(filtered_priorities).execute()
+            with monitoring.stage("postprocess"):
+                self.post_processor(filtered_priorities).execute()
 
         # =======================================================
         # SUMMARY - write a human-readable summary.md of the run

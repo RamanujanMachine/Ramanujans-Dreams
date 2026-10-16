@@ -15,6 +15,17 @@ def set_high_precision():
     mpmath.mp.dps = old_dps
 
 
+@pytest.fixture(autouse=True)
+def isolated_run_monitor(tmp_path, monkeypatch):
+    """Tests that call ``System.run`` start the live run monitor: keep its run
+    directories inside the test's temp dir (never in the repository)."""
+    from dreamer.configs import config
+    monkeypatch.setattr(config.monitor, "RUN_DIR", str(tmp_path / "monitor-runs"))
+    yield
+    from dreamer.utils import monitoring
+    monitoring.end_run("test-teardown")
+
+
 @pytest.fixture
 def reference_constants():
     """High-precision reference values for fundamental constants."""

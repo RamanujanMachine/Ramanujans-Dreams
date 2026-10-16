@@ -38,6 +38,7 @@ from typing import Callable, Dict, List, Optional, Set
 from dreamer.utils.schemes.searcher_scheme import SearcherModScheme
 from dreamer.utils.schemes.module import CatchErrorInModule
 from dreamer.utils.ui.tqdm_config import SmartTQDM
+from dreamer.utils import monitoring
 from dreamer.search.methods.hedgehog_scan import SerialSearcher
 from dreamer.extraction.shard import Shard
 from dreamer.utils.constants.constant import Constant
@@ -124,10 +125,11 @@ class SearcherModV1(SearcherModScheme):
                 **sys_config.TQDM_CONFIG,
             ):
                 identified_consts = list(shard_identified[shard_id])
-                self._run_shard(
-                    shard, identified_consts,
-                    pool=pool, shard_idx=shard_idx[shard_id],
-                )
+                with monitoring.shard(shard_id):
+                    self._run_shard(
+                        shard, identified_consts,
+                        pool=pool, shard_idx=shard_idx[shard_id],
+                    )
 
     # ------------------------------------------------------------------
     # Per-shard pipeline

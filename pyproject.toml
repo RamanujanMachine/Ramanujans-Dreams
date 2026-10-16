@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["dreamer*"]
+include = ["dreamer*", "runmon*"]
 
 [project]
 name = "ramanujans-dreams"
@@ -37,15 +37,26 @@ dependencies = [
     # default PostgreSQL driver is psycopg (v3), which LIReC does not declare.
     "psycopg[binary]",
     "cysignals",
-    "fpylll"
+    "fpylll",
+    # runmon: per-process CPU / memory sampling for the live run monitor
+    "psutil"
 ]
 
+[tool.setuptools.package-data]
+runmon = ["web/*.html"]
+
+[project.scripts]
+runmon = "runmon.__main__:main"
+
 [project.optional-dependencies]
+# Terminal client for the live run monitor (`runmon watch`); not needed by runs.
+monitor = ["rich"]
 dev = [
     "pytest>=8.2.0",
     "pytest-cov>=4.0.0",
     "nbclient>=0.9.0",  # used by data_utils/generate_system_overview_notebook.py to execute the notebook
-    "ipykernel>=6.0.0"  # kernel nbclient drives when executing the notebook
+    "ipykernel>=6.0.0",  # kernel nbclient drives when executing the notebook
+    "rich"  # terminal view tests (runmon watch); same as the `monitor` extra
 ]
 
 [tool.pytest.ini_options]

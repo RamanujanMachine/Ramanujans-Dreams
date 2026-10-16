@@ -434,7 +434,10 @@ def parallel_micro_climb(
     :param pool: optional per-shard process pool for the batched walks.
     :return: refined ``(z, delta)`` per anchor, aligned with *anchors*.
     """
+    from dreamer.utils import monitoring
+    node = monitoring.progress()          # the caller's "micro-climb shard … " node, if any
     climbs = [_Climb(z, delta) for z, delta in anchors]
+    rounds = 0
     while True:
         batch: List[np.ndarray] = []
         plan: List[Tuple[_Climb, int, List[np.ndarray]]] = []
@@ -452,4 +455,8 @@ def parallel_micro_climb(
         results = evaluate_neighbours(batch, eval_ctx, pool) if batch else []
         for c, start, cands in plan:
             _advance_climb(c, cands, results[start:start + len(cands)], geom, improve_threshold)
+        rounds += 1
+        node.set(done=sum(1 for c in climbs if c.done))       # climbs converged / anchors
+        node.metric(round=rounds, active=sum(1 for c in climbs if not c.done),
+                    best=max((c.delta for c in climbs), default=None), batch=len(batch))
     return [(c.center, c.delta) for c in climbs]

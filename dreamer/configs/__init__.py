@@ -6,6 +6,7 @@ from .post_process import post_process_config
 from .graph import graph_config
 from .extraction import extraction_config
 from .logging import logging_config
+from .monitor import monitor_config
 from .config_manager import ConfigManager
 
 
@@ -21,5 +22,6 @@ __all__ = [
     'search_config',
     'post_process_config',
     'graph_config',
-    'logging_config'
+    'logging_config',
+    'monitor_config',
 ]

@@ -10,12 +10,14 @@ emits the flat per-``(trajectory, constant)`` :class:`TrajectoryDTO` to a
 """
 
 import json
+import math
 import time
 from typing import Callable, Dict, Optional, Tuple
 
 from dreamer.extraction.shard import Shard
 from dreamer.search.methods.flatland.geometry import FlatlandGeometry
 from dreamer.utils.constants.constant import Constant
+from dreamer.utils import monitoring
 from dreamer.utils.logger import Logger
 from dreamer.utils.storage.optimization_objectives import score_record
 from dreamer.utils.storage.trajectory_attributes import (
@@ -106,9 +108,32 @@ class EvalStats:
 
     _FIELDS = ("reused", "revisited", "cached_walk", "new", "stale", "failed", "outside")
 
+    #: A ``new_best`` event needs at least this much gain, or this many seconds
+    #: since the last one (so a creeping optimiser does not flood the log).
+    BEST_MIN_GAIN = 1e-3
+    BEST_MIN_SECONDS = 10.0
+
     def __init__(self, seen_trajectories: dict, constant_name: str):
         self._stored = {tid for tid, by_const in seen_trajectories.items() if constant_name in by_const}
         self.counts = dict.fromkeys(self._FIELDS, 0)
+        self.constant_name = constant_name
+        self.best: Optional[float] = None          # best (signed) objective score seen
+        self._best_announced: Optional[float] = None
+        self._best_announced_at = 0.0
+
+    def note_score(self, score: float) -> None:
+        """Track the best finite score; announce improvements as ``new_best`` events."""
+        if score is None or not math.isfinite(score) or (self.best is not None and score <= self.best):
+            return
+        self.best = score
+        now = time.time()
+        first = self._best_announced is None
+        if (first or score - self._best_announced >= self.BEST_MIN_GAIN
+                or now - self._best_announced_at >= self.BEST_MIN_SECONDS):
+            self._best_announced, self._best_announced_at = score, now
+            monitoring.event("new_best", f"{self.constant_name}: new best {active_objective()} = {score:.6g}",
+                             constant=self.constant_name, objective=active_objective(), score=score,
+                             evaluations=self.total)
 
     def scored(self, trajectory_id: str) -> None:
         """A fresh row answered the evaluation (no walk)."""
@@ -148,7 +173,8 @@ class EvalStats:
         return f"{self.total} evaluations → " + " · ".join(parts)
 
 
-def log_eval_stats(method: str, shard_id: str, constant_name: str, stats: "EvalStats") -> None:
+def log_eval_stats(method: str, shard_id: str, constant_name: str, stats: "EvalStats",
+                   lookahead: Optional[dict] = None) -> None:
     """Log the per-``(shard, constant)`` reuse summary of a search method.
 
     Same vocabulary as the analysis / hedgehog plan lines (``reused`` · ``new``).
@@ -157,11 +183,20 @@ def log_eval_stats(method: str, shard_id: str, constant_name: str, stats: "EvalS
     :param shard_id: The shard searched.
     :param constant_name: The constant searched.
     :param stats: The counts collected during the run.
+    :param lookahead: Optional speculative look-ahead counters
+        (``submitted`` / ``taken`` / ``dropped``); reported with the hit rate
+        ``taken / submitted`` in the ``eval_stats`` event.
     """
     Logger(
         f"{method} — shard {shard_id[:24]}…, {constant_name}: {stats.summary()}",
         Logger.Levels.info,
     ).log()
+    fields = dict(stats.counts, method=method, shard=shard_id, constant=constant_name,
+                  evaluations=stats.total, best=stats.best, objective=active_objective())
+    if lookahead:
+        fields["lookahead"] = dict(lookahead, hit_rate=(lookahead["taken"] / lookahead["submitted"]
+                                                        if lookahead.get("submitted") else None))
+    monitoring.event("eval_stats", f"{method}: {stats.summary()}", **fields)
 
 
 def evaluate_in_flatland(
@@ -217,6 +252,7 @@ def evaluate_in_flatland(
         if cached is not None:
             if stats is not None:
                 stats.scored(trajectory_id)
+                stats.note_score(cached[0])
             return cached
 
     # --- Compute (reusing the cached handler when available) ---
@@ -271,4 +307,6 @@ def evaluate_in_flatland(
     scored = score_record(record, objective_name)
     if scored is None:
         return float("-inf"), bool(dto.identified)
+    if stats is not None:
+        stats.note_score(scored[0])
     return scored

@@ -180,6 +180,26 @@ Advanced options are:
   without an `analyzers=` argument and the priorities are reloaded from
   `config.system.EXPORT_ANALYSIS_PRIORITIES`).
 
+### Watching a run
+
+While a run is going, a live monitor records what it is doing. Each run gets a
+directory under `runs/` (`config.monitor.RUN_DIR`; `runs/latest` is the newest),
+and you watch it from another terminal:
+
+```bash
+runmon watch runs/latest                # stage, progress, CPU/memory per process, pools, events
+runmon watch ~/work/myrun/runs/latest --ssh user@login.cluster   # a run inside a cluster job
+runmon web runs/latest                  # the same in your browser (http://127.0.0.1:8765/)
+runmon query runs/latest --level WARNING --since 2h               # search the event log
+runmon demo                             # try the monitor on a simulated run
+```
+
+The run directory holds `events.jsonl` (one JSON event per line: pool and worker
+events, watchdog warnings, failures, walltime warnings; search it with `grep`/`jq`)
+and `status.json` (the latest snapshot). Inside a PBS/Slurm job the run sizes itself
+to the job's cores and memory, and the monitor warns before the walltime runs out.
+Turn the monitor off with `config.configure(monitor={'ENABLED': False})`.
+
 > **Where results live.** Every searched/analysed trajectory is one line in a
 > per-shard **JSONL** file under `config.system.EXPORT_SEARCH_RESULTS`
 > (`<shard_id>.jsonl`). That JSONL store is the canonical record the run summary

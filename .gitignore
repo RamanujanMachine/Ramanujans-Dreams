@@ -17,3 +17,7 @@ experiments/
 context/
 temp/
 .claude/
+.env/
+runs/
+*.egg-info/
+.pytest_cache/

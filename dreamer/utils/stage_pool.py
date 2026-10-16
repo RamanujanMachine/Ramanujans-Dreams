@@ -37,6 +37,7 @@ exception would abort the whole ``imap`` stream, so failures are returned as a
 :class:`TaskError` (carrying the task key) and handled by the caller.
 """
 
+import functools
 import multiprocessing as mp
 import os
 import time
@@ -69,13 +70,14 @@ _STAGE_STATE: Dict[str, Any] = {}
 def total_core_budget() -> int:
     """Return the number of cores a stage pool may use.
 
-    ``sys_config.TOTAL_CORES`` (``None`` → ``os.cpu_count()``), floored at 1 —
-    the whole machine, like :func:`dreamer.utils.multi_processing.search_worker_budget`
+    ``sys_config.TOTAL_CORES``, else the run's allocated cores
+    (:func:`dreamer.utils.allocation.available_cores`), floored at 1 — like :func:`dreamer.utils.multi_processing.search_worker_budget`
     (nothing is reserved; Tier-2 runs inside the same tasks as Tier-1).
 
     :return: Worker budget (>= 1).
     """
-    return max(1, sys_config.TOTAL_CORES or os.cpu_count() or 1)
+    from dreamer.utils.allocation import available_cores
+    return available_cores()
 
 
 def resolve_stage_workers(budget: Optional[int] = None) -> int:
@@ -144,7 +146,25 @@ def _run_envelope(env: "_Envelope"):
             shard.cmf = _STAGE_STATE["cmfs"][shard._stage_cmf_index]
             shard.cache = FrequencyList(shard._stage_cache_size, shared_log=env.pq_log)
             shards[env.shard_idx] = shard
-    return env.fn(env.task)
+    result = env.fn(env.task)
+    if isinstance(result, TaskError):
+        _report_task_error(result)
+    return result
+
+
+def _call_and_report(fn: Callable, task):
+    """Serial-mode task call with the same failure reporting as a worker."""
+    result = fn(task)
+    if isinstance(result, TaskError):
+        _report_task_error(result)
+    return result
+
+
+def _report_task_error(err: "TaskError") -> None:
+    """A failed task → structured event (worker's event file / the run's log)."""
+    from dreamer.utils.logger import Logger
+    Logger.event("task_failed", f"task {err.key} failed: {err.message}", Logger.Levels.warning,
+                 key=str(err.key), error=str(err.message)[:500])
 
 
 def _task_death_result(fn, args) -> "TaskError":
@@ -152,8 +172,10 @@ def _task_death_result(fn, args) -> "TaskError":
     task = args[0] if args else None
     if isinstance(task, _Envelope):
         task = task.task
-    return TaskError(getattr(task, "key", None),
-                     "worker process died while computing this trajectory (likely out of memory)")
+    err = TaskError(getattr(task, "key", None),
+                    "worker process died while computing this trajectory (likely out of memory)")
+    _report_task_error(err)
+    return err
 
 
 def stage_shard(idx: int):
@@ -164,6 +186,12 @@ def stage_shard(idx: int):
 def stage_extra(key: str, default: Any = None) -> Any:
     """Return an entry of the stage's ``extra`` payload (call from a task function)."""
     return _STAGE_STATE.get("extra", {}).get(key, default)
+
+
+def _stage_label() -> str:
+    """Name of the running pipeline stage (``stage`` outside a monitored run)."""
+    from dreamer.utils.monitoring import current_stage
+    return current_stage() or "stage"
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +262,7 @@ class StagePool:
             initargs=(config.export_configurations(), cmfs, self.extra),
             on_death=_task_death_result,
             max_tasks_per_child=getattr(sys_config, "POOL_MAX_TASKS_PER_CHILD", None),
-            name="stage pool",
+            name=f"{_stage_label()} pool",
         )
         return self
 
@@ -269,7 +297,7 @@ class StagePool:
             ``shard_idx`` attribute gets that shard via :func:`stage_shard`.
         """
         if self._pool is None:
-            return map(fn, tasks)
+            return map(functools.partial(_call_and_report, fn), tasks)
         chunksize = max(1, int(getattr(sys_config, "STAGE_POOL_CHUNKSIZE", 1) or 1))
         return self._pool.imap(_run_envelope, (self._envelope(fn, t) for t in tasks), chunksize=chunksize)
 

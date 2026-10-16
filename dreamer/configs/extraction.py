@@ -159,7 +159,7 @@ class ExtractionConfig(Configurable):
                 "Process count for the heuristic's MILP witness refinement "
                 "(the per-shard MILPs are independent; only used when "
                 "HEURISTIC_REFINE_WITNESSES is on and >= 200 cells need it). "
-                "0 (default) = all cores (TOTAL_CORES / os.cpu_count()); 1 = serial. "
+                "0 (default) = all allocated cores (TOTAL_CORES, else the batch-job allocation / machine); 1 = serial. "
                 "Results are identical for any value."
             )
         },

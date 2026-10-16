@@ -8,6 +8,7 @@ from dreamer.utils.logger import Logger
 from dreamer.search.methods.hedgehog_scan import SerialSearcher
 from dreamer.configs import config
 from dreamer.extraction.shard import Shard
+from dreamer.utils import monitoring
 from typing import Dict, List
 from ramanujantools.cmf import CMF
 
@@ -48,13 +49,14 @@ class Analyzer(AnalyzerScheme):
             Logger(f'Shard description (Ax < b):\n{str(space)}', Logger.Levels.debug).log()
 
             searcher = SerialSearcher(space, self.const, use_LIReC=analysis_config.USE_LIReC)
-            dm = searcher.search(
-                start,
-                find_limit=analysis_config.ANALYZE_LIMIT,
-                find_gcd_slope=analysis_config.ANALYZE_GCD_SLOPE,
-                find_eigen_values=analysis_config.ANALYZE_EIGEN_VALUES,
-                trajectory_generator=analysis_config.NUM_TRAJECTORIES_FROM_DIM
-            )
+            with monitoring.shard(i + 1, self.const):
+                dm = searcher.search(
+                    start,
+                    find_limit=analysis_config.ANALYZE_LIMIT,
+                    find_gcd_slope=analysis_config.ANALYZE_GCD_SLOPE,
+                    find_eigen_values=analysis_config.ANALYZE_EIGEN_VALUES,
+                    trajectory_generator=analysis_config.NUM_TRAJECTORIES_FROM_DIM
+                )
 
             identified = dm.identified_percentage
             best_delta, best_trajectory = dm.best_delta
