@@ -15,6 +15,7 @@ In the run directory:
 | File | Content |
 |---|---|
 | `events.jsonl` | One JSON event per line — searchable with `grep` / `jq`, replayable. |
+| `timeline.jsonl` | One line per minute: mean and max of the 1 s CPU / memory samples (see below). |
 | `events.w<pid>.jsonl` | Each worker process's own events (merged into `events.jsonl` by the hub). |
 | `status.json` | The latest full snapshot, replaced atomically every few seconds. |
 | `crash.txt` | Tracebacks of hard crashes (segfaults), via `faulthandler`. |
@@ -22,8 +23,21 @@ In the run directory:
 Event fields: `v` (schema), `ts`, `seq`, `pid`, `role`, `level`, `kind`, `msg`,
 `ctx.task` (where the run was), `f` (structured fields). Kinds include `log`,
 `run_start` / `run_end`, `watchdog`, `stall`, `over_allocation`, `walltime`,
-`walltime_warning`, `walltime_grace`, `heartbeat`, plus whatever the program emits
-(`pool_created`, `worker_died`, …).
+`walltime_warning`, `walltime_grace`, `heartbeat`, `memory_pressure` / `memory_recovered`
+(machine memory or the run's allocation nearly used up), `disk_low` / `disk_recovered`
+(free space where the run directory lives), `signal_received`, plus whatever the program
+emits (`pool_created`, `worker_died`, …).
+
+**Timeline.** The hub samples the process tree every second, but writing every sample
+would be a lot of data, and one snapshot per heartbeat loses the spikes in between. So
+every minute (`HubConfig.timeline_s`) it writes one record to `timeline.jsonl`: the
+**mean** (the shape of the curve) and **max** (the spikes) of the window's samples for
+CPU, memory, process count and pool workers, the lowest machine-available memory, the
+same per role (`"eval pool worker"`, `main`, …), pool tasks finished and their run
+time, processes started (worker restarts), the active stage and the free disk space.
+The browser view plots it, so a reopened run shows the curve the live view showed
+(`runmon web` falls back to heartbeats for runs recorded without a timeline). A 14-day
+run is about 20 000 short lines.
 
 ```bash
 jq -c 'select(.level == "WARNING" or .level == "ERROR")' events.jsonl
@@ -115,7 +129,7 @@ same targets as `watch`, so it also works for a cluster run over `--ssh`. The pa
   memory against the allocation, walltime left and processes.
 - **Progress tree:** estimates are striped and marked `~`.
 - **Charts:** CPU and memory, with the allocation as a dashed line. History covers the
-  whole run, rebuilt from heartbeats.
+  whole run, from `timeline.jsonl` (one mean / max record per minute).
 - **Stage markers:** a coloured vertical line with a label where each stage starts, on
   both charts. Every `kind="stage"` progress node writes `stage_start` / `stage_end`
   events.

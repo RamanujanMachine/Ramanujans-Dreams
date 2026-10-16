@@ -175,6 +175,8 @@ def test_walltime_grace(tmp_path, monkeypatch):
     h.start()
     try:
         assert _wait(lambda: called == [True])
+        # The callbacks run first; the status file follows within the same tick.
+        assert _wait(lambda: os.path.exists(os.path.join(h.run_dir, "status.json")))
         kinds = [e["kind"] for e in _events(h.run_dir)]
         assert "walltime" in kinds and "walltime_grace" in kinds
         assert kinds.count("walltime_warning") == 3        # 60, 15 and 5 min marks

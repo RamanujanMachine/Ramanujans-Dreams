@@ -154,3 +154,19 @@ def test_signal_stop_records_signal_received(tmp_path):
     sig = [e for e in events if e["kind"] == "signal_received"]
     assert len(sig) == 1 and sig[0]["f"]["signal"] == "SIGTERM"
     assert events[-1]["kind"] == "run_end" and events[-1]["f"]["reason"] == "SIGTERM"
+
+
+def test_aggregator_counts_spawned_processes_and_task_time():
+    agg = tl.TimelineAggregator()
+    two = [{"pid": 1, "role": "main", "cpu": 1, "rss_mb": 1}, {"pid": 2, "role": "w", "cpu": 1, "rss_mb": 1}]
+    three = two + [{"pid": 3, "role": "w", "cpu": 1, "rss_mb": 1}]
+    agg.add(_sample(1.0, 1, 1, roles=two))             # baseline: nothing counts as spawned
+    agg.add(_sample(2.0, 1, 1, roles=three))           # pid 3 appeared
+    agg.add(_sample(3.0, 1, 1, roles=[three[0], three[2]]))   # pid 2 left
+    agg.add(_sample(4.0, 1, 1, roles=three))           # a recycled worker came back as new pid 2
+    agg.add_pools([{"name": "eval", "completed": 5, "task_seconds": 20.0}])
+    agg.add_pools([{"name": "eval", "completed": 9, "task_seconds": 50.0}])
+    rec = agg.flush(5.0)
+    assert rec["spawned"] == 2 and rec["tasks"] == 9 and rec["task_s"] == 50.0
+    agg.add(_sample(6.0, 1, 1, roles=three))
+    assert agg.flush(7.0)["spawned"] == 0              # per window, baseline kept across windows

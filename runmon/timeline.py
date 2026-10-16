@@ -21,6 +21,8 @@ named ``*_max`` / ``*_min``):
 ``mem_avail_min``         lowest machine-available memory (MB) in the window
 ``cores`` / ``memory_mb`` the allocation (budget) the run was given
 ``tasks``                 pool tasks completed in the window
+``task_s``                worker-seconds those tasks ran (``task_s / tasks`` = mean task time)
+``spawned``               processes that appeared in the tree (worker restarts / recycling)
 ``roles``                 per role (``"eval pool worker"``, ``main`` ...):
                           ``{cpu, rss_mb, rss_max, n}``
 ``stage``                 active stage at the end of the window
@@ -84,6 +86,8 @@ class TimelineAggregator:
     def __init__(self):
         self._reset(None)
         self._last_completed: Dict[str, int] = {}
+        self._last_seconds: Dict[str, float] = {}
+        self._known_pids: Optional[set] = None
 
     def _reset(self, t0: Optional[float]) -> None:
         self.t0 = t0
@@ -93,6 +97,8 @@ class TimelineAggregator:
         self.roles: Dict[str, Dict[str, _Stat]] = {}
         self.alloc: Dict[str, Any] = {}
         self.tasks = 0
+        self.task_s = 0.0
+        self.spawned = 0
 
     def add(self, sample: Dict[str, Any]) -> None:
         """Account one :meth:`runmon.sampler.ProcessSampler.sample` result."""
@@ -107,6 +113,10 @@ class TimelineAggregator:
         self.avail.add((sample.get("machine") or {}).get("mem_available_mb"))
         a = sample.get("allocation") or {}
         self.alloc = {"cores": a.get("cores"), "memory_mb": a.get("memory_mb")}
+        pids = {p.get("pid") for p in sample.get("processes") or ()}
+        if self._known_pids is not None:           # the first sample is the baseline
+            self.spawned += len(pids - self._known_pids)
+        self._known_pids = pids
         per_role: Dict[str, List[float]] = {}
         for p in sample.get("processes") or ():
             acc = per_role.setdefault(p.get("role") or "child", [0.0, 0.0, 0])
@@ -128,6 +138,10 @@ class TimelineAggregator:
             last = self._last_completed.get(name, 0)
             self.tasks += done - last if done >= last else done
             self._last_completed[name] = done
+            secs = float(info.get("task_seconds") or 0.0)
+            last_s = self._last_seconds.get(name, 0.0)
+            self.task_s += secs - last_s if secs >= last_s else secs
+            self._last_seconds[name] = secs
 
     def flush(self, now: float, *, stage: Optional[str] = None,
               disk_free_mb: Optional[float] = None) -> Optional[Dict[str, Any]]:
@@ -143,7 +157,7 @@ class TimelineAggregator:
             "workers": _r(self.workers.mean), "workers_max": self.workers.max,
             "mem_avail_min": self.avail.min,
             **self.alloc,
-            "tasks": self.tasks,
+            "tasks": self.tasks, "task_s": _r(self.task_s), "spawned": self.spawned,
             "roles": {role: {"cpu": _r(s["cpu"].mean), "rss_mb": _r(s["rss"].mean),
                              "rss_max": _r(s["rss"].max), "n": s["n"].max}
                       for role, s in self.roles.items()},

@@ -232,6 +232,8 @@ events with `runmon query`.
 | `RUN_DIR` | One sub-directory per run (`events.jsonl`, `status.json`, workers' event files); `latest` points at the newest. |
 | `EVENT_LOG_LEVEL` / `WORKER_EVENT_LOG_LEVEL` | Lowest level of main-process / worker log lines copied into the event log (structured events are always kept). |
 | `SAMPLE_SECONDS` / `HEARTBEAT_SECONDS` | Resource sampling interval; compact snapshots written into the event log for replay. |
+| `TIMELINE_SECONDS` | Seconds per record of `timeline.jsonl`: mean and max of the 1 s CPU / memory samples (what the reopened web view plots). |
+| `SLOW_TASK_SECONDS` | A pool task running at least this long leaves a `slow_task` event (one per pool per minute; `0` = off). |
 | `STALL_SECONDS` | Warn when no progress was reported for this long. |
 | `WALLTIME_GRACE_SECONDS` | Inside a PBS/Slurm job: flush every log to disk this long before the walltime deadline. |
 

@@ -21,6 +21,7 @@ Algorithm is faithful to ``context/resources/code/algos/annealing.py`` and
 """
 
 import math
+import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -223,6 +224,8 @@ class SimulatedAnnealingSearch(SearchMethod):
         doubling_count = 0
         total_steps = 0
         consecutive_failed_reseeds = 0
+        end_reason = None
+        started_at = time.time()
 
         # Tabu: bounded recent-position list (reference update_old_list_neighs).
         old_pos_list: List[bytes] = [cur_z.tobytes()]
@@ -251,6 +254,7 @@ class SimulatedAnnealingSearch(SearchMethod):
                     f"in shard {shard_id} — terminating early.",
                     Logger.Levels.warning,
                 ).log()
+                end_reason = "total_steps"
                 break
             est = sa_estimator(max_iters - iter_left, total_steps, T0=T0, Tmin=Tmin,
                                max_iters=max_iters, max_total_steps=max_total_steps,
@@ -291,6 +295,7 @@ class SimulatedAnnealingSearch(SearchMethod):
                                 f"in shard {shard_id} — terminating early.",
                                 Logger.Levels.debug,
                             ).log()
+                            end_reason = "failed_reseeds"
                             break
                 else:
                     cur_z = cur_z * 2  # no GCD reduce
@@ -371,10 +376,19 @@ class SimulatedAnnealingSearch(SearchMethod):
                                 f"in shard {shard_id} — terminating early.",
                                 Logger.Levels.debug,
                             ).log()
+                            end_reason = "failed_reseeds"
                             break
                 else:
                     cur_z = cur_z * 2  # no GCD reduce
                     doubling_count += 1
+
+        if end_reason is None:
+            end_reason = "accepted_moves" if iter_left <= 0 else "temperature"
+        monitoring.event("sa_end", f"annealing ended ({end_reason}) after {total_steps} steps",
+                         constant=constant.name, reason=end_reason, steps=total_steps,
+                         accepted=max_iters - iter_left, T=float(T), best=float(best_delta),
+                         elapsed=time.time() - started_at)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -455,9 +469,13 @@ class SimulatedAnnealingSearch(SearchMethod):
         :return: New flatland seed vector, or ``None`` if no identifying trajectory found.
         """
         try:
-            return self._select_seed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
+            fresh = self._select_seed(geom, eval_ctx, shard_id, constant, max_traj_len, traj_norm_name)
         except NoInitialIdentification:
-            return None
+            fresh = None
+        monitoring.event("sa_reseed", "annealing " + ("reseeded" if fresh is not None else "found no new seed"),
+                         "INFO" if fresh is not None else "WARNING", ok=fresh is not None,
+                         constant=constant.name)
+        return fresh
 
 
 # ---------------------------------------------------------------------------

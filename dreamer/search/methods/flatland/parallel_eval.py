@@ -373,6 +373,7 @@ def evaluate_batch(
                 results[i] = cached
                 if stats is not None:
                     stats.scored(tid)
+                    stats.note_score(cached[0])
                 continue
         if tid in handler_cache:  # walk cached — cheap recompute, no new walk
             results[i] = evaluate_in_flatland(z, **eval_ctx)
@@ -452,6 +453,8 @@ def evaluate_batch(
             scored = score_record(record, objective_name)
             if scored is None:
                 scored = (float("-inf"), bool(dto.identified))
+            elif stats is not None:
+                stats.note_score(scored[0])
             for i in idxs:
                 results[i] = scored
 

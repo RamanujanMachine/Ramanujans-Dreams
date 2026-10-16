@@ -35,6 +35,7 @@ arguments — see :mod:`dreamer.utils.rand`).
 from __future__ import annotations
 
 import multiprocessing as mp
+import time
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -77,7 +78,7 @@ def _guarded_init(initializer, initargs, monitor_dir=None):
 
 
 def _measured_call(fn, args):
-    """Run ``fn(*args)`` in a worker and report the worker's peak RSS (MB).
+    """Run ``fn(*args)`` in a worker; return ``(value, peak RSS in MB, seconds)``.
 
     The peak (``ru_maxrss``: KB on Linux, bytes on macOS) is what sizing
     decisions need — a walk's memory is mostly released after the task, so the
@@ -87,10 +88,12 @@ def _measured_call(fn, args):
     import sys as _sys
     if _INIT_ERROR is not None:
         raise WorkerInitError(f"worker initializer failed:\n{_INIT_ERROR}")
+    started = time.perf_counter()
     value = fn(*args)
+    seconds = time.perf_counter() - started
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     peak_mb = peak / (2**20 if _sys.platform == "darwin" else 1024)
-    return value, peak_mb
+    return value, peak_mb, seconds
 
 
 class WorkerDeathError(RuntimeError):
@@ -179,6 +182,10 @@ class ResilientPool:
             self._processes = slow
         self.peak_worker_mb = 0.0
         self.completed = 0
+        self.task_seconds = 0.0       # run time of all finished tasks (worker side)
+        self.longest_s = 0.0
+        self._slow_count = 0
+        self._slow_event_at = 0.0
         self._initializer = initializer
         self._initargs = initargs
         self._on_death = on_death
@@ -213,8 +220,33 @@ class ResilientPool:
             "in_flight": self.in_flight(),
             "completed": self.completed, "deaths": self.deaths, "shrinks": self.shrinks,
             "grows": self.grows, "peak_mb": round(self.peak_worker_mb, 1),
+            "task_seconds": round(self.task_seconds, 1), "longest_s": round(self.longest_s, 1),
             "pids": list(procs), "closed": self._closed,
         }
+
+    def _note_duration(self, task: "_Task", seconds: float) -> None:
+        """Account a finished task's run time; a very long one leaves a ``slow_task`` event
+        (at most one per minute per pool — the count in between rides on the next one)."""
+        self.task_seconds += seconds
+        self.longest_s = max(self.longest_s, seconds)
+        from dreamer.configs import config
+        limit = float(getattr(config.monitor, "SLOW_TASK_SECONDS", 0) or 0)
+        if limit <= 0 or seconds < limit:
+            return
+        self._slow_count += 1
+        now = time.time()
+        if now - self._slow_event_at < 60:
+            return
+        self._slow_event_at = now
+        from dreamer.utils import monitoring
+        monitoring.event(
+            "slow_task",
+            f"[{self._name}] task {task.seq} ran {seconds:.0f}s "
+            f"({self._slow_count} task(s) over {limit:.0f}s so far)",
+            "WARNING", pool=self._name, task=task.seq, seconds=seconds,
+            fn=getattr(task.fn, "__name__", str(task.fn)), slow_total=self._slow_count,
+            mean_s=self.task_seconds / max(1, self.completed),
+        )
 
     def in_flight(self) -> int:
         """Tasks submitted and not yet finished (running or queued)."""
@@ -449,10 +481,11 @@ class ResilientPool:
         """Block until *task* has a result, recovering from dead workers."""
         while not task.done:
             try:
-                value, peak_mb = task.future.result(timeout=timeout)
+                value, peak_mb, seconds = task.future.result(timeout=timeout)
                 task.result = value
                 task.done = True
                 self.completed += 1
+                self._note_duration(task, seconds)
                 self._completed_since_resize += 1
                 self.peak_worker_mb = max(self.peak_worker_mb, peak_mb)
             except BrokenProcessPool:
@@ -539,6 +572,8 @@ class ResilientPool:
                 f"[{self._name}] closed after {self.completed} task(s), {self.deaths} worker death(s)",
                 Logger.Levels.debug, pool=self._name, completed=self.completed, deaths=self.deaths,
                 shrinks=self.shrinks, grows=self.grows, peak_mb=round(self.peak_worker_mb, 1),
+                task_seconds=round(self.task_seconds, 1), longest_s=round(self.longest_s, 1),
+                slow_tasks=self._slow_count,
             )
 
     def close(self) -> None:
