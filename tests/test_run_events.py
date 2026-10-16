@@ -12,6 +12,8 @@
 
 import json
 import os
+import shutil
+import subprocess
 import time
 
 import pytest
@@ -51,7 +53,23 @@ class TestEnvironment:
         assert env["machine"]["cpu_count"] and env["machine"]["python"]
         assert isinstance(env["packages"], dict)
         assert env["config"]["system"]["A"] == 1 and isinstance(env["config"]["system"]["B"], str)
-        assert "commit" in env["code"]            # the repo under test is a git checkout
+        assert isinstance(env["code"], dict)      # commit info needs git; see test_code_version_*
+
+    def test_code_version_reads_a_git_repo(self, tmp_path):
+        """Hermetic: a throw-away repo, so it does not depend on how the tests are run
+        (installed package, CI checkout, git refusing a foreign-owned directory)."""
+        if shutil.which("git") is None:
+            pytest.skip("git not installed")
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run([*git, "init", "-q"], cwd=tmp_path, check=True)
+        (tmp_path / "f").write_text("x")
+        subprocess.run([*git, "add", "f"], cwd=tmp_path, check=True)
+        subprocess.run([*git, "commit", "-qm", "c"], cwd=tmp_path, check=True)
+        info = run_environment.code_version(str(tmp_path))
+        assert len(info["commit"]) == 40 and info["dirty"] is False
+
+    def test_code_version_outside_a_repo_is_empty(self, tmp_path):
+        assert run_environment.code_version(str(tmp_path)) == {}
 
     def test_collect_never_raises(self, monkeypatch):
         monkeypatch.setattr(run_environment, "code_version", lambda *a: 1 / 0)

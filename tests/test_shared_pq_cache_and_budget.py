@@ -18,6 +18,7 @@ import multiprocessing as mp
 
 from dreamer.configs import config
 from dreamer.utils.storage.frequency_list import FrequencyList
+from dreamer.utils import allocation
 from dreamer.utils import multi_processing as mpc
 from dreamer.search.methods.flatland.parallel_eval import resolve_eval_workers
 
@@ -107,15 +108,23 @@ class TestSearchWorkerBudget:
         monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ("eigenvalues",))
         assert mpc.search_worker_budget() == 10
 
+    @staticmethod
+    def _bare_machine(monkeypatch, cpus):
+        """No scheduler, no affinity mask (Linux has one, macOS does not), ``cpus`` cores."""
+        for var in ("PBS_JOBID", "SLURM_JOB_ID"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(allocation, "affinity_cores", lambda: None)
+        monkeypatch.setattr(allocation.os, "cpu_count", lambda: cpus)
+
     def test_budget_floored_at_one(self, monkeypatch):
         monkeypatch.setattr(mpc.sys_config, "TOTAL_CORES", 0)
-        monkeypatch.setattr(mpc.os, "cpu_count", lambda: None)
+        self._bare_machine(monkeypatch, None)
         assert mpc.search_worker_budget() == 1
 
     def test_none_total_falls_back_to_cpu_count(self, monkeypatch):
         monkeypatch.setattr(mpc.sys_config, "TOTAL_CORES", None)
         monkeypatch.setattr(config.search, "TIER2_ATTRIBUTES", ())
-        monkeypatch.setattr(mpc.os, "cpu_count", lambda: 7)
+        self._bare_machine(monkeypatch, 7)
         assert mpc.search_worker_budget() == 7
 
 

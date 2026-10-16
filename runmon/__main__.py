@@ -72,8 +72,9 @@ def main(argv=None) -> int:
 
     args = parser.parse_args(argv)
     if args.cmd == "watch":
+        source = _watch_source(args)        # argument errors first: they need no `rich`
         from runmon.client.tui import watch
-        watch(_watch_source(args), args.refresh)
+        watch(source, args.refresh)
         return 0
 
     if args.cmd == "web":
