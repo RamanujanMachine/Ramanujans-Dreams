@@ -15,7 +15,12 @@ stall check            10 s        warn when no progress for ``stall_s``
 walltime check         5 s         warnings before the deadline; flush in the grace period
 status file            5 s         atomically replace ``status.json`` (full snapshot)
 heartbeat              30 s        compact snapshot into ``events.jsonl`` (for replay)
+timeline               60 s        mean / max of the 1 s samples into ``timeline.jsonl``
 =====================  ==========  ===============================================
+
+Besides the periodic jobs the hub raises ``memory_pressure`` / ``memory_recovered``
+(machine or allocation memory nearly used up) and ``disk_low`` / ``disk_recovered``
+(free space where the run directory lives).
 
 Code reports through the hub with :meth:`Hub.publish` / :meth:`Hub.event` (any
 thread) and the progress tree (:attr:`Hub.tree`).  Ordinary events are queued
@@ -48,6 +53,7 @@ from runmon import walltime as wt
 from runmon.events import EventWriter, FileTailer, level_value, make_event
 from runmon.progress import ProgressTree
 from runmon.sampler import ProcessSampler
+from runmon.timeline import TIMELINE_FILE, TimelineAggregator, disk_free_mb
 from runmon.watchdog import DeadlineWatcher
 
 STATUS_FILE = "status.json"
@@ -79,6 +85,14 @@ class HubConfig:
     worker_tail_s: float = 0.5
     status_s: float = 5.0
     heartbeat_s: float = 30.0
+    #: One mean/max summary of the 1 s samples per this many seconds (``timeline.jsonl``).
+    timeline_s: float = 60.0
+    #: ``memory_pressure`` when machine-available memory is below this fraction of the
+    #: machine's memory, or the run uses more than ``mem_high_frac`` of its allocation.
+    mem_low_frac: float = 0.08
+    mem_high_frac: float = 0.92
+    #: ``disk_low`` when the run directory's filesystem has less free space (MB).
+    disk_low_mb: float = 2048.0
     stall_s: float = 1800.0
     walltime_check_s: float = 5.0
     walltime_refresh_s: float = 600.0
@@ -144,6 +158,10 @@ class Hub:
         self.sampler = ProcessSampler(cores=self.cfg.cores, memory_mb=self.cfg.memory_mb,
                                       memory_probe=self.cfg.memory_probe)
         self.writer = EventWriter(os.path.join(self.run_dir, EVENTS_FILE))
+        self.timeline_writer = EventWriter(os.path.join(self.run_dir, TIMELINE_FILE), lazy=True)
+        self.timeline = TimelineAggregator()
+        self._mem_alerted = False
+        self._disk_alerted = False
         self.ring: Deque[Dict[str, Any]] = deque(maxlen=self.cfg.events_ring)
         self._pending: Deque[Dict[str, Any]] = deque()
         self._pools: Dict[int, "weakref.ref"] = {}
@@ -278,6 +296,7 @@ class Hub:
             [c.walltime_check_s, now, self._check_walltime],
             [c.status_s, now + c.status_s, self.write_status],
             [c.heartbeat_s, now + c.heartbeat_s, self._heartbeat],
+            [c.timeline_s, now + c.timeline_s, self._timeline],
         ]
 
     def _loop(self) -> None:
@@ -377,7 +396,10 @@ class Hub:
                              "requested": sum(int(p.get("requested") or 0) for p in open_pools),
                              "pools": len(open_pools)}
         self.last_sample = s
+        self.timeline.add(s)
+        self.timeline.add_pools(pools)
         t = s["totals"]
+        self._check_memory(s)
         over = []
         if t.get("over_cpu"):
             over.append(f"CPU {t['cpu_percent']:.0f}% > {100 * s['allocation']['cores']}% allocated")
@@ -391,6 +413,50 @@ class Hub:
                            "WARNING", **t)
         else:
             self.alerts.pop("over_allocation", None)
+
+    def _check_memory(self, s: Dict[str, Any]) -> None:
+        """``memory_pressure`` / ``memory_recovered`` with hysteresis (clears at 1.5x the limit)."""
+        machine = s.get("machine") or {}
+        total, avail = machine.get("mem_total_mb"), machine.get("mem_available_mb")
+        alloc = (s.get("allocation") or {}).get("memory_mb")
+        rss = (s.get("totals") or {}).get("rss_mb") or 0.0
+        low_machine = bool(total) and avail is not None and avail < self.cfg.mem_low_frac * total
+        high_alloc = bool(alloc) and rss > self.cfg.mem_high_frac * alloc
+        calm = ((not total or avail is None or avail > 1.5 * self.cfg.mem_low_frac * total)
+                and (not alloc or rss < self.cfg.mem_high_frac * alloc * 0.95))
+        if (low_machine or high_alloc) and not self._mem_alerted:
+            self._mem_alerted = True
+            why = []
+            if low_machine:
+                why.append(f"machine has {avail:.0f} MB available of {total:.0f} MB")
+            if high_alloc:
+                why.append(f"run uses {rss:.0f} MB of its {alloc:.0f} MB allocation")
+            self.alerts["memory_pressure"] = "; ".join(why)
+            self.event("memory_pressure", "memory nearly used up: " + "; ".join(why), "WARNING",
+                       rss_mb=rss, available_mb=avail, total_mb=total, allocation_mb=alloc,
+                       biggest=sorted(((p["rss_mb"], p["pid"], p["role"]) for p in s.get("processes") or ()),
+                                      reverse=True)[:3])
+        elif self._mem_alerted and calm:
+            self._mem_alerted = False
+            self.alerts.pop("memory_pressure", None)
+            self.event("memory_recovered", "memory pressure over", rss_mb=rss, available_mb=avail)
+
+    def _timeline(self, final: bool = False) -> None:
+        """Write the mean / max record of the last window; check the disk."""
+        free = disk_free_mb(self.run_dir)
+        if free is not None:
+            if free < self.cfg.disk_low_mb and not self._disk_alerted:
+                self._disk_alerted = True
+                self.alerts["disk_low"] = f"{free:.0f} MB free"
+                self.event("disk_low", f"only {free:.0f} MB free where the run directory lives", "WARNING",
+                           free_mb=free, run_dir=self.run_dir)
+            elif free > 2 * self.cfg.disk_low_mb and self._disk_alerted:
+                self._disk_alerted = False
+                self.alerts.pop("disk_low", None)
+                self.event("disk_recovered", f"{free:.0f} MB free again", free_mb=free)
+        rec = self.timeline.flush(time.time(), stage=self.tree.stage(), disk_free_mb=free)
+        if rec is not None:
+            self.timeline_writer.write(rec)
 
     def _check_stall(self) -> None:
         running = any(r.status == "running" for r in list(self.tree.roots))
@@ -436,7 +502,9 @@ class Hub:
                 except Exception as e:
                     self.event("monitor_error", f"grace callback failed: {e!r}", "WARNING")
             self._drain()
+            self._timeline()                   # the partial window is worth keeping
             self.writer.sync()
+            self.timeline_writer.sync()
             self.write_status()
 
     # ------------------------------------------------------------------
@@ -516,6 +584,10 @@ class Hub:
                    level, reason=reason)
         self._drain()
         try:
+            self._timeline(final=True)
+        except Exception:
+            pass
+        try:
             self.write_status()
         except Exception:
             pass
@@ -525,3 +597,4 @@ class Hub:
             except Exception:
                 pass
         self.writer.close()
+        self.timeline_writer.close()

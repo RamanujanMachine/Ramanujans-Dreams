@@ -81,13 +81,16 @@ def main(argv=None) -> int:
         from runmon.web.server import serve
         source = _watch_source(args)
         run_dir = args.target or "runs/latest"
+        from runmon import timeline as tl
         if args.ssh:
             lines = lambda: qmod._lines_ssh(args.ssh, run_dir)              # noqa: E731
+            tlines = lambda: qmod._lines_ssh(args.ssh, run_dir, filename=tl.TIMELINE_FILE)   # noqa: E731
         elif os.path.isdir(run_dir):
             lines = lambda: qmod._lines_local(run_dir)                      # noqa: E731
+            tlines = lambda: tl.lines_local(run_dir)                        # noqa: E731
         else:
-            lines = None                                                    # host:port only
-        serve(source, lines=lines, port=args.port, open_browser=not args.no_browser)
+            lines = tlines = None                                           # host:port only
+        serve(source, lines=lines, timeline_lines=tlines, port=args.port, open_browser=not args.no_browser)
         return 0
 
     if args.cmd == "query":

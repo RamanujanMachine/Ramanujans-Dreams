@@ -32,6 +32,7 @@ code can report unconditionally.
 from __future__ import annotations
 
 import os
+import time
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Iterator, Optional
 
@@ -110,6 +111,9 @@ def stop(reason: str = "exit") -> None:
     global _hub
     h, _hub = _h(), None
     if h is not None:
+        if reason.startswith("SIG"):
+            h.event("signal_received", f"{reason} received", "WARNING", signal=reason,
+                    task=h.tree.active_path(), uptime_s=time.time() - h.started)
         h.stop(reason)
         _lifecycle.uninstall()
 

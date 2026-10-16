@@ -11,7 +11,8 @@ Endpoints (all GET, read-only):
 ``/``               the page (``index.html``)
 ``/api/snapshot``   the latest snapshot + the source's label / state
 ``/api/stream``     Server-Sent Events: a ``snapshot`` message whenever it changes
-``/api/history``    CPU / memory totals over the whole run (from heartbeats)
+``/api/history``    CPU / memory over the whole run (from ``timeline.jsonl``, one mean /
+                    max record per minute; heartbeats for runs recorded without one)
 ``/api/query``      search the event log (``kind``, ``level``, ``grep``, ``since``,
                     ``task``, ``limit``) — see :mod:`runmon.query`
 
@@ -34,6 +35,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 from runmon import query as q
+from runmon import timeline
 
 LOOPBACK = {"127.0.0.1", "localhost", "[::1]", "::1"}
 
@@ -50,11 +52,14 @@ class WebApp:
 
     :param source: A client source (``snapshot()``, ``label``, ``state``, ``close()``).
     :param lines: Reader of the run's event log (for history and search), or ``None``.
+    :param timeline_lines: Reader of the run's ``timeline.jsonl`` (CPU / memory history), or ``None``.
     """
 
-    def __init__(self, source, lines: Optional[LineReader] = None):
+    def __init__(self, source, lines: Optional[LineReader] = None,
+                 timeline_lines: Optional[LineReader] = None):
         self.source = source
         self.lines = lines
+        self.timeline_lines = timeline_lines
         self._lock = threading.Lock()
 
     def snapshot(self) -> Dict[str, Any]:
@@ -63,13 +68,26 @@ class WebApp:
         return {"source": self.source.label, "state": self.source.state, "snapshot": snap}
 
     def history(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Totals from the run's heartbeats (one every ~30 s) and the stage starts /
-        ends (timeline markers), oldest first — one pass over the event log."""
-        if self.lines is None:
+        """CPU / memory over the run, oldest first, plus the stage starts / ends.
+
+        Points come from the timeline (mean and max per window); a run without
+        one falls back to the heartbeats (one snapshot every ~30 s).
+        """
+        if self.lines is None and self.timeline_lines is None:
             return {"history": [], "stages": []}
-        out, stages = [], []
+        out, stages, beats = [], [], []
+        if self.timeline_lines is not None:
+            try:
+                for r in timeline.parse_lines(self.timeline_lines()):
+                    out.append({"ts": r.get("ts"), "cpu_percent": r.get("cpu"), "rss_mb": r.get("rss_mb"),
+                                "cpu_max": r.get("cpu_max"), "rss_max": r.get("rss_max"),
+                                "allocation": {"cores": r.get("cores"), "memory_mb": r.get("memory_mb")},
+                                "pool_workers": r.get("workers")})
+            except OSError:
+                pass
         try:
-            for e in q.iter_matching(self.lines(), kinds=["heartbeat", "stage_start", "stage_end"]):
+            kinds = ["stage_start", "stage_end"] + ([] if out else ["heartbeat"])
+            for e in q.iter_matching(self.lines() if self.lines else [], kinds=kinds):
                 f = e.get("f") or {}
                 if e.get("kind") != "heartbeat":
                     stages.append({"ts": e.get("ts"), "kind": e.get("kind"), "stage": f.get("stage"),
@@ -77,12 +95,12 @@ class WebApp:
                     continue
                 t = f.get("totals") or {}
                 if t:
-                    out.append({"ts": e.get("ts"), "cpu_percent": t.get("cpu_percent"),
-                                "rss_mb": t.get("rss_mb"), "allocation": f.get("allocation"),
-                                "pool_workers": (f.get("pool_workers") or {}).get("workers")})
+                    beats.append({"ts": e.get("ts"), "cpu_percent": t.get("cpu_percent"),
+                                  "rss_mb": t.get("rss_mb"), "allocation": f.get("allocation"),
+                                  "pool_workers": (f.get("pool_workers") or {}).get("workers")})
         except OSError:
             pass
-        return {"history": out, "stages": stages}
+        return {"history": out or beats, "stages": stages}
 
     def query(self, params: Dict[str, str]) -> Dict[str, Any]:
         """Search the event log with the ``runmon query`` filters."""
@@ -182,10 +200,10 @@ def _handler(app: WebApp):
     return Handler
 
 
-def serve(source, *, lines: Optional[LineReader] = None, host: str = "127.0.0.1", port: int = 8765,
-          open_browser: bool = True) -> None:
+def serve(source, *, lines: Optional[LineReader] = None, timeline_lines: Optional[LineReader] = None,
+          host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -> None:
     """Serve the page until Ctrl-C (tries the next ports if ``port`` is taken)."""
-    app = WebApp(source, lines)
+    app = WebApp(source, lines, timeline_lines)
     httpd = None
     for candidate in [port + i for i in range(20)] + [0]:
         try:
@@ -209,8 +227,9 @@ def serve(source, *, lines: Optional[LineReader] = None, host: str = "127.0.0.1"
         source.close()
 
 
-def make_server(source, lines: Optional[LineReader] = None, host: str = "127.0.0.1", port: int = 0):
+def make_server(source, lines: Optional[LineReader] = None, host: str = "127.0.0.1", port: int = 0,
+                timeline_lines: Optional[LineReader] = None):
     """A server object for tests / embedding (call ``serve_forever`` yourself)."""
-    httpd = ThreadingHTTPServer((host, port), _handler(WebApp(source, lines)))
+    httpd = ThreadingHTTPServer((host, port), _handler(WebApp(source, lines, timeline_lines)))
     httpd.daemon_threads = True
     return httpd
