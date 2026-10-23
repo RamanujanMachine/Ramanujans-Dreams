@@ -187,12 +187,14 @@ directory under `runs/` (`config.monitor.RUN_DIR`; `runs/latest` is the newest),
 and you watch it from another terminal:
 
 ```bash
-runmon watch runs/latest                # stage, progress, CPU/memory per process, pools, events
-runmon watch ~/work/myrun/runs/latest --ssh user@login.cluster   # a run inside a cluster job
-runmon web runs/latest                  # the same in your browser (http://127.0.0.1:8765/)
-runmon query runs/latest --level WARNING --since 2h               # search the event log
-runmon demo                             # try the monitor on a simulated run
+python runmon watch runs/latest                                         # stage, progress, CPU/memory per process, pools, events
+python runmon watch ~/work/myrun/runs/latest --ssh user@login.cluster   # a run inside a cluster job
+python runmon web runs/latest                                           # the same in your browser (http://127.0.0.1:8765/)
+python runmon query runs/latest --level WARNING --since 2h              # search the event log
+python runmon demo                                                      # try the monitor on a simulated run
 ```
+
+**IMPORTANT:** To run these commands you must **clone** a separate repository contatining the monitor https://github.com/RamanujanMachine/RD-RunMon.git
 
 The run directory holds `events.jsonl` (one JSON event per line: pool and worker
 events, watchdog warnings, failures, walltime warnings; search it with `grep`/`jq`)
