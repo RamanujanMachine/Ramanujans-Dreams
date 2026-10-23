@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["dreamer*", "runmon*"]
+include = ["dreamer*"]
 
 [project]
 name = "ramanujans-dreams"
@@ -38,25 +38,19 @@ dependencies = [
     "psycopg[binary]",
     "cysignals",
     "fpylll",
-    # runmon: per-process CPU / memory sampling for the live run monitor
-    "psutil"
+    # live run monitor: separate repo, so it can be installed without the full RD
+    "runmon @ git+https://github.com/RamanujanMachine/RD-RunMon.git"
 ]
-
-[tool.setuptools.package-data]
-runmon = ["web/*.html"]
-
-[project.scripts]
-runmon = "runmon.__main__:main"
 
 [project.optional-dependencies]
 # Terminal client for the live run monitor (`runmon watch`); not needed by runs.
-monitor = ["rich"]
+monitor = ["runmon[monitor]"]
 dev = [
     "pytest>=8.2.0",
     "pytest-cov>=4.0.0",
     "nbclient>=0.9.0",  # used by data_utils/generate_system_overview_notebook.py to execute the notebook
     "ipykernel>=6.0.0",  # kernel nbclient drives when executing the notebook
-    "rich"  # terminal view tests (runmon watch); same as the `monitor` extra
+    "runmon[monitor]"  # terminal view tests (runmon watch)
 ]
 
 [tool.pytest.ini_options]
