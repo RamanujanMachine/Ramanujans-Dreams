@@ -11,6 +11,7 @@ dependencies:
   - pip:
       - git+https://github.com/RamanujanMachine/LIReC.git
       - git+https://github.com/RamanujanMachine/ramanujantools.git
+      - git+https://github.com/RamanujanMachine/RD-RunMon.git#egg=runmon[monitor]
       - fpylll
       - matplotlib
       - mip
@@ -20,9 +21,7 @@ dependencies:
       - numpy
       - pandas
       - peewee
-      - psutil
       - pulp
-      - rich
       - scipy
       - sympy
       - tqdm
